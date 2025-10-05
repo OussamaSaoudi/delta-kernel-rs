@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::clone::Clone;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
@@ -80,7 +81,7 @@ impl ScanLogReplayProcessor {
 /// pair, we should ignore all subsequent (older) actions for that same (path, dvId) pair. If the
 /// first action for a given file is a remove, then that file does not show up in the result at all.
 pub struct AddRemoveDedupVisitor<'seen> {
-    deduplicator: FileActionDeduplicator<'seen>,
+    deduplicator: RefCell<FileActionDeduplicator<'seen>>,
     selection_vector: Vec<bool>,
     logical_schema: SchemaRef,
     transform_spec: Option<Arc<TransformSpec>>,
@@ -113,7 +114,8 @@ impl AddRemoveDedupVisitor<'_> {
                 Self::REMOVE_PATH_INDEX,
                 Self::ADD_DV_START_INDEX,
                 Self::REMOVE_DV_START_INDEX,
-            ),
+            )
+            .into(),
             selection_vector,
             logical_schema,
             transform_spec,
@@ -218,21 +220,17 @@ impl AddRemoveDedupVisitor<'_> {
 
     /// True if this row contains an Add action that should survive log replay. Skip it if the row
     /// is not an Add action, or the file has already been seen previously.
-    pub fn is_valid_add<'a>(
-        &mut self,
-        i: usize,
-        getters: &[&'a dyn GetData<'a>],
-    ) -> DeltaResult<bool> {
+    pub fn is_valid_add<'a>(&self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
         // When processing file actions, we extract path and deletion vector information based on action type:
         // - For Add actions: path is at index 0, followed by DV fields at indexes 2-4
         // - For Remove actions (in log batches only): path is at index 5, followed by DV fields at indexes 6-8
         // The file extraction logic selects the appropriate indexes based on whether we found a valid path.
         // Remove getters are not included when visiting a non-log batch (checkpoint batch), so do
         // not try to extract remove actions in that case.
-        let Some((file_key, is_add)) = self.deduplicator.extract_file_action(
+        let Some((file_key, is_add)) = self.deduplicator.borrow().extract_file_action(
             i,
             getters,
-            !self.deduplicator.is_log_batch(), // skip_removes. true if this is a checkpoint batch
+            !self.deduplicator.borrow_mut().is_log_batch(), // skip_removes. true if this is a checkpoint batch
         )?
         else {
             return Ok(false);
@@ -258,18 +256,13 @@ impl AddRemoveDedupVisitor<'_> {
         };
 
         // Check both adds and removes (skipping already-seen), but only transform and return adds
-        if self.deduplicator.check_and_record_seen(file_key) || !is_add {
+        if self
+            .deduplicator
+            .borrow_mut()
+            .check_and_record_seen(file_key)
+            || !is_add
+        {
             return Ok(false);
-        }
-        let transform = self
-            .transform_spec
-            .as_ref()
-            .map(|transform| self.get_transform_expr(transform, partition_values))
-            .transpose()?;
-        if transform.is_some() {
-            // fill in any needed `None`s for previous rows
-            self.row_transform_exprs.resize_with(i, Default::default);
-            self.row_transform_exprs.push(transform);
         }
         Ok(true)
     }
@@ -297,7 +290,7 @@ impl RowVisitor for AddRemoveDedupVisitor<'_> {
             (names, types).into()
         });
         let (names, types) = NAMES_AND_TYPES.as_ref();
-        if self.deduplicator.is_log_batch() {
+        if self.deduplicator.borrow().is_log_batch() {
             (names, types)
         } else {
             // All checkpoint actions are already reconciled and Remove actions in checkpoint files
@@ -307,7 +300,7 @@ impl RowVisitor for AddRemoveDedupVisitor<'_> {
     }
 
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        let is_log_batch = self.deduplicator.is_log_batch();
+        let is_log_batch = self.deduplicator.borrow().is_log_batch();
         let expected_getters = if is_log_batch { 9 } else { 5 };
         require!(
             getters.len() == expected_getters,

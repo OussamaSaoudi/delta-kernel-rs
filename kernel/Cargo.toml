@@ -71,6 +71,8 @@ async-stream = "0.3.6"
 par-stream = { version = "0.10.2", features = ["runtime-tokio"] }
 parallel-stream = "2.1.3"
 num_cpus = "1.17.0"
+dashmap = "6.1.0"
+num-format = "0.4.4"
 
 # arrow 55
 [dependencies.arrow_55]

@@ -59,7 +59,7 @@ impl<E: TaskExecutor> AsyncEngine for DefaultEngine<E> {
 
         let arrow_schema = Arc::new(schema.as_ref().try_into_arrow()?);
         let file_opener = Arc::new(JsonOpener::new(
-            1024,
+            10240,
             arrow_schema,
             self.object_store.clone(),
         ));
@@ -88,7 +88,7 @@ impl<E: TaskExecutor> AsyncEngine for DefaultEngine<E> {
         }
 
         let file_opener = Box::new(ParquetOpener::new(
-            1024,
+            100240,
             schema.clone(),
             None,
             self.object_store.clone(),
@@ -284,16 +284,9 @@ impl AsyncPlanExecutor {
         let stream_a = self.execute(*node.a).await?;
         let stream_b = self.execute(*node.b).await?;
 
-        // NOTE: I buffer the right hand side for testing only
-        // Buffer the right-hand side stream
-        let buffer_size = 10; // Adjust based on your needs
-        let buffered_stream_b = stream_b.ready_chunks(buffer_size);
-
-        // Flatten the buffered chunks back into individual items
-        let stream_b_flattened = buffered_stream_b.flat_map(|chunk| stream::iter(chunk));
 
         // Chain the streams
-        Ok(Box::pin(stream_a.chain(stream_b_flattened)) as BoxStream<_>)
+        Ok(Box::pin(stream_a.chain(stream_b)) as BoxStream<_>)
     }
 }
 

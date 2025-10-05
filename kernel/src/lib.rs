@@ -85,6 +85,7 @@ use url::Url;
 use self::schema::{DataType, SchemaRef};
 
 pub mod actions;
+#[cfg(feature = "default-engine-base")]
 pub mod async_df;
 pub mod checkpoint;
 pub mod engine_data;

@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, LazyLock, Mutex, RwLock},
 };
 
+use dashmap::DashSet;
 use itertools::Itertools;
 
 use crate::{
@@ -24,7 +25,7 @@ use crate::{
 };
 
 pub trait RowFilter: RowVisitor + Send + Sync {
-    fn filter_row<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool>;
+    fn filter_row<'a>(&self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool>;
 }
 
 // Could even become a macro:
@@ -55,32 +56,29 @@ pub trait RowFilter: RowVisitor + Send + Sync {
 //   }
 // }
 //
-impl RowFilter for AddRemoveDedupVisitor<'_> {
-    fn filter_row<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
-        // let is_log_batch = self.deduplicator.is_log_batch();
-        // let expected_getters = if is_log_batch { 9 } else { 5 };
-        // require!(
-        //     getters.len() == expected_getters,
-        //     Error::InternalError(format!(
-        //         "Wrong number of AddRemoveDedupVisitor getters: {}",
-        //         getters.len()
-        //     ))
-        // );
-        self.is_valid_add(i, getters)
-    }
-}
+// impl RowFilter for AddRemoveDedupVisitor<'_> {
+//     fn filter_row<'a>(&self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
+//         // let is_log_batch = self.deduplicator.is_log_batch();
+//         // let expected_getters = if is_log_batch { 9 } else { 5 };
+//         // require!(
+//         //     getters.len() == expected_getters,
+//         //     Error::InternalError(format!(
+//         //         "Wrong number of AddRemoveDedupVisitor getters: {}",
+//         //         getters.len()
+//         //     ))
+//         // );
+//         self.is_valid_add(i, getters)
+//     }
+// }
 
 pub struct FilterVisitor {
-    pub filter: Arc<Mutex<dyn RowFilter>>,
+    pub filter: Arc<dyn RowFilter>,
     pub selection_vector: Vec<bool>,
 }
 
 impl RowVisitor for FilterVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-        self.filter
-            .lock()
-            .unwrap()
-            .selected_column_names_and_types()
+        self.filter.selected_column_names_and_types()
     }
 
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
@@ -97,7 +95,7 @@ impl RowVisitor for FilterVisitor {
         for i in 0..row_count {
             if self.selection_vector[i] {
                 // self.selection_vector[i] = self.is_valid_add(i, getters)?;
-                self.selection_vector[i] = self.filter.lock().unwrap().filter_row(i, getters)?;
+                self.selection_vector[i] = self.filter.filter_row(i, getters)?;
             }
         }
         Ok(())
@@ -131,21 +129,14 @@ impl std::fmt::Debug for FilterNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FilterNode")
             .field("child", &self.child)
-            .field(
-                "filter",
-                &self
-                    .filter
-                    .lock()
-                    .unwrap()
-                    .selected_column_names_and_types(),
-            )
+            .field("filter", &self.filter.selected_column_names_and_types())
             .field("column_names", &self.column_names)
             .finish()
     }
 }
 pub struct FilterNode {
     pub child: Box<LogicalPlanNode>,
-    pub filter: Arc<Mutex<dyn RowFilter>>,
+    pub filter: Arc<dyn RowFilter>,
     pub column_names: &'static [ColumnName],
     pub ordered: bool,
 }
@@ -338,7 +329,7 @@ impl LogicalPlanNode {
         let column_names = filter.selected_column_names_and_types().0;
         Ok(Self::Filter(FilterNode {
             child: Box::new(self),
-            filter: Arc::new(Mutex::new(filter)),
+            filter: Arc::new(filter),
             column_names,
             ordered: false,
         }))
@@ -348,7 +339,7 @@ impl LogicalPlanNode {
         let column_names = filter.selected_column_names_and_types().0;
         Ok(Self::Filter(FilterNode {
             child: Box::new(self),
-            filter: Arc::new(Mutex::new(filter)),
+            filter: Arc::new(filter),
             column_names,
             ordered: true,
         }))
@@ -400,7 +391,7 @@ impl Snapshot {
         let parquet_scan =
             LogicalPlanNode::scan_parquet(parquet_paths, COMMIT_READ_SCHEMA.clone())?;
 
-        let set = Arc::new(RwLock::new(HashSet::new()));
+        let set = Arc::new(DashSet::new());
         let x = SharedAddRemoveDedupFilter::new(set.clone(), json_scan.schema(), true);
         let y = SharedAddRemoveDedupFilter::new(set, parquet_scan.schema(), false);
         json_scan.filter_ordered(x)?.union(parquet_scan.filter(y)?)
@@ -412,7 +403,7 @@ pub struct SharedFileActionDeduplicator {
     /// A set of (data file path, dv_unique_id) pairs that have been seen thus
     /// far in the log for deduplication. This is a mutable reference to the set
     /// of seen file keys that persists across multiple log batches.
-    seen_file_keys: Arc<RwLock<HashSet<FileActionKey>>>,
+    seen_file_keys: Arc<DashSet<FileActionKey>>,
     // TODO: Consider renaming to `is_commit_batch`, `deduplicate_batch`, or `save_batch`
     // to better reflect its role in deduplication logic.
     /// Whether we're processing a log batch (as opposed to a checkpoint)
@@ -429,7 +420,7 @@ pub struct SharedFileActionDeduplicator {
 
 impl SharedFileActionDeduplicator {
     pub(crate) fn new(
-        seen_file_keys: Arc<RwLock<HashSet<FileActionKey>>>,
+        seen_file_keys: Arc<DashSet<FileActionKey>>,
         is_log_batch: bool,
         add_path_index: usize,
         remove_path_index: usize,
@@ -450,12 +441,12 @@ impl SharedFileActionDeduplicator {
     /// should be ignored). If not already seen, register it so we can recognize future duplicates.
     /// Returns `true` if we have seen the file and should ignore it, `false` if we have not seen it
     /// and should process it.
-    pub(crate) fn check_and_record_seen(&mut self, key: FileActionKey) -> bool {
+    pub(crate) fn check_and_record_seen(&self, key: FileActionKey) -> bool {
         // Note: each (add.path + add.dv_unique_id()) pair has a
         // unique Add + Remove pair in the log. For example:
         // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
 
-        if self.seen_file_keys.read().unwrap().contains(&key) {
+        if self.seen_file_keys.contains(&key) {
             // println!(
             //     "Ignoring duplicate ({}, {:?}) in scan, is log {}",
             //     key.path, key.dv_unique_id, self.is_log_batch
@@ -470,7 +461,7 @@ impl SharedFileActionDeduplicator {
                 // Remember file actions from this batch so we can ignore duplicates as we process
                 // batches from older commit and/or checkpoint files. We don't track checkpoint
                 // batches because they are already the oldest actions and never replace anything.
-                self.seen_file_keys.write().unwrap().insert(key);
+                self.seen_file_keys.insert(key);
             }
             false
         }
@@ -555,10 +546,11 @@ impl SharedFileActionDeduplicator {
 }
 
 impl RowFilter for SharedAddRemoveDedupFilter {
-    fn filter_row<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
-        let x = self.is_valid_add(i, getters)?;
-        // println!(" is valid is {x}");
-        Ok(x)
+    fn filter_row<'a>(&self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
+        // FIXME: Put the filter back
+        // let x = self.is_valid_add(i, getters)?;
+        // println!(" is valid is {x}")
+        Ok(true)
     }
 }
 pub struct SharedAddRemoveDedupFilter {
@@ -576,7 +568,7 @@ impl SharedAddRemoveDedupFilter {
     const REMOVE_DV_START_INDEX: usize = 6; // Start position of remove deletion vector columns
 
     pub fn new(
-        seen: Arc<RwLock<HashSet<FileActionKey>>>,
+        seen: Arc<DashSet<FileActionKey>>,
         logical_schema: SchemaRef,
         is_log_batch: bool,
     ) -> SharedAddRemoveDedupFilter {
@@ -595,11 +587,7 @@ impl SharedAddRemoveDedupFilter {
 
     /// True if this row contains an Add action that should survive log replay. Skip it if the row
     /// is not an Add action, or the file has already been seen previously.
-    pub fn is_valid_add<'a>(
-        &mut self,
-        i: usize,
-        getters: &[&'a dyn GetData<'a>],
-    ) -> DeltaResult<bool> {
+    pub fn is_valid_add<'a>(&self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
         // When processing file actions, we extract path and deletion vector information based on action type:
         // - For Add actions: path is at index 0, followed by DV fields at indexes 2-4
         // - For Remove actions (in log batches only): path is at index 5, followed by DV fields at indexes 6-8
