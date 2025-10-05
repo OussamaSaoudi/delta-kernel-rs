@@ -1,0 +1,7 @@
+{
+  "type": "read_metadata",
+  "table_root": "file:///Users/oussama.saoudi/pyspark_playground/test_2000_large_commits",
+  "snapshot_version": 1000,
+  "expected_scan_metadata": "path_to_metadata.parquet",
+  "predicate": "commit_hash = '4bc8c5b8418c1b59a0705594d9569d60'"
+}

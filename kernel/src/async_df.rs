@@ -5,9 +5,8 @@ use std::sync::Arc;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use futures::{future::Either, stream, Stream, StreamExt, TryStreamExt};
-use std::pin::Pin;
 use par_stream::{IndexStreamExt as _, ParParamsConfig, ParStreamExt as _};
-
+use std::pin::Pin;
 
 use crate::{
     engine::{
@@ -34,7 +33,7 @@ use crate::{
 type BoxStream<T> = std::pin::Pin<Box<dyn Stream<Item = T> + Send>>;
 
 #[async_trait]
-trait AsyncEngine: Engine {
+pub trait AsyncEngine: Engine {
     async fn read_json_files_async(
         &self,
         json: Vec<FileMeta>,
@@ -125,19 +124,19 @@ impl<E: TaskExecutor> DefaultEngine<E> {
 /////////////////////////
 
 // Async executor implementation
-struct AsyncPlanExecutor {
+pub struct AsyncPlanExecutor {
     engine: Arc<dyn AsyncEngine>,
 }
 
 impl AsyncPlanExecutor {
-    fn new(engine: Arc<dyn AsyncEngine>) -> Self {
+    pub fn new(engine: Arc<dyn AsyncEngine>) -> Self {
         Self { engine }
     }
 }
 
 impl AsyncPlanExecutor {
     #[async_recursion]
-    async fn execute(
+    pub async fn execute(
         &self,
         plan: LogicalPlanNode,
     ) -> DeltaResult<BoxStream<DeltaResult<FilteredEngineDataArc>>> {
@@ -190,34 +189,49 @@ impl AsyncPlanExecutor {
             column_names,
             ordered,
         } = node;
-        let child_stream = self.execute(*child).await?;
-        // Apply filter asynchronously to each batch
-        let then_fn = move |x| {
-            println!("executing filtered iter");
 
+        let child_stream = self.execute(*child).await?;
+
+        let then_fn = move |result: DeltaResult<FilteredEngineDataArc>| {
             let filter_clone = filter.clone();
-            async move {
+            let column_names = column_names;
+
+            // Spawn blocking task for CPU work
+            tokio::task::spawn_blocking(move || {
                 let FilteredEngineDataArc {
                     engine_data,
                     selection_vector,
-                } = x?;
+                } = result?;
+
                 let mut visitor = FilterVisitor {
                     filter: filter_clone,
                     selection_vector,
                 };
-                engine_data.visit_rows(node.column_names, &mut visitor)?;
+
+                engine_data.visit_rows(column_names, &mut visitor)?;
+
                 Ok(FilteredEngineDataArc {
                     engine_data,
                     selection_vector: visitor.selection_vector,
                 })
-            }
+            })
         };
 
         let filtered = if ordered {
-            Either::Left(child_stream.then(then_fn))
+            // Sequential processing
+            Either::Left(
+                child_stream
+                    .then(then_fn)
+                    .then(|join_result| async move { join_result.unwrap() }),
+            )
         } else {
-            let params = ParParamsConfig::FixedWorkers { num_workers: 16 }.to_params();
-            Either::Right(child_stream.par_then_unordered(params, then_fn))
+            // Parallel processing - process multiple batches concurrently
+            Either::Right(
+                child_stream
+                    .map(then_fn)
+                    .buffer_unordered(num_cpus::get()) // Process N batches in parallel
+                    .map(|join_result| join_result.unwrap()),
+            )
         };
 
         Ok(Box::pin(filtered) as BoxStream<_>)
@@ -306,7 +320,7 @@ mod async_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_async_scan_plan() -> DeltaResult<()> {
         let path = std::fs::canonicalize(PathBuf::from(
-            "/Users/oussama/projects/code/delta-kernel-rs/acceptance/tests/dat/out/reader_tests/generated/with_checkpoint/delta/"
+            "/Users/oussama.saoudi/pyspark_playground/test_2000_large_commits"
         )).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
 
