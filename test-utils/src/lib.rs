@@ -68,7 +68,7 @@ pub fn actions_to_string_partitioned(actions: Vec<TestAction>) -> String {
     actions_to_string_with_metadata(actions, METADATA_WITH_PARTITION_COLS)
 }
 
-fn actions_to_string_with_metadata(actions: Vec<TestAction>, metadata: &str) -> String {
+pub fn actions_to_string_with_metadata(actions: Vec<TestAction>, metadata: &str) -> String {
     actions
         .into_iter()
         .map(|test_action| match test_action {
@@ -153,6 +153,12 @@ pub fn delta_path_for_version(version: u64, suffix: &str) -> Path {
     Path::from(path.as_str())
 }
 
+pub fn staged_commit_path_for_version(version: u64) -> Path {
+    let uuid = uuid::Uuid::new_v4();
+    let path = format!("_delta_log/_staged_commits/{version:020}.{uuid}.json");
+    Path::from(path.as_str())
+}
+
 /// get an ObjectStore path for a compressed log file, based on the start/end versions
 pub fn compacted_log_path_for_versions(start_version: u64, end_version: u64, suffix: &str) -> Path {
     let path = format!("_delta_log/{start_version:020}.{end_version:020}.compacted.{suffix}");
@@ -168,6 +174,16 @@ pub async fn add_commit(
     let path = delta_path_for_version(version, "json");
     store.put(&path, data.into()).await?;
     Ok(())
+}
+
+pub async fn add_staged_commit(
+    store: &dyn ObjectStore,
+    version: u64,
+    data: String,
+) -> Result<Path, Box<dyn std::error::Error>> {
+    let path = staged_commit_path_for_version(version);
+    store.put(&path, data.into()).await?;
+    Ok(path)
 }
 
 /// Try to convert an `EngineData` into a `RecordBatch`. Panics if not using `ArrowEngineData` from
@@ -235,38 +251,11 @@ pub async fn create_table(
     schema: SchemaRef,
     partition_columns: &[&str],
     use_37_protocol: bool,
-    enable_timestamp_without_timezone: bool,
-    enable_variant: bool,
-    enable_column_mapping: bool,
+    reader_features: Vec<&str>,
+    writer_features: Vec<&str>,
 ) -> Result<Url, Box<dyn std::error::Error>> {
     let table_id = "test_id";
     let schema = serde_json::to_string(&schema)?;
-
-    let (reader_features, writer_features) = {
-        let mut reader_features = vec![];
-        let mut writer_features = vec![];
-        if enable_timestamp_without_timezone {
-            reader_features.push("timestampNtz");
-            writer_features.push("timestampNtz");
-        }
-        if enable_variant {
-            reader_features.push("variantType");
-            writer_features.push("variantType");
-            // We can add shredding features as well as we are allowed to write unshredded variants
-            // into shredded tables and shredded reads are explicitly blocked in the default
-            // engine's parquet reader.
-            reader_features.push("variantShredding-preview");
-            writer_features.push("variantShredding-preview");
-        }
-        if enable_column_mapping {
-            reader_features.push("columnMapping");
-            // TODO: (#1124) we don't actually support column mapping writes yet, but have some
-            // tests that do column mapping on writes. for now omit the writer feature to let tests
-            // run, but after actual support this should be enabled.
-            // writer_features.push("columnMapping");
-        }
-        (reader_features, writer_features)
-    };
 
     let protocol = if use_37_protocol {
         json!({
@@ -285,6 +274,38 @@ pub async fn create_table(
             }
         })
     };
+
+    let configuration = {
+        let mut config = serde_json::Map::new();
+
+        if reader_features.contains(&"columnMapping") {
+            config.insert("delta.columnMapping.mode".to_string(), json!("name"));
+        }
+        if writer_features.contains(&"rowTracking") {
+            config.insert(
+                "delta.materializedRowIdColumnName".to_string(),
+                json!("some_dummy_column_name"),
+            );
+            config.insert(
+                "delta.materializedRowCommitVersionColumnName".to_string(),
+                json!("another_dummy_column_name"),
+            );
+        }
+        if writer_features.contains(&"inCommitTimestamp") {
+            config.insert("delta.enableInCommitTimestamps".to_string(), json!("true"));
+            config.insert(
+                "delta.inCommitTimestampEnablementVersion".to_string(),
+                json!("0"),
+            );
+            config.insert(
+                "delta.inCommitTimestampEnablementTimestamp".to_string(),
+                json!("1612345678"),
+            );
+        }
+
+        config
+    };
+
     let metadata = json!({
         "metaData": {
             "id": table_id,
@@ -294,17 +315,45 @@ pub async fn create_table(
             },
             "schemaString": schema,
             "partitionColumns": partition_columns,
-            "configuration": {"delta.columnMapping.mode": "name"},
+            "configuration": configuration,
             "createdTime": 1677811175819u64
         }
     });
 
-    let data = [
-        to_vec(&protocol).unwrap(),
-        b"\n".to_vec(),
-        to_vec(&metadata).unwrap(),
-    ]
-    .concat();
+    // Add commitInfo with ICT if ICT is enabled
+    let commit_info = if writer_features.contains(&"inCommitTimestamp") {
+        // When ICT is enabled from version 0, we need to include it in the initial commit
+        let timestamp = 1612345678i64; // Use a fixed timestamp for testing
+        Some(json!({
+            "commitInfo": {
+                "timestamp": timestamp,
+                "inCommitTimestamp": timestamp,
+                "operation": "CREATE TABLE",
+                "operationParameters": {},
+                "isBlindAppend": true
+            }
+        }))
+    } else {
+        None
+    };
+
+    let data = if let Some(commit_info) = commit_info {
+        [
+            to_vec(&commit_info).unwrap(),
+            b"\n".to_vec(),
+            to_vec(&protocol).unwrap(),
+            b"\n".to_vec(),
+            to_vec(&metadata).unwrap(),
+        ]
+        .concat()
+    } else {
+        [
+            to_vec(&protocol).unwrap(),
+            b"\n".to_vec(),
+            to_vec(&metadata).unwrap(),
+        ]
+        .concat()
+    };
 
     // put 0.json with protocol + metadata
     let path = table_path.join("_delta_log/00000000000000000000.json")?;
@@ -346,9 +395,8 @@ pub async fn setup_test_tables(
                 schema.clone(),
                 partition_columns,
                 true,
-                false,
-                false,
-                false,
+                vec![],
+                vec![],
             )
             .await?,
             engine_37,
@@ -362,9 +410,8 @@ pub async fn setup_test_tables(
                 schema,
                 partition_columns,
                 false,
-                false,
-                false,
-                false,
+                vec![],
+                vec![],
             )
             .await?,
             engine_11,
@@ -403,9 +450,9 @@ pub fn test_read(
     expected: &ArrowEngineData,
     url: &Url,
     engine: Arc<dyn Engine>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let snapshot = Snapshot::builder(url.clone()).build(engine.as_ref())?;
-    let scan = snapshot.into_scan_builder().build()?;
+) -> DeltaResult<()> {
+    let snapshot = Snapshot::builder_for(url.clone()).build(engine.as_ref())?;
+    let scan = snapshot.scan_builder().build()?;
     let batches = read_scan(&scan, engine)?;
     let formatted = pretty_format_batches(&batches).unwrap().to_string();
 
@@ -433,4 +480,17 @@ pub fn set_json_value(
         .ok_or_else(|| format!("key '{path}' not found"))?;
     *v = new_value;
     Ok(())
+}
+
+pub fn assert_result_error_with_message<T, E: ToString>(res: Result<T, E>, message: &str) {
+    match res {
+        Ok(_) => panic!("Expected error, but got Ok result"),
+        Err(error) => {
+            let error_str = error.to_string();
+            assert!(
+                error_str.contains(message),
+                "Error message does not contain the expected message.\nExpected message:\t{message}\nActual message:\t\t{error_str}"
+            );
+        }
+    }
 }

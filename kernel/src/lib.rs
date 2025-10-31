@@ -84,14 +84,18 @@ use url::Url;
 
 use self::schema::{DataType, SchemaRef};
 
+mod action_reconciliation;
 pub mod actions;
 #[cfg(feature = "default-engine-base")]
 pub mod async_df;
 pub mod checkpoint;
+pub mod committer;
 pub mod engine_data;
 pub mod error;
 pub mod expressions;
 pub mod kernel_df;
+mod log_compaction;
+mod log_path;
 pub mod scan;
 pub mod schema;
 pub mod snapshot;
@@ -101,6 +105,11 @@ pub mod table_configuration;
 pub mod table_features;
 pub mod table_properties;
 pub mod transaction;
+pub(crate) mod transforms;
+
+pub use log_path::LogPath;
+
+mod row_tracking;
 
 mod arrow_compat;
 #[cfg(any(feature = "arrow-55", feature = "arrow-56"))]
@@ -143,11 +152,14 @@ pub mod history_manager;
 #[cfg(not(feature = "internal-api"))]
 pub(crate) mod history_manager;
 
+pub use crate::engine_data::FilteredEngineData;
 pub use delta_kernel_derive;
 pub use engine_data::{EngineData, RowVisitor};
 pub use error::{DeltaResult, Error};
 pub use expressions::{Expression, ExpressionRef, Predicate, PredicateRef};
+pub use log_compaction::{should_compact, LogCompactionDataIterator, LogCompactionWriter};
 pub use snapshot::Snapshot;
+pub use snapshot::SnapshotRef;
 
 use expressions::literal_expression_transform::LiteralExpressionTransform;
 use expressions::Scalar;
@@ -450,7 +462,7 @@ trait EvaluationHandlerExtension: EvaluationHandler {
     // future)
     fn create_one(&self, schema: SchemaRef, values: &[Scalar]) -> DeltaResult<Box<dyn EngineData>> {
         // just get a single int column (arbitrary)
-        let null_row_schema = Arc::new(StructType::new(vec![StructField::nullable(
+        let null_row_schema = Arc::new(StructType::new_unchecked(vec![StructField::nullable(
             "null_col",
             DataType::INTEGER,
         )]));
@@ -521,6 +533,10 @@ pub trait StorageHandler: AsAny {
         &self,
         files: Vec<FileSlice>,
     ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<Bytes>>>>;
+
+    /// Copy a file atomically from source to destination. If the destination file already exists,
+    /// it must return Err(Error::FileAlreadyExists).
+    fn copy_atomic(&self, src: &Url, dest: &Url) -> DeltaResult<()>;
 }
 
 /// Provides JSON handling functionality to Delta Kernel.
@@ -589,7 +605,7 @@ pub trait JsonHandler: AsAny {
     fn write_json_file(
         &self,
         path: &Url,
-        data: Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send + '_>,
+        data: Box<dyn Iterator<Item = DeltaResult<FilteredEngineData>> + Send + '_>,
         overwrite: bool,
     ) -> DeltaResult<()>;
 }

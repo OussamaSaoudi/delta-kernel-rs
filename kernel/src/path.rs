@@ -1,8 +1,11 @@
 //! Utilities to make working with directory and file paths easier
 
+use std::slice;
 use std::str::FromStr;
 
-use crate::{DeltaResult, Error, FileMeta, Version};
+use crate::actions::visitors::InCommitTimestampVisitor;
+use crate::engine_data::RowVisitor;
+use crate::{DeltaResult, Engine, Error, FileMeta, Version};
 use delta_kernel_derive::internal_api;
 
 use url::Url;
@@ -17,13 +20,18 @@ const MULTIPART_PART_LEN: usize = 10;
 /// The number of characters in the uuid part of a uuid checkpoint
 const UUID_PART_LEN: usize = 36;
 
+/// The subdirectory name within the table root where the delta log resides
+const DELTA_LOG_DIR: &str = "_delta_log/";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[internal_api]
 pub(crate) enum LogPathFileType {
     Commit,
+    /// Staged commits are commits with UUID filenames, stored in _delta_log/_staged_commits dir.
+    StagedCommit,
     SinglePartCheckpoint,
     #[allow(unused)]
-    UuidCheckpoint(String),
+    UuidCheckpoint,
     // NOTE: Delta spec doesn't actually say, but checkpoint part numbers are effectively 31-bit
     // unsigned integers: Negative values are never allowed, but Java integer types are always
     // signed. Approximate that as u32 here.
@@ -40,6 +48,15 @@ pub(crate) enum LogPathFileType {
     Unknown,
 }
 
+/// A ParsedLogPath is a well-understood path to a file in the _delta_log directory.
+///
+/// Note this includes things like checkpoints and commits (containing current table state), but
+/// also files used for various optimizations like CRC, compaction, etc.
+///
+/// Every parsed log path has a version. And additionally, we implement a 'should_list' method
+/// which controls whether or not we include this file in our listing. For example, when we list
+/// the _delta_log we may see _staged_commits/00000000000000000000.{uuid}.json, but we MUST NOT
+/// include those in listing, as only the catalog can tell us which are valid commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[internal_api]
 pub(crate) struct ParsedLogPath<Location: AsUrl = FileMeta> {
@@ -85,13 +102,15 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
     #[internal_api]
     pub(crate) fn try_from(location: Location) -> DeltaResult<Option<ParsedLogPath<Location>>> {
         let url = location.as_url();
-        #[allow(clippy::unwrap_used)]
-        let filename = url
+        let mut path_segments = url
             .path_segments()
-            .ok_or_else(|| Error::invalid_log_path(url))?
+            .ok_or_else(|| Error::invalid_log_path(url))?;
+        #[allow(clippy::unwrap_used)]
+        let filename = path_segments
             .next_back()
             .unwrap() // "the iterator always contains at least one string (which may be empty)"
             .to_string();
+        let subdir = path_segments.next_back();
         if filename.is_empty() {
             return Err(Error::invalid_log_path(url));
         }
@@ -121,11 +140,18 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
         // Parse the file type, based on the number of remaining parts
         let file_type = match split.as_slice() {
             ["json"] => LogPathFileType::Commit,
+            [uuid, "json"] if subdir == Some("_staged_commits") => {
+                // staged commits like _delta_log/_staged_commits/00000000000000000000.{uuid}.json
+                match parse_path_part::<String>(uuid, UUID_PART_LEN, url) {
+                    Ok(_uuid) => LogPathFileType::StagedCommit,
+                    Err(_) => LogPathFileType::Unknown,
+                }
+            }
             ["crc"] => LogPathFileType::Crc,
             ["checkpoint", "parquet"] => LogPathFileType::SinglePartCheckpoint,
             ["checkpoint", uuid, "json" | "parquet"] => {
-                let uuid = parse_path_part(uuid, UUID_PART_LEN, url)?;
-                LogPathFileType::UuidCheckpoint(uuid)
+                let _ = parse_path_part::<String>(uuid, UUID_PART_LEN, url)?;
+                LogPathFileType::UuidCheckpoint
             }
             [hi, "compacted", "json"] => {
                 let hi = parse_path_part(hi, VERSION_LEN, url)?;
@@ -157,9 +183,25 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
         }))
     }
 
+    pub(crate) fn should_list(&self) -> bool {
+        match self.file_type {
+            LogPathFileType::Commit
+            | LogPathFileType::SinglePartCheckpoint
+            | LogPathFileType::UuidCheckpoint
+            | LogPathFileType::MultiPartCheckpoint { .. }
+            | LogPathFileType::CompactedCommit { .. }
+            | LogPathFileType::Crc
+            | LogPathFileType::Unknown => true,
+            LogPathFileType::StagedCommit => false,
+        }
+    }
+
     #[internal_api]
     pub(crate) fn is_commit(&self) -> bool {
-        matches!(self.file_type, LogPathFileType::Commit)
+        matches!(
+            self.file_type,
+            LogPathFileType::Commit | LogPathFileType::StagedCommit
+        )
     }
 
     #[internal_api]
@@ -168,7 +210,7 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
             self.file_type,
             LogPathFileType::SinglePartCheckpoint
                 | LogPathFileType::MultiPartCheckpoint { .. }
-                | LogPathFileType::UuidCheckpoint(_)
+                | LogPathFileType::UuidCheckpoint
         )
     }
 
@@ -179,17 +221,59 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
     }
 }
 
-impl ParsedLogPath<Url> {
-    const DELTA_LOG_DIR: &'static str = "_delta_log/";
+impl ParsedLogPath<FileMeta> {
+    /// Extract the In-Commit Timestamp from the CommitInfo action in this commit log file.
+    /// This is a utility function that can be used by multiple parts of the codebase
+    /// (snapshot, CDF, time travel, etc.).
+    ///
+    /// This method performs IO by reading the commit log file from storage.
+    ///
+    /// Returns the inCommitTimestamp value, or an error if ICT is not found or cannot be read.
+    /// Callers should handle enablement version checks before calling this method.
+    pub(crate) fn read_in_commit_timestamp(&self, engine: &dyn Engine) -> DeltaResult<i64> {
+        // Only works on commit files
+        if !self.is_commit() {
+            return Err(Error::generic(format!(
+                "read_in_commit_timestamp can only be called on commit files, got: {:?}",
+                self.file_type
+            )));
+        }
 
+        let mut action_iter = engine.json_handler().read_json_files(
+            slice::from_ref(&self.location),
+            InCommitTimestampVisitor::schema(),
+            None,
+        )?;
+
+        // Process the actions to find inCommitTimestamp
+        // According to protocol, CommitInfo MUST be the first action when ICT is enabled,
+        // so we can optimize by only reading the first batch
+        match action_iter.next() {
+            Some(Ok(actions)) => {
+                let mut visitor = InCommitTimestampVisitor::default();
+                visitor.visit_rows_of(actions.as_ref())?;
+                visitor
+                    .in_commit_timestamp
+                    .ok_or_else(|| Error::generic("In-Commit Timestamp not found in commit file"))
+            }
+            Some(Err(err)) => Err(err),
+            None => Err(Error::generic("Commit file contains no actions")),
+        }
+    }
+}
+
+impl ParsedLogPath<Url> {
     /// Helper method to create a path with the given filename generator
     fn create_path(table_root: &Url, filename: String) -> DeltaResult<Self> {
-        let location = table_root.join(Self::DELTA_LOG_DIR)?.join(&filename)?;
+        let location = table_root.join(DELTA_LOG_DIR)?.join(&filename)?;
         Self::try_from(location)?.ok_or_else(|| {
             Error::internal_error(format!("Attempted to create an invalid path: {filename}"))
         })
     }
 
+    // TODO: normalize all these log path constructors. we have overlap with this + LogPath +
+    // LogRoot types.
+    #[allow(unused)]
     /// Create a new ParsedCommitPath<Url> for a new json commit file
     pub(crate) fn new_commit(table_root: &Url, version: Version) -> DeltaResult<Self> {
         let filename = format!("{version:020}.json");
@@ -247,13 +331,75 @@ impl ParsedLogPath<Url> {
         }
         Ok(path)
     }
+
+    /// Create a new ParsedLogPath<Url> for a log compaction file
+    pub(crate) fn new_log_compaction(
+        table_root: &Url,
+        start_version: Version,
+        end_version: Version,
+    ) -> DeltaResult<Self> {
+        let filename = format!("{start_version:020}.{end_version:020}.compacted.json");
+        let path = Self::create_path(table_root, filename)?;
+        if !matches!(path.file_type, LogPathFileType::CompactedCommit { .. }) {
+            return Err(Error::internal_error(
+                "ParsedLogPath::new_log_compaction created a non-compaction path",
+            ));
+        }
+        Ok(path)
+    }
+}
+
+/// A wrapper around parsed log path to provide more structure/safety when handling
+/// table/log/commit paths.
+#[derive(Debug, Clone)]
+pub(crate) struct LogRoot(Url);
+
+impl LogRoot {
+    /// Create a new LogRoot from the table root URL (e.g. s3://bucket/table ->
+    /// s3://bucket/table/_delta_log/)
+    ///
+    /// TODO: could take a `table_root: TableRoot`
+    pub(crate) fn new(table_root: Url) -> DeltaResult<Self> {
+        // FIXME: need to check for trailing slash
+        Ok(Self(table_root.join(DELTA_LOG_DIR)?))
+    }
+
+    /// Create a new commit path (absolute path) for the given version.
+    pub(crate) fn new_commit_path(&self, version: Version) -> DeltaResult<ParsedLogPath<Url>> {
+        let filename = format!("{version:020}.json");
+        let path = self.0.join(&filename)?;
+        ParsedLogPath::try_from(path)?.ok_or_else(|| {
+            Error::internal_error(format!("Attempted to create an invalid path: {filename}"))
+        })
+    }
+
+    /// Create a new staged commit path (absolute path) for the given version.
+    #[allow(unused)] // TODO: Remove this once we remove catalog-managed feature
+    pub(crate) fn new_staged_commit_path(
+        &self,
+        version: Version,
+    ) -> DeltaResult<ParsedLogPath<Url>> {
+        let uuid = uuid::Uuid::new_v4();
+        let filename = format!("{version:020}.{uuid}.json");
+        let path = self.0.join(&filename)?;
+        ParsedLogPath::try_from(path)?.ok_or_else(|| {
+            Error::internal_error(format!("Attempted to create an invalid path: {filename}"))
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use super::*;
+    use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
+    use crate::engine::default::DefaultEngine;
+    use crate::engine::sync::SyncEngine;
+    use crate::utils::test_utils::assert_result_error_with_message;
+    use object_store::memory::InMemory;
+    use test_utils::add_commit;
 
     fn table_log_dir_url() -> Url {
         let path = PathBuf::from("./tests/data/table-with-dv-small/_delta_log/");
@@ -420,7 +566,7 @@ mod tests {
         assert_eq!(log_path.version, 2);
         assert!(matches!(
             log_path.file_type,
-            LogPathFileType::UuidCheckpoint(ref u) if u == "3a0d65cd-4056-49b8-937b-95f9e3ee90e5",
+            LogPathFileType::UuidCheckpoint
         ));
         assert!(!log_path.is_commit());
         assert!(log_path.is_checkpoint());
@@ -437,7 +583,7 @@ mod tests {
         assert_eq!(log_path.version, 2);
         assert!(matches!(
             log_path.file_type,
-            LogPathFileType::UuidCheckpoint(ref u) if u == "3a0d65cd-4056-49b8-937b-95f9e3ee90e5",
+            LogPathFileType::UuidCheckpoint
         ));
         assert!(!log_path.is_commit());
         assert!(log_path.is_checkpoint());
@@ -644,11 +790,10 @@ mod tests {
         assert_eq!(log_path.version, 10);
         assert!(log_path.is_checkpoint());
         assert_eq!(log_path.extension, "parquet");
-        if let LogPathFileType::UuidCheckpoint(uuid) = &log_path.file_type {
-            assert_eq!(uuid.len(), UUID_PART_LEN);
-        } else {
-            panic!("Expected UuidCheckpoint file type");
-        }
+        assert!(
+            matches!(log_path.file_type, LogPathFileType::UuidCheckpoint),
+            "Expected UuidCheckpoint file type"
+        );
 
         let filename = log_path.filename.to_string();
         let filename_parts: Vec<&str> = filename.split('.').collect();
@@ -672,5 +817,170 @@ mod tests {
             LogPathFileType::SinglePartCheckpoint
         ));
         assert_eq!(log_path.filename, "00000000000000000010.checkpoint.parquet");
+    }
+
+    #[test]
+    fn test_staged_commit_paths() {
+        let table_log_dir = table_log_dir_url();
+
+        // valid staged commit
+        let log_path = table_log_dir
+            .join("_staged_commits/00000000000000000010.3a0d65cd-4056-49b8-937b-95f9e3ee90e5.json")
+            .unwrap();
+        let log_path = ParsedLogPath::try_from(log_path).unwrap().unwrap();
+        assert_eq!(
+            log_path.filename,
+            "00000000000000000010.3a0d65cd-4056-49b8-937b-95f9e3ee90e5.json"
+        );
+        assert_eq!(log_path.extension, "json");
+        assert_eq!(log_path.version, 10);
+        assert!(matches!(log_path.file_type, LogPathFileType::StagedCommit));
+        assert!(log_path.is_commit());
+        assert!(!log_path.is_checkpoint());
+        assert!(!log_path.is_unknown());
+
+        // invalid uuid
+        let log_path = table_log_dir
+            .join("_staged_commits/00000000000000000010.not-a-uuid.json")
+            .unwrap();
+        let log_path = ParsedLogPath::try_from(log_path).unwrap().unwrap();
+        assert!(log_path.is_unknown());
+        assert!(!log_path.is_commit());
+        assert!(!log_path.is_checkpoint());
+
+        // outside _staged_commits directory
+        let log_path = table_log_dir
+            .join("00000000000000000010.3a0d65cd-4056-49b8-937b-95f9e3ee90e5.json")
+            .unwrap();
+        let log_path = ParsedLogPath::try_from(log_path).unwrap().unwrap();
+        assert_eq!(
+            log_path.filename,
+            "00000000000000000010.3a0d65cd-4056-49b8-937b-95f9e3ee90e5.json"
+        );
+        assert_eq!(log_path.extension, "json");
+        assert_eq!(log_path.version, 10);
+        assert!(matches!(log_path.file_type, LogPathFileType::Unknown));
+        assert!(!log_path.is_commit());
+        assert!(!log_path.is_checkpoint());
+        assert!(log_path.is_unknown());
+    }
+
+    #[test]
+    fn test_should_list() {
+        let mut path = ParsedLogPath {
+            location: table_log_dir_url(),
+            filename: "".to_string(),
+            extension: "".to_string(),
+            version: 0,
+            file_type: LogPathFileType::Commit,
+        };
+
+        for (file_type, should_list) in [
+            (LogPathFileType::Commit, true),
+            (LogPathFileType::StagedCommit, false),
+            (LogPathFileType::SinglePartCheckpoint, true),
+            (LogPathFileType::UuidCheckpoint, true),
+            (
+                LogPathFileType::MultiPartCheckpoint {
+                    part_num: 1,
+                    num_parts: 2,
+                },
+                true,
+            ),
+            (LogPathFileType::CompactedCommit { hi: 10 }, true),
+            (LogPathFileType::Crc, true),
+            (LogPathFileType::Unknown, true),
+        ] {
+            path.file_type = file_type;
+            assert_eq!(
+                path.should_list(),
+                should_list,
+                "file_type: {:?}",
+                path.file_type
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_in_commit_timestamp_success() {
+        let store = Arc::new(InMemory::new());
+        let engine = DefaultEngine::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
+        let table_url = url::Url::parse("memory://test/").unwrap();
+
+        // Create a commit file with ICT using add_commit
+        let commit_content = r#"{"commitInfo":{"timestamp":1000,"inCommitTimestamp":2000},"protocol":{"minReaderVersion":3,"minWriterVersion":7,"writerFeatures":["inCommitTimestamp"]},"metaData":{"id":"test","schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true}]}"}}"#;
+        add_commit(store.as_ref(), 0, commit_content.to_string())
+            .await
+            .unwrap();
+
+        // Create ParsedLogPath for the commit file
+        let commit_path = table_url
+            .join("_delta_log/00000000000000000000.json")
+            .unwrap();
+        let parsed_path = ParsedLogPath::try_from(FileMeta {
+            location: commit_path,
+            last_modified: 0,
+            size: commit_content.len() as u64,
+        })
+        .unwrap()
+        .unwrap();
+
+        // Now actually test reading the timestamp
+        let result = parsed_path.read_in_commit_timestamp(&engine).unwrap();
+        assert_eq!(result, 2000);
+    }
+
+    #[tokio::test]
+    async fn test_read_in_commit_timestamp_missing_ict() {
+        let store = Arc::new(InMemory::new());
+        let engine = DefaultEngine::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
+        let table_url = url::Url::parse("memory://test/").unwrap();
+
+        // Create a commit file without ICT
+        let commit_content = r#"{"commitInfo":{"timestamp":1000},"protocol":{"minReaderVersion":3,"minWriterVersion":7},"metaData":{"id":"test","schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true}]}"}}"#;
+        add_commit(store.as_ref(), 0, commit_content.to_string())
+            .await
+            .unwrap();
+
+        // Create ParsedLogPath for the commit file
+        let commit_path = table_url
+            .join("_delta_log/00000000000000000000.json")
+            .unwrap();
+        let parsed_path = ParsedLogPath::try_from(FileMeta {
+            location: commit_path,
+            last_modified: 0,
+            size: commit_content.len() as u64,
+        })
+        .unwrap()
+        .unwrap();
+
+        // Should return error when ICT is missing
+        let result = parsed_path.read_in_commit_timestamp(&engine);
+        assert_result_error_with_message(result, "In-Commit Timestamp not found");
+    }
+
+    #[test]
+    fn test_read_in_commit_timestamp_not_commit_file() {
+        let engine = SyncEngine::new();
+        let table_url = url::Url::try_from("file:///tmp/test_table").unwrap();
+
+        // Create a checkpoint file (not a commit file)
+        let checkpoint_path = table_url
+            .join("_delta_log/00000000000000000000.checkpoint.parquet")
+            .unwrap();
+        let parsed_path = ParsedLogPath::try_from(FileMeta {
+            location: checkpoint_path,
+            last_modified: 0,
+            size: 100,
+        })
+        .unwrap()
+        .unwrap();
+
+        // Should return error for non-commit files
+        let result = parsed_path.read_in_commit_timestamp(&engine);
+        assert_result_error_with_message(
+            result,
+            "read_in_commit_timestamp can only be called on commit files",
+        );
     }
 }

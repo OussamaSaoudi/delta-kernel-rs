@@ -2,13 +2,12 @@
 use std::borrow::Cow;
 use std::ops::Deref;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use crate::table_properties::TableProperties;
-use crate::{DeltaResult, Error};
-use delta_kernel_derive::internal_api;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use url::Url;
+
+use crate::{DeltaResult, Error};
+use delta_kernel_derive::internal_api;
 
 /// convenient way to return an error if a condition isn't true
 macro_rules! require {
@@ -96,27 +95,18 @@ fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
     }
 }
 
-/// Calculates the transaction expiration timestamp based on table properties.
-/// Returns None if set_transaction_retention_duration is not set.
-pub(crate) fn calculate_transaction_expiration_timestamp(
-    table_properties: &TableProperties,
-) -> DeltaResult<Option<i64>> {
-    table_properties
-        .set_transaction_retention_duration
-        .map(|duration| -> DeltaResult<i64> {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| Error::generic(format!("Failed to get current time: {e}")))?;
+/// Returns the current time as a Duration since Unix epoch.
+pub(crate) fn current_time_duration() -> DeltaResult<Duration> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| Error::generic(format!("System time before Unix epoch: {}", e)))
+}
 
-            let now_ms = i64::try_from(now.as_millis())
-                .map_err(|_| Error::generic("Current timestamp exceeds i64 millisecond range"))?;
-
-            let expiration_ms = i64::try_from(duration.as_millis())
-                .map_err(|_| Error::generic("Retention duration exceeds i64 millisecond range"))?;
-
-            Ok(now_ms - expiration_ms)
-        })
-        .transpose()
+/// Returns the current time in milliseconds since Unix epoch.
+pub(crate) fn current_time_ms() -> DeltaResult<i64> {
+    let duration = current_time_duration()?;
+    i64::try_from(duration.as_millis())
+        .map_err(|_| Error::generic("Current timestamp exceeds i64 millisecond range"))
 }
 
 // Extension trait for Cow<'_, T>
@@ -156,7 +146,9 @@ impl<'a, T: ToOwned + ?Sized> CowExt<(Cow<'a, T>, Cow<'a, T>)> for (Cow<'a, T>, 
 
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use crate::actions::{get_log_schema, Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
+    use crate::actions::{
+        get_all_actions_schema, Add, Cdc, CommitInfo, Metadata, Protocol, Remove,
+    };
     use crate::arrow::array::{RecordBatch, StringArray};
     use crate::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use crate::engine::arrow_data::ArrowEngineData;
@@ -253,7 +245,7 @@ pub(crate) mod test_utils {
     pub(crate) fn parse_json_batch(json_strings: StringArray) -> Box<dyn EngineData> {
         let engine = SyncEngine::new();
         let json_handler = engine.json_handler();
-        let output_schema = get_log_schema().clone();
+        let output_schema = get_all_actions_schema().clone();
         json_handler
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap()

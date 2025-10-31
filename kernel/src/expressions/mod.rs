@@ -75,6 +75,13 @@ pub enum BinaryExpressionOp {
     Divide,
 }
 
+/// A variadic expression operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VariadicExpressionOp {
+    /// Collapse multiple values into one by taking the first non-null value
+    Coalesce,
+}
+
 /// A junction (AND/OR) predicate operator.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum JunctionPredicateOp {
@@ -220,6 +227,14 @@ pub struct BinaryExpression {
     pub left: Box<Expression>,
     /// The right-hand side of the operation.
     pub right: Box<Expression>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VariadicExpression {
+    /// The operator.
+    pub op: VariadicExpressionOp,
+    /// The input expressions.
+    pub exprs: Vec<Expression>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -378,6 +393,8 @@ pub enum Expression {
     Unary(UnaryExpression),
     /// An expression that takes two expressions as input.
     Binary(BinaryExpression),
+    /// An expression that takes a variable number of expressions as input.
+    Variadic(VariadicExpression),
     /// An expression that the engine defines and implements. Kernel interacts with the expression
     /// only through methods provided by the [`OpaqueExpressionOp`] trait.
     Opaque(OpaqueExpression),
@@ -488,6 +505,16 @@ impl BinaryPredicate {
         let left = Box::new(left.into());
         let right = Box::new(right.into());
         Self { op, left, right }
+    }
+}
+
+impl VariadicExpression {
+    fn new(
+        op: VariadicExpressionOp,
+        exprs: impl IntoIterator<Item = impl Into<Expression>>,
+    ) -> Self {
+        let exprs = exprs.into_iter().map(Into::into).collect();
+        Self { op, exprs }
     }
 }
 
@@ -659,6 +686,14 @@ impl Expression {
         rhs: impl Into<Expression>,
     ) -> Self {
         Self::Binary(BinaryExpression::new(op, lhs, rhs))
+    }
+
+    /// Creates a new variadic expression
+    pub fn variadic(
+        op: VariadicExpressionOp,
+        exprs: impl IntoIterator<Item = impl Into<Expression>>,
+    ) -> Self {
+        Self::Variadic(VariadicExpression::new(op, exprs))
     }
 
     /// Creates a new opaque expression
@@ -853,6 +888,15 @@ impl Display for BinaryExpressionOp {
     }
 }
 
+impl Display for VariadicExpressionOp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        use VariadicExpressionOp::*;
+        match self {
+            Coalesce => write!(f, "COALESCE"),
+        }
+    }
+}
+
 impl Display for BinaryPredicateOp {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         use BinaryPredicateOp::*;
@@ -912,6 +956,9 @@ impl Display for Expression {
             }
             Unary(UnaryExpression { op, expr }) => write!(f, "{op}({expr})"),
             Binary(BinaryExpression { op, left, right }) => write!(f, "{left} {op} {right}"),
+            Variadic(VariadicExpression { op, exprs }) => {
+                write!(f, "{op}({})", format_child_list(exprs))
+            }
             Opaque(OpaqueExpression { op, exprs }) => {
                 write!(f, "{op:?}({})", format_child_list(exprs))
             }
