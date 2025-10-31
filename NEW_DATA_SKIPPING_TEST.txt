@@ -1,0 +1,79 @@
+/// END-TO-END PROOF: Data skipping with real predicate transformation
+#[test]
+fn test_data_skipping_with_real_predicate() -> DeltaResult<()> {
+    use crate::expressions::{column_expr, Predicate};
+    use crate::kernel_df::{DefaultPlanExecutor, PhysicalPlanExecutor};
+    use crate::scan::data_skipping::as_data_skipping_predicate;
+
+    let path = std::fs::canonicalize(PathBuf::from("./tests/data/basic_partitioned/")).unwrap();
+    let url = url::Url::from_directory_path(path).unwrap();
+    let engine = Arc::new(SyncEngine::new());
+    let snapshot = crate::Snapshot::builder_for(url).build(engine.as_ref())?;
+    
+    // USER PREDICATE: WHERE number > 2
+    let user_predicate = Arc::new(Predicate::gt(
+        column_expr!("number"),
+        crate::Expression::literal(2i64),
+    ));
+    
+    println!("\n=== DATA SKIPPING WITH REAL PREDICATE ===");
+    println!("User predicate: number > 2");
+    
+    // TRANSFORM to stats predicate using existing logic
+    let stats_predicate = as_data_skipping_predicate(&user_predicate)
+        .ok_or_else(|| crate::Error::generic("Failed to transform predicate for data skipping"))?;
+    
+    println!("Transformed to stats predicate: {:?}", stats_predicate);
+    
+    // Build stats schema (same as before)
+    use crate::schema::{DataType, StructField, StructType};
+    let value_schema = Arc::new(StructType::new_unchecked(vec![
+        StructField::nullable("number", DataType::LONG),
+        StructField::nullable("a_float", DataType::DOUBLE),
+    ]));
+    
+    let stats_schema = Arc::new(StructType::new_unchecked(vec![
+        StructField::nullable("numRecords", DataType::LONG),
+        StructField::nullable("minValues", DataType::Struct(Box::new(value_schema.as_ref().clone()))),
+        StructField::nullable("maxValues", DataType::Struct(Box::new(value_schema.as_ref().clone()))),
+        StructField::nullable("nullCount", DataType::Struct(Box::new(value_schema.as_ref().clone()))),
+    ]));
+    
+    let commit_files: Vec<_> = snapshot.log_segment().ascending_commit_files.iter()
+        .map(|p| p.location.clone()).collect();
+    
+    // Build plan: Scan → ParseJson → FilterByExpression
+    use crate::expressions::column_name;
+    let plan_with_skipping = LogicalPlanNode::scan_json(commit_files.clone(), crate::scan::COMMIT_READ_SCHEMA.clone())?
+        .parse_json_column(column_name!("add.stats"), stats_schema, "parsed_stats")?
+        .filter_by_expression(Arc::new(stats_predicate))?;
+    
+    // Execute
+    let executor = DefaultPlanExecutor { engine: engine.clone() };
+    let skipped_batches: Vec<_> = executor.execute(plan_with_skipping)?.collect::<Result<Vec<_>, _>>()?;
+    
+    let kept_files = skipped_batches.iter()
+        .map(|b| b.selection_vector.iter().filter(|&&x| x).count())
+        .sum::<usize>();
+    
+    // Baseline without skipping
+    let plan_no_skip = LogicalPlanNode::scan_json(commit_files, crate::scan::COMMIT_READ_SCHEMA.clone())?;
+    let all_batches: Vec<_> = executor.execute(plan_no_skip)?.collect::<Result<Vec<_>, _>>()?;
+    let total_files = all_batches.iter().map(|b| b.engine_data.len()).sum::<usize>();
+    
+    println!("Total files: {}", total_files);
+    println!("Kept after skipping: {}", kept_files);
+    println!("Skipped: {}", total_files - kept_files);
+    
+    // VERIFY
+    assert!(kept_files < total_files, "Data skipping should reduce files");
+    
+    println!("\n✅✅ DATA SKIPPING WITH REAL PREDICATE WORKS ✅✅");
+    println!("  ✓ User predicate: number > 2");
+    println!("  ✓ Transformed using as_data_skipping_predicate()");
+    println!("  ✓ Plan: Scan → ParseJson → FilterByExpression");
+    println!("  ✓ Skipped {} of {} files\n", total_files - kept_files, total_files);
+    
+    Ok(())
+}
+

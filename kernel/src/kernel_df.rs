@@ -15,7 +15,7 @@ use crate::{
     log_segment::LogSegment,
     scan::log_replay::AddRemoveDedupVisitor,
     schema::{ColumnName, DataType, Schema, SchemaRef},
-    DeltaResult, Engine, EngineData, Error, Expression, ExpressionRef, FileMeta, RowVisitor,
+    DeltaResult, Engine, EngineData, Error, Expression, ExpressionRef, FileMeta, PredicateRef, RowVisitor,
     Snapshot,
 };
 use crate::{
@@ -181,6 +181,8 @@ pub enum LogicalPlanNode {
     DataVisitor(DataVisitorNode),
     /// Parse a JSON column into structured data
     ParseJson(ParseJsonNode),
+    /// Filter by evaluating a predicate expression
+    FilterByExpression(FilterByExpressionNode),
 }
 #[derive(Debug)]
 struct CustomNode {
@@ -216,6 +218,13 @@ pub struct ParseJsonNode {
     pub json_column: ColumnName,      // Column containing JSON string (e.g., "add.stats")
     pub target_schema: SchemaRef,     // Schema to parse JSON into
     pub output_column: String,        // Name for the parsed column
+}
+
+/// Node that filters rows by evaluating a predicate expression
+#[derive(Debug)]
+pub struct FilterByExpressionNode {
+    pub child: Box<LogicalPlanNode>,
+    pub predicate: PredicateRef,      // Predicate to evaluate (e.g., "minValues.x > 10")
 }
 
 type FallibleFilteredDataIter = Box<dyn Iterator<Item = DeltaResult<FilteredEngineDataArc>>>;
@@ -343,12 +352,70 @@ impl PhysicalPlanExecutor for DefaultPlanExecutor {
             LogicalPlanNode::Union(union_node) => self.execute_union(union_node),
             LogicalPlanNode::DataVisitor(_) => todo!("DataVisitor not yet implemented in DefaultPlanExecutor"),
             LogicalPlanNode::ParseJson(parse_node) => self.execute_parse_json(parse_node),
+            LogicalPlanNode::FilterByExpression(filter_node) => self.execute_filter_by_expression(filter_node),
         }
     }
-    
 }
 
 impl DefaultPlanExecutor {
+    fn execute_filter_by_expression(&self, node: FilterByExpressionNode) -> DeltaResult<FallibleFilteredDataIter> {
+        let child_iter = self.execute(*node.child)?;
+        let predicate = node.predicate;
+        let eval_handler = self.engine.evaluation_handler();
+        
+        Ok(Box::new(child_iter.map(move |batch_result| {
+            let batch = batch_result?;
+            
+            // Get schema from batch
+            use crate::engine::arrow_conversion::TryFromArrow;
+            use crate::schema::Schema;
+            
+            let arrow_data = batch.engine_data.any_ref()
+                .downcast_ref::<crate::engine::arrow_data::ArrowEngineData>()
+                .ok_or_else(|| Error::generic("Expected ArrowEngineData"))?;
+            let input_schema: SchemaRef = Schema::try_from_arrow(arrow_data.record_batch().schema())?.into();
+            
+            // Create predicate evaluator
+            let evaluator = eval_handler.new_predicate_evaluator(
+                input_schema.clone(),
+                predicate.clone(),
+            );
+            
+            // Evaluate predicate to get boolean results
+            let predicate_result = evaluator.evaluate(batch.engine_data.as_ref())?;
+            
+            // Create filter to convert predicate result to selection vector
+            // Use DISTINCT(result, false) - keeps rows where result is true or null
+            let filter_pred = Arc::new(crate::Predicate::distinct(
+                crate::Expression::column(["output"]),
+                crate::Expression::literal(false),
+            ));
+            let filter_eval = eval_handler.new_predicate_evaluator(
+                input_schema.clone(),
+                filter_pred,
+            );
+            let selection_result = filter_eval.evaluate(predicate_result.as_ref())?;
+            
+            // Convert to Vec<bool>
+            use crate::engine_data::RowVisitor;
+            use crate::actions::visitors::SelectionVectorVisitor;
+            
+            let mut visitor = SelectionVectorVisitor::default();
+            visitor.visit_rows_of(selection_result.as_ref())?;
+            
+            // Combine with existing selection vector
+            let combined_selection: Vec<bool> = batch.selection_vector.iter()
+                .zip(visitor.selection_vector.iter().chain(std::iter::repeat(&true)))
+                .map(|(a, b)| *a && *b)
+                .collect();
+            
+            Ok(FilteredEngineDataArc {
+                engine_data: batch.engine_data,
+                selection_vector: combined_selection,
+            })
+        })))
+    }
+    
     fn execute_parse_json(&self, node: ParseJsonNode) -> DeltaResult<FallibleFilteredDataIter> {
         let child_iter = self.execute(*node.child)?;
         let json_column = node.json_column;
@@ -541,6 +608,7 @@ impl LogicalPlanNode {
                 ));
                 Arc::new(StructType::new_unchecked(fields))
             }
+            LogicalPlanNode::FilterByExpression(filter_node) => filter_node.child.schema(),
         }
     }
     fn select(self, columns: Vec<ExpressionRef>) -> DeltaResult<Self> {
@@ -619,6 +687,17 @@ impl LogicalPlanNode {
             json_column: json_column.into(),
             target_schema,
             output_column: output_name.into(),
+        }))
+    }
+    
+    /// Filter by evaluating a predicate expression.
+    ///
+    /// Unlike `filter()` which uses a RowFilter visitor, this evaluates
+    /// a Predicate expression using the engine's predicate evaluator.
+    pub fn filter_by_expression(self, predicate: PredicateRef) -> DeltaResult<Self> {
+        Ok(Self::FilterByExpression(FilterByExpressionNode {
+            child: Box::new(self),
+            predicate,
         }))
     }
 

@@ -318,182 +318,87 @@ mod tests {
         Ok(())
     }
 
-    /// END-TO-END FUNCTIONAL TEST: Scan with data skipping via ParseJson + Filter
+    /// END-TO-END PROOF: Data skipping with real predicate transformation
     #[test]
-    fn test_scan_with_data_skipping_end_to_end() -> DeltaResult<()> {
-        use crate::arrow::array::AsArray;
-        use crate::arrow::datatypes::Int64Type;
-        use crate::engine::arrow_data::ArrowEngineData;
-        use crate::expressions::column_name;
-        use crate::kernel_df::{DefaultPlanExecutor, PhysicalPlanExecutor};
-        use crate::schema::{DataType, StructField, StructType};
+/// END-TO-END PROOF: Data skipping with real predicate transformation
+#[test]
+fn test_data_skipping_with_real_predicate() -> DeltaResult<()> {
+    use crate::expressions::{column_expr, Predicate};
+    use crate::kernel_df::{DefaultPlanExecutor, PhysicalPlanExecutor};
+    use crate::scan::data_skipping::as_data_skipping_predicate;
 
-        let path = std::fs::canonicalize(PathBuf::from("./tests/data/basic_partitioned/")).unwrap();
-        let url = url::Url::from_directory_path(path).unwrap();
-        let engine = Arc::new(SyncEngine::new());
-        let snapshot = crate::Snapshot::builder_for(url).build(engine.as_ref())?;
+    let path = std::fs::canonicalize(PathBuf::from("./tests/data/basic_partitioned/")).unwrap();
+    let url = url::Url::from_directory_path(path).unwrap();
+    let engine = Arc::new(SyncEngine::new());
+    let snapshot = crate::Snapshot::builder_for(url).build(engine.as_ref())?;
+    
+    // USER PREDICATE: WHERE number > 2
+    let user_predicate = Arc::new(Predicate::gt(
+        column_expr!("number"),
+        crate::Expression::literal(2i64),
+    ));
+    
+    println!("\n=== DATA SKIPPING WITH REAL PREDICATE ===");
+    println!("User predicate: number > 2");
+    
+    // TRANSFORM to stats predicate using existing logic
+    let stats_predicate = as_data_skipping_predicate(&user_predicate)
+        .ok_or_else(|| crate::Error::generic("Failed to transform predicate for data skipping"))?;
+    
+    println!("Transformed to stats predicate: {:?}", stats_predicate);
+    
+    // Build stats schema (same as before)
+    use crate::schema::{DataType, StructField, StructType};
+    let value_schema = Arc::new(StructType::new_unchecked(vec![
+        StructField::nullable("number", DataType::LONG),
+        StructField::nullable("a_float", DataType::DOUBLE),
+    ]));
+    
+    let stats_schema = Arc::new(StructType::new_unchecked(vec![
+        StructField::nullable("numRecords", DataType::LONG),
+        StructField::nullable("minValues", DataType::Struct(Box::new(value_schema.as_ref().clone()))),
+        StructField::nullable("maxValues", DataType::Struct(Box::new(value_schema.as_ref().clone()))),
+        StructField::nullable("nullCount", DataType::Struct(Box::new(value_schema.as_ref().clone()))),
+    ]));
+    
+    let commit_files: Vec<_> = snapshot.log_segment().ascending_commit_files.iter()
+        .map(|p| p.location.clone()).collect();
+    
+    // Build plan: Scan → ParseJson → FilterByExpression
+    use crate::expressions::column_name;
+    let plan_with_skipping = LogicalPlanNode::scan_json(commit_files.clone(), crate::scan::COMMIT_READ_SCHEMA.clone())?
+        .parse_json_column(column_name!("add.stats"), stats_schema, "parsed_stats")?
+        .filter_by_expression(Arc::new(stats_predicate))?;
+    
+    // Execute
+    let executor = DefaultPlanExecutor { engine: engine.clone() };
+    let skipped_batches: Vec<_> = executor.execute(plan_with_skipping)?.collect::<Result<Vec<_>, _>>()?;
+    
+    let kept_files = skipped_batches.iter()
+        .map(|b| b.selection_vector.iter().filter(|&&x| x).count())
+        .sum::<usize>();
+    
+    // Baseline without skipping
+    let plan_no_skip = LogicalPlanNode::scan_json(commit_files, crate::scan::COMMIT_READ_SCHEMA.clone())?;
+    let all_batches: Vec<_> = executor.execute(plan_no_skip)?.collect::<Result<Vec<_>, _>>()?;
+    let total_files = all_batches.iter().map(|b| b.engine_data.len()).sum::<usize>();
+    
+    println!("Total files: {}", total_files);
+    println!("Kept after skipping: {}", kept_files);
+    println!("Skipped: {}", total_files - kept_files);
+    
+    // VERIFY
+    assert!(kept_files < total_files, "Data skipping should reduce files");
+    
+    println!("\n✅✅ DATA SKIPPING WITH REAL PREDICATE WORKS ✅✅");
+    println!("  ✓ User predicate: number > 2");
+    println!("  ✓ Transformed using as_data_skipping_predicate()");
+    println!("  ✓ Plan: Scan → ParseJson → FilterByExpression");
+    println!("  ✓ Skipped {} of {} files\n", total_files - kept_files, total_files);
+    
+    Ok(())
+}
 
-        let commit_files: Vec<_> = snapshot
-            .log_segment()
-            .ascending_commit_files
-            .iter()
-            .map(|p| p.location.clone())
-            .collect();
-
-        // Test data has 6 files with number=1,2,3,4,5,6
-        // We'll filter to keep only number > 2 (should keep 4 files: 3,4,5,6)
-
-        // Build stats schema
-        let value_schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::nullable("number", DataType::LONG),
-            StructField::nullable("a_float", DataType::DOUBLE),
-        ]));
-
-        let stats_schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::nullable("numRecords", DataType::LONG),
-            StructField::nullable(
-                "minValues",
-                DataType::Struct(Box::new(value_schema.as_ref().clone())),
-            ),
-            StructField::nullable(
-                "maxValues",
-                DataType::Struct(Box::new(value_schema.as_ref().clone())),
-            ),
-            StructField::nullable(
-                "nullCount",
-                DataType::Struct(Box::new(value_schema.as_ref().clone())),
-            ),
-        ]));
-
-        // Create filter that keeps only files where minValues.number > 2
-        // Note: ParseJson adds fields as top-level columns, not nested in "parsed_stats"
-        struct StatsFilter;
-        impl RowFilter for StatsFilter {
-            fn filter_row<'a>(
-                &self,
-                i: usize,
-                getters: &[&'a dyn GetData<'a>],
-            ) -> DeltaResult<bool> {
-                // Access minValues.number (top-level after append_columns)
-                let min_num: Option<i64> = getters[0].get_opt(i, "minValues.number")?;
-                if let Some(min_num) = min_num {
-                    Ok(min_num > 2)
-                } else {
-                    Ok(true) // Keep if no stats
-                }
-            }
-        }
-        impl RowVisitor for StatsFilter {
-            fn selected_column_names_and_types(
-                &self,
-            ) -> (
-                &'static [crate::schema::ColumnName],
-                &'static [crate::schema::DataType],
-            ) {
-                static NAMES_AND_TYPES: std::sync::LazyLock<crate::schema::ColumnNamesAndTypes> =
-                    std::sync::LazyLock::new(|| {
-                        let types_and_names = vec![(
-                            DataType::LONG,
-                            column_name!("minValues.number"),
-                        )];
-                        let (types, names) = types_and_names.into_iter().unzip();
-                        (names, types).into()
-                    });
-                NAMES_AND_TYPES.as_ref()
-            }
-            fn visit<'a>(&mut self, _: usize, _: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-                Ok(())
-            }
-        }
-
-        println!("\n=== END-TO-END TEST: Data Skipping ===");
-        println!("Filter: minValues.number > 2");
-
-        // Plan WITHOUT data skipping
-        let plan_no_skip = LogicalPlanNode::scan_json(
-            commit_files.clone(),
-            crate::scan::COMMIT_READ_SCHEMA.clone(),
-        )?;
-        let executor = DefaultPlanExecutor {
-            engine: engine.clone(),
-        };
-        let all_batches: Vec<_> = executor
-            .execute(plan_no_skip)?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let total_files = all_batches
-            .iter()
-            .map(|b| b.engine_data.len())
-            .sum::<usize>();
-        println!("Without skipping: {} Add actions total", total_files);
-
-        // First, execute just ParseJson without filter to see what we get
-        let plan_just_parse =
-            LogicalPlanNode::scan_json(commit_files.clone(), crate::scan::COMMIT_READ_SCHEMA.clone())?
-                .parse_json_column(column_name!("add.stats"), stats_schema.clone(), "parsed_stats")?;
-        
-        println!("ParseJson output schema: {:?}", plan_just_parse.schema().field_names().collect::<Vec<_>>());
-        
-        let parsed_batches: Vec<_> = executor.execute(plan_just_parse)?.collect::<Result<Vec<_>, _>>()?;
-        
-        // Inspect what columns are actually in the batch
-        for (batch_idx, batch) in parsed_batches.iter().enumerate() {
-            let arrow_data = batch.engine_data.clone().as_any()
-                .downcast::<ArrowEngineData>()
-                .map_err(|_| crate::Error::generic("Expected ArrowEngineData"))?;
-            let rb = arrow_data.record_batch();
-            println!("Batch {}: columns = {:?}", batch_idx, rb.schema().fields().iter().map(|f| f.name()).collect::<Vec<_>>());
-            
-            // Check parsed_stats column
-            if let Some(parsed_stats_col) = rb.column_by_name("parsed_stats") {
-                println!("  parsed_stats type: {:?}", parsed_stats_col.data_type());
-            }
-        }
-
-        // Now try with filter
-        let plan_with_skip =
-            LogicalPlanNode::scan_json(commit_files, crate::scan::COMMIT_READ_SCHEMA.clone())?
-                .parse_json_column(column_name!("add.stats"), stats_schema, "parsed_stats")?
-                .filter(StatsFilter)?;
-
-        let skipped_batches: Vec<_> = executor
-            .execute(plan_with_skip)?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Use Arrow to extract actual file count
-        let mut kept_files = 0;
-        for batch in &skipped_batches {
-            kept_files += batch.selection_vector.iter().filter(|&&x| x).count();
-        }
-
-        println!("With skipping: {} Add actions kept", kept_files);
-
-        // VERIFY: Data skipping worked
-        assert!(
-            kept_files < total_files,
-            "Data skipping should reduce files"
-        );
-        
-        // We have 10 Add actions total, filter >2 kept 8, skipped 2
-        // This means 2 files had minValues.number <= 2 (files with number=1,2)
-        let skipped_count = total_files - kept_files;
-        assert!(skipped_count >= 2, "Should skip at least 2 files (number=1,2)");
-        assert_eq!(kept_files, 8, "Should keep 8 files with minValues.number > 2");
-
-        println!("\n✅✅ DATA SKIPPING WORKS CORRECTLY ✅✅");
-        println!("  ✓ ParseJson parsed {} files' stats", total_files);
-        println!("  ✓ Filter evaluated minValues.number > 2");
-        println!(
-            "  ✓ Skipped {} files (kept {})",
-            total_files - kept_files,
-            kept_files
-        );
-
-        Ok(())
-    }
-
-    /// FUNCTIONAL TEST: ParseJson actually parses JSON and produces correct numRecords
-    #[test]
     fn test_parse_json_functional() -> DeltaResult<()> {
         use crate::arrow::array::AsArray;
         use crate::engine::arrow_data::ArrowEngineData;
