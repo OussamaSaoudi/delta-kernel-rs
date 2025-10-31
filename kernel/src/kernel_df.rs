@@ -381,9 +381,81 @@ impl DefaultPlanExecutor {
             // Parse JSON
             let parsed = json_handler.parse_json(json_data, target_schema.clone())?;
             
-            // TODO: Merge parsed column with original batch
+            // Convert parsed to ArrayData for append_columns
+            use crate::expressions::ArrayData;
+            let parsed_arrow = parsed.any_ref()
+                .downcast_ref::<crate::engine::arrow_data::ArrowEngineData>()
+                .ok_or_else(|| Error::generic("Expected ArrowEngineData"))?;
+            
+            let mut parsed_columns = vec![];
+            for field in target_schema.fields() {
+                let col_idx = parsed_arrow.record_batch()
+                    .schema()
+                    .column_with_name(field.name())
+                    .ok_or_else(|| Error::generic(format!("Missing field {}", field.name())))?
+                    .0;
+                let array = parsed_arrow.record_batch().column(col_idx);
+                
+                // Convert Arrow array to kernel ArrayData by extracting scalars
+                use crate::expressions::Scalar;
+                use crate::arrow::array::{Array, AsArray};
+                
+                let mut scalar_values = vec![];
+                for i in 0..array.len() {
+                    let scalar = if array.is_null(i) {
+                        Scalar::Null(field.data_type().clone())
+                    } else {
+                        // Extract scalar based on field type
+                        match field.data_type() {
+                            &DataType::LONG => {
+                                let arr = array.as_primitive::<crate::arrow::datatypes::Int64Type>();
+                                Scalar::from(arr.value(i))
+                            }
+                            DataType::Struct(struct_type) => {
+                                // For struct, recursively convert
+                                let struct_arr = array.as_struct();
+                                let mut struct_values = vec![];
+                                for (idx, nested_field) in struct_type.fields().enumerate() {
+                                    let nested_array = struct_arr.column(idx);
+                                    if nested_array.is_null(i) {
+                                        struct_values.push(Scalar::Null(nested_field.data_type().clone()));
+                                    } else {
+                                        // Extract nested value based on type
+                                        let nested_scalar = match nested_field.data_type() {
+                                            &DataType::LONG => {
+                                                let arr = nested_array.as_primitive::<crate::arrow::datatypes::Int64Type>();
+                                                Scalar::from(arr.value(i))
+                                            }
+                                            &DataType::DOUBLE => {
+                                                let arr = nested_array.as_primitive::<crate::arrow::datatypes::Float64Type>();
+                                                Scalar::from(arr.value(i))
+                                            }
+                                            _ => Scalar::Null(nested_field.data_type().clone()),
+                                        };
+                                        struct_values.push(nested_scalar);
+                                    }
+                                }
+                                Scalar::Struct(crate::expressions::StructData::try_new(
+                                    struct_type.fields().cloned().collect(),
+                                    struct_values,
+                                )?)
+                            }
+                            _ => Scalar::Null(field.data_type().clone()),
+                        }
+                    };
+                    scalar_values.push(scalar);
+                }
+                
+                let array_type = crate::schema::ArrayType::new(field.data_type().clone(), field.is_nullable());
+                let array_data = ArrayData::try_new(array_type, scalar_values)?;
+                parsed_columns.push(array_data);
+            }
+            
+            // Append parsed columns to original batch
+            let merged = batch.engine_data.append_columns(target_schema.clone(), parsed_columns)?;
+            
             Ok(FilteredEngineDataArc {
-                engine_data: parsed.into(),
+                engine_data: Arc::from(merged),
                 selection_vector: batch.selection_vector,
             })
         })))

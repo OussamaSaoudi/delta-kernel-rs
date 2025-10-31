@@ -881,7 +881,6 @@ impl Display for UnaryExpressionOp {
         use UnaryExpressionOp::*;
         match self {
             ToJson => write!(f, "TO_JSON"),
-            ParseJson => write!(f, "PARSE_JSON"),
         }
     }
 }
