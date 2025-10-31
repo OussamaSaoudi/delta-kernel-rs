@@ -95,6 +95,7 @@ pub mod kernel_df;
 pub mod scan;
 pub mod schema;
 pub mod snapshot;
+pub mod state_machine;
 pub mod table_changes;
 pub mod table_configuration;
 pub mod table_features;

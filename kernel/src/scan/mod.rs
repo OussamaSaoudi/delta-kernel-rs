@@ -35,6 +35,7 @@ use self::log_replay::scan_action_iter;
 
 pub(crate) mod data_skipping;
 pub mod log_replay;
+pub mod phases;
 pub mod state;
 
 // safety: we define get_log_schema() and _know_ it contains ADD_NAME and REMOVE_NAME
@@ -70,6 +71,40 @@ impl ScanBuilder {
             schema: None,
             predicate: None,
         }
+    }
+    
+    /// Build a state machine for scan metadata generation.
+    ///
+    /// Returns the initial CommitReplayPhase which will eventually produce a Scan.
+    pub fn build_state_machine(self) -> DeltaResult<crate::state_machine::StateMachinePhase<Scan>> {
+        use dashmap::DashSet;
+        
+        let logical_schema = self.schema.unwrap_or_else(|| self.snapshot.schema());
+        let state_info = StateInfo::try_new(
+            logical_schema.as_ref(),
+            &self.snapshot.metadata().partition_columns,
+            self.snapshot.table_configuration().column_mapping_mode(),
+        )?;
+
+        let physical_predicate = match self.predicate {
+            Some(predicate) => PhysicalPredicate::try_new(&predicate, &logical_schema)?,
+            None => PhysicalPredicate::None,
+        };
+
+        let tombstone_set = Arc::new(DashSet::new());
+        let dedup_filter = Arc::new(crate::kernel_df::CommitDedupFilter::new(tombstone_set));
+
+        Ok(crate::state_machine::StateMachinePhase::PartialResult(
+            Box::new(crate::scan::phases::CommitReplayPhase {
+                snapshot: self.snapshot,
+                logical_schema,
+                physical_schema: Arc::new(StructType::new(state_info.read_fields)),
+                physical_predicate,
+                all_fields: Arc::new(state_info.all_fields),
+                have_partition_cols: state_info.have_partition_cols,
+                dedup_filter,
+            }),
+        ))
     }
 
     /// Provide [`Schema`] for columns to select from the [`Snapshot`].

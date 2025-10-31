@@ -28,6 +28,23 @@ pub trait RowFilter: RowVisitor + Send + Sync {
     fn filter_row<'a>(&self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool>;
 }
 
+// Implement RowFilter for Arc<T>
+impl<T: RowFilter + ?Sized> RowFilter for Arc<T> {
+    fn filter_row<'a>(&self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
+        (**self).filter_row(i, getters)
+    }
+}
+
+impl<T: RowVisitor + ?Sized> RowVisitor for Arc<T> {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        (**self).selected_column_names_and_types()
+    }
+
+    fn visit<'a>(&mut self, _row_count: usize, _getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        Ok(())
+    }
+}
+
 // Could even become a macro:
 
 // impl AddRemoveDedupFilter {
@@ -160,6 +177,9 @@ pub enum LogicalPlanNode {
     Select(SelectNode),
     Union(UnionNode),
     Custom(CustomNode),
+    /// Run multiple visitors on the same data stream
+    /// Useful for extracting multiple pieces of data (e.g., dedup + sidecar collection)
+    DataVisitor(DataVisitorNode),
 }
 #[derive(Debug)]
 struct CustomNode {
@@ -173,14 +193,29 @@ pub enum CustomImpl {
     StatsSkipping,
 }
 
+/// Node that runs multiple visitors on the same data stream
+pub struct DataVisitorNode {
+    pub child: Box<LogicalPlanNode>,
+    pub visitors: Vec<Arc<dyn RowVisitor + Send + Sync>>,
+}
+
+impl std::fmt::Debug for DataVisitorNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DataVisitorNode")
+            .field("child", &self.child)
+            .field("num_visitors", &self.visitors.len())
+            .finish()
+    }
+}
+
 type FallibleFilteredDataIter = Box<dyn Iterator<Item = DeltaResult<FilteredEngineDataArc>>>;
 
-trait PhysicalPlanExecutor {
+pub(crate) trait PhysicalPlanExecutor {
     fn execute(&self, plan: LogicalPlanNode) -> DeltaResult<FallibleFilteredDataIter>;
 }
 
-struct DefaultPlanExecutor {
-    engine: Arc<dyn Engine>,
+pub(crate) struct DefaultPlanExecutor {
+    pub(crate) engine: Arc<dyn Engine>,
 }
 
 impl DefaultPlanExecutor {
@@ -296,6 +331,7 @@ impl PhysicalPlanExecutor for DefaultPlanExecutor {
             LogicalPlanNode::Select(select_node) => self.execute_select(select_node),
             LogicalPlanNode::Custom(custom_node) => self.execute_custom(custom_node),
             LogicalPlanNode::Union(union_node) => self.execute_union(union_node),
+            LogicalPlanNode::DataVisitor(_) => todo!("DataVisitor not yet implemented in DefaultPlanExecutor"),
         }
     }
 }
@@ -306,7 +342,8 @@ impl LogicalPlanNode {
             LogicalPlanNode::Filter(filter_node) => filter_node.child.schema(),
             LogicalPlanNode::Select(select_node) => select_node.output_type.clone(),
             LogicalPlanNode::Union(union_node) => union_node.a.schema().clone(),
-            LogicalPlanNode::Custom(custom_node) => todo!(),
+            LogicalPlanNode::Custom(_custom_node) => todo!(),
+            LogicalPlanNode::DataVisitor(visitor_node) => visitor_node.child.schema(),
         }
     }
     fn select(self, columns: Vec<ExpressionRef>) -> DeltaResult<Self> {
@@ -325,7 +362,7 @@ impl LogicalPlanNode {
         }))
     }
 
-    fn filter(self, filter: impl RowFilter + 'static) -> DeltaResult<Self> {
+    pub fn filter(self, filter: impl RowFilter + 'static) -> DeltaResult<Self> {
         let column_names = filter.selected_column_names_and_types().0;
         Ok(Self::Filter(FilterNode {
             child: Box::new(self),
@@ -335,7 +372,7 @@ impl LogicalPlanNode {
         }))
     }
 
-    fn filter_ordered(self, filter: impl RowFilter + 'static) -> DeltaResult<Self> {
+    pub fn filter_ordered(self, filter: impl RowFilter + 'static) -> DeltaResult<Self> {
         let column_names = filter.selected_column_names_and_types().0;
         Ok(Self::Filter(FilterNode {
             child: Box::new(self),
@@ -345,18 +382,26 @@ impl LogicalPlanNode {
         }))
     }
 
-    fn scan_json(files: Vec<FileMeta>, schema: SchemaRef) -> DeltaResult<Self> {
+    pub fn scan_json(files: Vec<FileMeta>, schema: SchemaRef) -> DeltaResult<Self> {
         Ok(Self::Scan(ScanNode {
             file_type: FileType::Json,
             files,
             schema,
         }))
     }
-    fn scan_parquet(files: Vec<FileMeta>, schema: SchemaRef) -> DeltaResult<Self> {
+    
+    pub fn scan_parquet(files: Vec<FileMeta>, schema: SchemaRef) -> DeltaResult<Self> {
         Ok(Self::Scan(ScanNode {
             file_type: FileType::Parquet,
             files,
             schema,
+        }))
+    }
+    
+    pub fn with_visitors(self, visitors: Vec<Arc<dyn RowVisitor + Send + Sync>>) -> DeltaResult<Self> {
+        Ok(Self::DataVisitor(DataVisitorNode {
+            child: Box::new(self),
+            visitors,
         }))
     }
 
@@ -545,14 +590,133 @@ impl SharedFileActionDeduplicator {
     }
 }
 
-impl RowFilter for SharedAddRemoveDedupFilter {
+/// Dedup filter for COMMIT files - mutates tombstone set
+pub struct CommitDedupFilter {
+    deduplicator: SharedFileActionDeduplicator,
+}
+
+impl CommitDedupFilter {
+    pub fn new(tombstone_set: Arc<DashSet<FileActionKey>>) -> Self {
+        Self {
+            deduplicator: SharedFileActionDeduplicator::new(
+                tombstone_set,
+                true, // is_log_batch
+                0, // add_path_index
+                5, // remove_path_index  
+                2, // add_dv_start
+                6, // remove_dv_start
+            ),
+        }
+    }
+
+    pub fn tombstone_set(&self) -> Arc<DashSet<FileActionKey>> {
+        self.deduplicator.seen_file_keys.clone()
+    }
+}
+
+impl RowFilter for CommitDedupFilter {
     fn filter_row<'a>(&self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
-        // FIXME: Put the filter back
-        // let x = self.is_valid_add(i, getters)?;
-        // println!(" is valid is {x}")
+        let Some((file_key, is_add)) = self.deduplicator.extract_file_action(i, getters, false)? else {
+            return Ok(false);
+        };
+        if self.deduplicator.check_and_record_seen(file_key) || !is_add {
+            return Ok(false);
+        }
         Ok(true)
     }
 }
+
+impl RowVisitor for CommitDedupFilter {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+            const STRING: DataType = DataType::STRING;
+            const INTEGER: DataType = DataType::INTEGER;
+            let ss_map: DataType = MapType::new(STRING, STRING, true).into();
+            let types_and_names = vec![
+                (STRING, column_name!("add.path")),
+                (ss_map, column_name!("add.partitionValues")),
+                (STRING, column_name!("add.deletionVector.storageType")),
+                (STRING, column_name!("add.deletionVector.pathOrInlineDv")),
+                (INTEGER, column_name!("add.deletionVector.offset")),
+                (STRING, column_name!("remove.path")),
+                (STRING, column_name!("remove.deletionVector.storageType")),
+                (STRING, column_name!("remove.deletionVector.pathOrInlineDv")),
+                (INTEGER, column_name!("remove.deletionVector.offset")),
+            ];
+            let (types, names) = types_and_names.into_iter().unzip();
+            (names, types).into()
+        });
+        NAMES_AND_TYPES.as_ref()
+    }
+
+    fn visit<'a>(&mut self, _row_count: usize, _getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        Ok(())
+    }
+}
+
+/// Dedup filter for CHECKPOINT files - reads frozen tombstone set
+pub struct CheckpointDedupFilter {
+    deduplicator: SharedFileActionDeduplicator,
+}
+
+impl CheckpointDedupFilter {
+    pub fn new(tombstone_set: Arc<DashSet<FileActionKey>>) -> Self {
+        Self {
+            deduplicator: SharedFileActionDeduplicator::new(
+                tombstone_set,
+                false, // is_log_batch (read-only)
+                0, // add_path_index
+                0, // remove_path_index (unused)
+                2, // add_dv_start
+                0, // remove_dv_start (unused)
+            ),
+        }
+    }
+}
+
+impl RowFilter for CheckpointDedupFilter {
+    fn filter_row<'a>(&self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
+        let Some((file_key, is_add)) = self.deduplicator.extract_file_action(i, getters, true)? else {
+            return Ok(false);
+        };
+        if self.deduplicator.check_and_record_seen(file_key) || !is_add {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+}
+
+impl RowVisitor for CheckpointDedupFilter {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+            const STRING: DataType = DataType::STRING;
+            const INTEGER: DataType = DataType::INTEGER;
+            let ss_map: DataType = MapType::new(STRING, STRING, true).into();
+            let types_and_names = vec![
+                (STRING, column_name!("add.path")),
+                (ss_map, column_name!("add.partitionValues")),
+                (STRING, column_name!("add.deletionVector.storageType")),
+                (STRING, column_name!("add.deletionVector.pathOrInlineDv")),
+                (INTEGER, column_name!("add.deletionVector.offset")),
+            ];
+            let (types, names) = types_and_names.into_iter().unzip();
+            (names, types).into()
+        });
+        NAMES_AND_TYPES.as_ref()
+    }
+
+    fn visit<'a>(&mut self, _row_count: usize, _getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        Ok(())
+    }
+}
+
+// Keep SharedAddRemoveDedupFilter for backward compat
+impl RowFilter for SharedAddRemoveDedupFilter {
+    fn filter_row<'a>(&self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
+        self.is_valid_add(i, getters)
+    }
+}
+
 pub struct SharedAddRemoveDedupFilter {
     deduplicator: SharedFileActionDeduplicator,
     logical_schema: SchemaRef,
@@ -583,6 +747,12 @@ impl SharedAddRemoveDedupFilter {
             ),
             logical_schema,
         }
+    }
+
+    /// Get the tombstone set (set of seen file action keys).
+    /// Used by phases to extract accumulated state for transitions.
+    pub fn tombstone_set(&self) -> Arc<DashSet<FileActionKey>> {
+        self.deduplicator.seen_file_keys.clone()
     }
 
     /// True if this row contains an Add action that should survive log replay. Skip it if the row
@@ -642,8 +812,11 @@ impl RowVisitor for SharedAddRemoveDedupFilter {
         }
     }
 
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        todo!()
+    fn visit<'a>(&mut self, _row_count: usize, _getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        // Note: This visit method is not actually called when using filter_row().
+        // The FilterVisitor in kernel_df calls filter_row() directly for each row.
+        // This is just a placeholder to satisfy the RowVisitor trait.
+        Ok(())
     }
 }
 

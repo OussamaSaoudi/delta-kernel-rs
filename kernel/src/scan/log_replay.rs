@@ -227,10 +227,15 @@ impl AddRemoveDedupVisitor<'_> {
         // The file extraction logic selects the appropriate indexes based on whether we found a valid path.
         // Remove getters are not included when visiting a non-log batch (checkpoint batch), so do
         // not try to extract remove actions in that case.
+        
+        // Extract is_log_batch first, drop the borrow, then do extract_file_action
+        let is_log_batch = self.deduplicator.borrow().is_log_batch();
+        let skip_removes = !is_log_batch;
+        
         let Some((file_key, is_add)) = self.deduplicator.borrow().extract_file_action(
             i,
             getters,
-            !self.deduplicator.borrow_mut().is_log_batch(), // skip_removes. true if this is a checkpoint batch
+            skip_removes,
         )?
         else {
             return Ok(false);
