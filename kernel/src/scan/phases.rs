@@ -6,12 +6,65 @@ use std::sync::Arc;
 use crate::kernel_df::{CheckpointDedupFilter, CommitDedupFilter, LogicalPlanNode};
 use crate::log_replay::FileActionKey;
 use crate::scan::{PhysicalPredicate, Scan};
-use crate::schema::SchemaRef;
+use crate::schema::{DataType, PrimitiveType, SchemaRef, SchemaTransform, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::state_machine::{PartialResultPhase, StateMachinePhase};
 use crate::DeltaResult;
+use std::borrow::Cow;
 
 use super::state_info::StateInfo;
+
+/// Build stats schema from predicate schema.
+/// Stats has: numRecords, nullCount, minValues, maxValues
+fn build_stats_schema(predicate_schema: &SchemaRef) -> DeltaResult<SchemaRef> {
+    // Convert all fields to nullable
+    struct NullableStatsTransform;
+    impl<'a> SchemaTransform<'a> for NullableStatsTransform {
+        fn transform_struct_field(
+            &mut self,
+            field: &'a StructField,
+        ) -> Option<Cow<'a, StructField>> {
+            let field = match self.transform(field.data_type())? {
+                Cow::Borrowed(_) if field.is_nullable() => Cow::Borrowed(field),
+                data_type => Cow::Owned(StructField {
+                    name: field.name.clone(),
+                    data_type: data_type.into_owned(),
+                    nullable: true,
+                    metadata: field.metadata.clone(),
+                }),
+            };
+            Some(field)
+        }
+    }
+
+    // Convert primitives to LONG for nullCount
+    struct NullCountStatsTransform;
+    impl<'a> SchemaTransform<'a> for NullCountStatsTransform {
+        fn transform_primitive(
+            &mut self,
+            _ptype: &'a PrimitiveType,
+        ) -> Option<Cow<'a, PrimitiveType>> {
+            Some(Cow::Owned(PrimitiveType::Long))
+        }
+    }
+
+    let nullable_schema = NullableStatsTransform
+        .transform_struct(predicate_schema.as_ref())
+        .ok_or_else(|| crate::Error::generic("Failed to transform predicate schema"))?
+        .into_owned();
+
+    let nullcount_schema = NullCountStatsTransform
+        .transform_struct(&nullable_schema)
+        .ok_or_else(|| crate::Error::generic("Failed to transform nullcount schema"))?
+        .into_owned();
+
+    Ok(Arc::new(StructType::new_unchecked([
+        StructField::nullable("numRecords", DataType::LONG),
+        StructField::nullable("nullCount", nullcount_schema),
+        StructField::nullable("minValues", nullable_schema.clone()),
+        StructField::nullable("maxValues", nullable_schema),
+    ])))
+}
 
 /// Phase 1: Process commits sequentially to build tombstone set
 pub struct CommitReplayPhase {
@@ -37,8 +90,26 @@ impl PartialResultPhase for CommitReplayPhase {
             return LogicalPlanNode::scan_json(vec![], crate::scan::COMMIT_READ_SCHEMA.clone());
         }
 
-        LogicalPlanNode::scan_json(commit_files, crate::scan::COMMIT_READ_SCHEMA.clone())?
-            .filter_ordered(self.dedup_filter.clone())
+        let mut plan = LogicalPlanNode::scan_json(commit_files, crate::scan::COMMIT_READ_SCHEMA.clone())?;
+        
+        // Add data skipping if we have a predicate
+        if let PhysicalPredicate::Some(predicate, predicate_schema) = &self.state_info.physical_predicate {
+            // Transform predicate for stats using existing logic
+            use crate::scan::data_skipping::as_data_skipping_predicate;
+            if let Some(stats_predicate) = as_data_skipping_predicate(predicate) {
+                // Build stats schema from predicate schema
+                let stats_schema = build_stats_schema(predicate_schema)?;
+                
+                // Add: ParseJson → FilterByExpression
+                use crate::expressions::column_name;
+                plan = plan
+                    .parse_json_column(column_name!("add.stats"), stats_schema, "parsed_stats")?
+                    .filter_by_expression(Arc::new(stats_predicate))?;
+            }
+        }
+        
+        // Add deduplication filter
+        plan.filter_ordered(self.dedup_filter.clone())
     }
 
     fn next(self: Box<Self>) -> DeltaResult<StateMachinePhase<Scan>> {
@@ -645,6 +716,150 @@ fn test_data_skipping_with_real_predicate() -> DeltaResult<()> {
         println!("  ✓ Filter on parsed stats works");
         println!("  ✓ Kept {} of {} files", kept_files, total_files);
 
+        Ok(())
+    }
+
+    /// PROOF: ScanBuilder with predicate automatically includes data skipping
+    #[test]
+    fn test_scan_builder_integrates_data_skipping() -> DeltaResult<()> {
+        use crate::arrow::array::{Array, AsArray};
+        use crate::expressions::{column_expr, Predicate};
+        use crate::kernel_df::{DefaultPlanExecutor, PhysicalPlanExecutor};
+
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/basic_partitioned/")).unwrap();
+        let url = url::Url::from_directory_path(path).unwrap();
+        let engine = Arc::new(SyncEngine::new());
+        let snapshot = crate::Snapshot::builder_for(url).build(engine.as_ref())?;
+        
+        println!("\n=== INTEGRATED DATA SKIPPING ===");
+        
+        // WITHOUT predicate
+        let phase_no_pred = ScanBuilder::new(snapshot.clone()).build_state_machine()?;
+        let plan_no_pred = match phase_no_pred {
+            crate::state_machine::StateMachinePhase::PartialResult(p) => p.get_plan()?,
+            _ => panic!("Expected PartialResult"),
+        };
+        
+        // Execute plan without predicate
+        let executor = DefaultPlanExecutor { engine: engine.clone() };
+        let batches_no_pred: Vec<_> = executor.execute(plan_no_pred)?.collect::<Result<Vec<_>, _>>()?;
+        let total_without_skip = batches_no_pred.iter()
+            .map(|b| b.selection_vector.iter().filter(|&&x| x).count())
+            .sum::<usize>();
+        
+        println!("Without predicate: {} files", total_without_skip);
+        
+        // WITH predicate - USER JUST PROVIDES: number > 2
+        let user_predicate = Arc::new(Predicate::gt(
+            column_expr!("number"),
+            crate::Expression::literal(2i64),
+        ));
+        
+        let phase_with_pred = ScanBuilder::new(snapshot.clone())
+            .with_predicate(user_predicate.clone())
+            .build_state_machine()?;
+        
+        let plan_with_pred = match phase_with_pred {
+            crate::state_machine::StateMachinePhase::PartialResult(p) => p.get_plan()?,
+            _ => panic!("Expected PartialResult"),
+        };
+        
+        // EXECUTE plan with predicate
+        let batches_with_pred: Vec<_> = executor.execute(plan_with_pred)?.collect::<Result<Vec<_>, _>>()?;
+        let total_with_skip = batches_with_pred.iter()
+            .map(|b| b.selection_vector.iter().filter(|&&x| x).count())
+            .sum::<usize>();
+        
+        println!("With predicate (number > 2): {} files", total_with_skip);
+        println!("Skipped: {} files", total_without_skip - total_with_skip);
+        
+        // VERIFY data skipping worked
+        assert!(total_with_skip < total_without_skip, "Data skipping should reduce files");
+        
+        // COMPARE WITH CURRENT IMPLEMENTATION
+        println!("\n=== COMPARING WITH CURRENT IMPLEMENTATION ===");
+        
+        // Build scan with current implementation using same predicate
+        let current_scan = ScanBuilder::new(snapshot.clone())
+            .with_predicate(user_predicate)
+            .build()?;
+        
+        let current_metadata: Vec<_> = current_scan.scan_metadata(engine.as_ref())?.collect::<Result<Vec<_>, _>>()?;
+        
+        fn extract_paths(
+            paths: &mut Vec<String>,
+            path: &str,
+            _size: i64,
+            _stats: Option<crate::scan::state::Stats>,
+            _dv_info: crate::scan::state::DvInfo,
+            _transform: Option<Arc<crate::Expression>>,
+            _partition_values: HashMap<String, String>,
+        ) {
+            paths.push(path.to_string());
+        }
+        
+        let mut current_paths = vec![];
+        for meta in &current_metadata {
+            current_paths = meta.visit_scan_files(current_paths, extract_paths)?;
+        }
+        current_paths.sort();
+        
+        println!("Current implementation with predicate: {} files", current_paths.len());
+        for (i, path) in current_paths.iter().enumerate() {
+            println!("  [{}] {}", i, path);
+        }
+        
+        // Extract paths from state machine batches
+        use crate::engine::arrow_data::ArrowEngineData;
+        let mut sm_paths = vec![];
+        for (batch_idx, batch) in batches_with_pred.iter().enumerate() {
+            let arrow_data = batch.engine_data.clone().as_any()
+                .downcast::<ArrowEngineData>()
+                .map_err(|_| crate::Error::generic("Expected ArrowEngineData"))?;
+            let rb = arrow_data.record_batch();
+            
+            // Extract from nested "add" struct
+            if let Some(add_col) = rb.column_by_name("add") {
+                let add_struct = add_col.as_struct();
+                // Find path column index in the struct
+                if let Some(path_col) = add_struct.column_by_name("path") {
+                    let path_array = path_col.as_string::<i32>();
+                    for i in 0..rb.num_rows() {
+                        if i < batch.selection_vector.len() && batch.selection_vector[i] {
+                            if !add_col.is_null(i) {
+                                if let Some(path) = path_array.value(i).into() {
+                                    sm_paths.push(path.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        sm_paths.sort();
+        
+        println!("\nState machine with predicate: {} files", sm_paths.len());
+        for (i, path) in sm_paths.iter().enumerate() {
+            println!("  [{}] {}", i, path);
+        }
+        
+        // ASSERT EXACT MATCH
+        assert_eq!(sm_paths.len(), current_paths.len(), 
+            "State machine found {} files but current found {}", sm_paths.len(), current_paths.len());
+        
+        for (i, (sm_path, current_path)) in sm_paths.iter().zip(current_paths.iter()).enumerate() {
+            assert_eq!(sm_path, current_path,
+                "File [{}] differs: SM='{}' vs Current='{}'", i, sm_path, current_path);
+        }
+        
+        println!("\n✅✅✅ PROOF COMPLETE ✅✅✅");
+        println!("State machine with data skipping produces IDENTICAL files to current:");
+        println!("  ✓ Same {} files after skipping", sm_paths.len());
+        println!("  ✓ Same add.path values (exact match)");
+        println!("  ✓ Automatic predicate transformation");
+        println!("  ✓ Automatic stats schema generation");
+        println!("  ✓ Plan-based execution\n");
+        
         Ok(())
     }
 }
