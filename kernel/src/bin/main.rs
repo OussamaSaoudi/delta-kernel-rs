@@ -41,7 +41,7 @@ async fn main() -> DeltaResult<()> {
     let object_store = Arc::new(LocalFileSystem::new());
     let engine = DefaultEngine::new(object_store, task_executor.into());
 
-    let snapshot = Snapshot::builder(url).build(&engine)?;
+    let snapshot = crate::Snapshot::builder_for(url).build(&engine)?;
     let plan = snapshot.get_scan_plan()?;
     println!("Plan created in {:?}", start.elapsed());
 

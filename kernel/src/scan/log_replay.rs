@@ -224,8 +224,8 @@ impl AddRemoveDedupVisitor<'_> {
             .transpose()?;
         if transform.is_some() {
             // fill in any needed `None`s for previous rows
-            self.row_transform_exprs.resize_with(i, Default::default);
-            self.row_transform_exprs.push(transform);
+            //self.row_transform_exprs.resize_with(i, Default::default);
+            //self.row_transform_exprs.push(transform);
         }
         Ok(true)
     }
@@ -265,7 +265,7 @@ impl RowVisitor for AddRemoveDedupVisitor<'_> {
     }
 
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        let is_log_batch = self.deduplicator.is_log_batch();
+        let is_log_batch = self.deduplicator.borrow().is_log_batch();
         let expected_getters = if is_log_batch { 10 } else { 6 };
         require!(
             getters.len() == expected_getters,

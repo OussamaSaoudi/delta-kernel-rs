@@ -10,11 +10,10 @@ use itertools::Itertools;
 
 use crate::{
     actions::deletion_vector::DeletionVectorDescriptor,
-    checkpoint::log_replay::CheckpointVisitor,
     engine_data::{self, GetData, TypedGetData as _},
     log_replay::{FileActionDeduplicator, FileActionKey},
     log_segment::LogSegment,
-    scan::{log_replay::AddRemoveDedupVisitor, CHECKPOINT_READ_SCHEMA, COMMIT_READ_SCHEMA},
+    scan::log_replay::AddRemoveDedupVisitor,
     schema::{ColumnName, DataType, Schema, SchemaRef},
     DeltaResult, Engine, EngineData, Error, Expression, ExpressionRef, FileMeta, RowVisitor,
     Snapshot,
@@ -406,7 +405,7 @@ mod parse_json_tests {
         )).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
         let engine = Arc::new(SyncEngine::new());
-        let snapshot = Arc::new(crate::Snapshot::builder(url).build(engine.as_ref())?);
+        let snapshot = crate::Snapshot::builder_for(url).build(engine.as_ref())?;
         
         // Build plan: Scan → ParseJson
         let commit_files: Vec<_> = snapshot.log_segment()
@@ -414,11 +413,11 @@ mod parse_json_tests {
             .map(|p| p.location.clone())
             .collect();
         
-        let scan_schema = crate::actions::get_log_schema()
+        let scan_schema = crate::actions::get_commit_schema()
             .project(&["add"])?;
         
         // Define stats schema (simplified)
-        let stats_schema = Arc::new(StructType::new(vec![
+        let stats_schema = Arc::new(StructType::new_unchecked(vec![
             StructField::nullable("numRecords", DataType::LONG),
         ]));
         
@@ -468,7 +467,7 @@ impl LogicalPlanNode {
                     &parse_node.output_column,
                     DataType::Struct(Box::new(parse_node.target_schema.as_ref().clone())),
                 ));
-                Arc::new(StructType::new(fields))
+                Arc::new(StructType::new_unchecked(fields))
             }
         }
     }
@@ -571,7 +570,9 @@ impl Snapshot {
             .map(|log_path| log_path.location.clone())
             .collect_vec();
         json_paths.reverse();
-        let json_scan = LogicalPlanNode::scan_json(json_paths, COMMIT_READ_SCHEMA.clone())?;
+        use crate::actions::get_commit_schema;
+        let commit_schema = get_commit_schema().project(&["add", "remove"])?;
+        let json_scan = LogicalPlanNode::scan_json(json_paths, commit_schema.clone())?;
 
         let parquet_paths = self
             .log_segment()
@@ -580,7 +581,7 @@ impl Snapshot {
             .map(|log_path| log_path.location.clone())
             .collect_vec();
         let parquet_scan =
-            LogicalPlanNode::scan_parquet(parquet_paths, COMMIT_READ_SCHEMA.clone())?;
+            LogicalPlanNode::scan_parquet(parquet_paths, commit_schema)?;
 
         let set = Arc::new(DashSet::new());
         let x = SharedAddRemoveDedupFilter::new(set.clone(), json_scan.schema(), true);
@@ -998,7 +999,7 @@ mod tests {
         let object_store = Arc::new(LocalFileSystem::new());
         let engine = DefaultEngine::new(object_store, task_executor.into());
 
-        let snapshot = Snapshot::builder(url).build(&engine).unwrap();
+        let snapshot = crate::Snapshot::builder_for(url).build(&engine).unwrap();
         let plan = snapshot.get_scan_plan().unwrap();
         let executor = DefaultPlanExecutor {
             engine: Arc::new(engine),

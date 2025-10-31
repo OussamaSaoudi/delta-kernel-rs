@@ -83,16 +83,13 @@ impl ScanBuilder {
         use dashmap::DashSet;
 
         let logical_schema = self.schema.unwrap_or_else(|| self.snapshot.schema());
-        let state_info = StateInfo::try_new(
-            logical_schema.as_ref(),
-            &self.snapshot.metadata().partition_columns,
-            self.snapshot.table_configuration().column_mapping_mode(),
-        )?;
-
-        let physical_predicate = match self.predicate {
-            Some(predicate) => PhysicalPredicate::try_new(&predicate, &logical_schema)?,
-            None => PhysicalPredicate::None,
-        };
+        
+        let state_info = Arc::new(crate::scan::state_info::StateInfo::try_new(
+            logical_schema,
+            self.snapshot.table_configuration(),
+            self.predicate,
+            (),  // Empty classifier
+        )?);
 
         let tombstone_set = Arc::new(DashSet::new());
         let dedup_filter = Arc::new(crate::kernel_df::CommitDedupFilter::new(tombstone_set));
@@ -100,11 +97,7 @@ impl ScanBuilder {
         Ok(crate::state_machine::StateMachinePhase::PartialResult(
             Box::new(crate::scan::phases::CommitReplayPhase {
                 snapshot: self.snapshot,
-                logical_schema,
-                physical_schema: Arc::new(StructType::new(state_info.read_fields)),
-                physical_predicate,
-                all_fields: Arc::new(state_info.all_fields),
-                have_partition_cols: state_info.have_partition_cols,
+                state_info,
                 dedup_filter,
             }),
         ))

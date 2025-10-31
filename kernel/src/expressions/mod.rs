@@ -58,8 +58,6 @@ pub enum BinaryPredicateOp {
 pub enum UnaryExpressionOp {
     /// Convert struct data to JSON-encoded strings
     ToJson,
-    /// Parse JSON string to structured data (requires target schema in expression context)
-    ParseJson,
 }
 
 /// A binary expression operator.
@@ -547,9 +545,9 @@ impl Expression {
                     }))
                 }
                 Scalar::Null(data_type) => data_type.clone(),
-                Scalar::Struct(struct_data) => DataType::Struct(Box::new(StructType::new(
-                    struct_data.fields().iter().cloned(),
-                ))),
+                Scalar::Struct(struct_data) => DataType::Struct(Box::new(
+                    StructType::new_unchecked(struct_data.fields().iter().cloned()),
+                )),
                 Scalar::Array(array_data) => {
                     DataType::Array(Box::new(array_data.array_type().clone()))
                 }
@@ -559,7 +557,18 @@ impl Expression {
                 let Some(schema) = resolve_with else {
                     return Err(Error::generic("could not resolve!"));
                 };
-                let Some(field) = schema.nested_field(column_name) else {
+                // Navigate nested path to find field
+                let field =
+                    column_name
+                        .path()
+                        .iter()
+                        .try_fold(schema.as_ref(), |curr_schema, part| {
+                            curr_schema.field(part).and_then(|f| match f.data_type() {
+                                DataType::Struct(nested) => Some(nested.as_ref()),
+                                _ => None,
+                            })
+                        });
+                let Some(field) = field.and_then(|s| s.field(column_name.path().last()?)) else {
                     return Err(Error::generic("could not resolve!"));
                 };
                 field.data_type().clone()
@@ -574,14 +583,15 @@ impl Expression {
                         StructField::new(format! {"col-{counter}"}, data_type, true)
                     })
                     .try_collect()?;
-                DataType::struct_type(fields)
+                DataType::Struct(Box::new(StructType::new_unchecked(fields)))
             }
             Expression::Transform(transform) => todo!(),
             Expression::Unary(unary_expression) => todo!(),
             Expression::Binary(binary_expression) => {
                 binary_expression.left.data_type(resolve_with)?
             }
-            Expression::Opaque(opaque_expression) => todo!(),
+            Expression::Opaque(_opaque_expression) => todo!(),
+            Expression::Variadic(_) => todo!("Variadic expression data_type not implemented"),
             Expression::Unknown(_) => todo!(),
         };
         Ok(res)

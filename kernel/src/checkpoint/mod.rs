@@ -106,7 +106,8 @@ use crate::{DeltaResult, Engine, EngineData, Error, EvaluationHandlerExtension, 
 
 use url::Url;
 
-pub mod log_replay;
+// Note: log_replay module was moved to action_reconciliation
+
 #[cfg(test)]
 mod tests;
 
