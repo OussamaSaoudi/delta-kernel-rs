@@ -21,7 +21,7 @@ use crate::{
 };
 use crate::{
     expressions::column_name,
-    schema::{ColumnNamesAndTypes, MapType},
+    schema::{ColumnNamesAndTypes, MapType, StructField, StructType},
 };
 
 pub trait RowFilter: RowVisitor + Send + Sync {
@@ -180,6 +180,8 @@ pub enum LogicalPlanNode {
     /// Run multiple visitors on the same data stream
     /// Useful for extracting multiple pieces of data (e.g., dedup + sidecar collection)
     DataVisitor(DataVisitorNode),
+    /// Parse a JSON column into structured data
+    ParseJson(ParseJsonNode),
 }
 #[derive(Debug)]
 struct CustomNode {
@@ -206,6 +208,15 @@ impl std::fmt::Debug for DataVisitorNode {
             .field("num_visitors", &self.visitors.len())
             .finish()
     }
+}
+
+/// Node that parses a JSON column into structured data
+#[derive(Debug)]
+pub struct ParseJsonNode {
+    pub child: Box<LogicalPlanNode>,
+    pub json_column: ColumnName,      // Column containing JSON string (e.g., "add.stats")
+    pub target_schema: SchemaRef,     // Schema to parse JSON into
+    pub output_column: String,        // Name for the parsed column
 }
 
 type FallibleFilteredDataIter = Box<dyn Iterator<Item = DeltaResult<FilteredEngineDataArc>>>;
@@ -332,11 +343,117 @@ impl PhysicalPlanExecutor for DefaultPlanExecutor {
             LogicalPlanNode::Custom(custom_node) => self.execute_custom(custom_node),
             LogicalPlanNode::Union(union_node) => self.execute_union(union_node),
             LogicalPlanNode::DataVisitor(_) => todo!("DataVisitor not yet implemented in DefaultPlanExecutor"),
+            LogicalPlanNode::ParseJson(parse_node) => self.execute_parse_json(parse_node),
         }
     }
+    
 }
+
+impl DefaultPlanExecutor {
+    fn execute_parse_json(&self, node: ParseJsonNode) -> DeltaResult<FallibleFilteredDataIter> {
+        let child_iter = self.execute(*node.child)?;
+        let json_column = node.json_column;
+        let target_schema = node.target_schema;
+        let json_handler = self.engine.json_handler();
+        let eval_handler = self.engine.evaluation_handler();
+        
+        Ok(Box::new(child_iter.map(move |batch_result| {
+            let batch = batch_result?;
+            
+            // Extract JSON column
+            let json_expr = Expression::column(json_column.clone());
+            
+            // Get input schema from batch
+            use crate::engine::arrow_conversion::TryFromArrow;
+            use crate::schema::Schema;
+            
+            let arrow_data = batch.engine_data.any_ref()
+                .downcast_ref::<crate::engine::arrow_data::ArrowEngineData>()
+                .ok_or_else(|| Error::generic("Expected ArrowEngineData"))?;
+            let input_schema: SchemaRef = Schema::try_from_arrow(arrow_data.record_batch().schema())?.into();
+            
+            let eval = eval_handler.new_expression_evaluator(
+                input_schema,
+                Arc::new(json_expr),
+                DataType::STRING,
+            );
+            let json_data = eval.evaluate(batch.engine_data.as_ref())?;
+            
+            // Parse JSON
+            let parsed = json_handler.parse_json(json_data, target_schema.clone())?;
+            
+            // TODO: Merge parsed column with original batch
+            Ok(FilteredEngineDataArc {
+                engine_data: parsed.into(),
+                selection_vector: batch.selection_vector,
+            })
+        })))
+    }
+}
+
+#[cfg(test)]
+mod parse_json_tests {
+    use super::*;
+    use crate::engine::sync::SyncEngine;
+    use crate::schema::{DataType, StructField, StructType};
+    use std::path::PathBuf;
+    
+    #[test]
+    fn test_parse_json_node_basic() -> DeltaResult<()> {
+        // Test ParseJson on actual Delta table with stats
+        let path = std::fs::canonicalize(PathBuf::from(
+            "./tests/data/table-without-dv-small/",
+        )).unwrap();
+        let url = url::Url::from_directory_path(path).unwrap();
+        let engine = Arc::new(SyncEngine::new());
+        let snapshot = Arc::new(crate::Snapshot::builder(url).build(engine.as_ref())?);
+        
+        // Build plan: Scan → ParseJson
+        let commit_files: Vec<_> = snapshot.log_segment()
+            .ascending_commit_files.iter()
+            .map(|p| p.location.clone())
+            .collect();
+        
+        let scan_schema = crate::actions::get_log_schema()
+            .project(&["add"])?;
+        
+        // Define stats schema (simplified)
+        let stats_schema = Arc::new(StructType::new(vec![
+            StructField::nullable("numRecords", DataType::LONG),
+        ]));
+        
+        let plan = LogicalPlanNode::scan_json(commit_files, scan_schema)?
+            .parse_json_column(
+                crate::expressions::column_name!("add.stats"),
+                stats_schema.clone(),
+                "parsed_stats",
+            )?;
+        
+        // Verify plan schema includes parsed_stats
+        let output_schema = plan.schema();
+        assert!(output_schema.contains("parsed_stats"), 
+            "Output schema should contain parsed_stats column");
+        
+        println!("✅ ParseJson node created successfully");
+        println!("   Output schema contains: {:?}", 
+            output_schema.fields().map(|f| f.name()).collect::<Vec<_>>());
+        
+        // Execute the plan
+        let executor = DefaultPlanExecutor { engine };
+        let results: Vec<_> = executor.execute(plan)?.collect::<Result<Vec<_>, _>>()?;
+        
+        println!("✅ ParseJson executed successfully");
+        println!("   Produced {} batches", results.len());
+        
+        // Verify we got parsed stats data
+        assert!(!results.is_empty(), "Should produce at least one batch");
+        
+        Ok(())
+    }
+}
+
 impl LogicalPlanNode {
-    fn schema(&self) -> SchemaRef {
+    pub fn schema(&self) -> SchemaRef {
         match self {
             LogicalPlanNode::Scan(scan_node) => scan_node.schema.clone(),
             LogicalPlanNode::Filter(filter_node) => filter_node.child.schema(),
@@ -344,6 +461,15 @@ impl LogicalPlanNode {
             LogicalPlanNode::Union(union_node) => union_node.a.schema().clone(),
             LogicalPlanNode::Custom(_custom_node) => todo!(),
             LogicalPlanNode::DataVisitor(visitor_node) => visitor_node.child.schema(),
+            LogicalPlanNode::ParseJson(parse_node) => {
+                // Child schema + parsed column
+                let mut fields: Vec<_> = parse_node.child.schema().fields().cloned().collect();
+                fields.push(StructField::nullable(
+                    &parse_node.output_column,
+                    DataType::Struct(Box::new(parse_node.target_schema.as_ref().clone())),
+                ));
+                Arc::new(StructType::new(fields))
+            }
         }
     }
     fn select(self, columns: Vec<ExpressionRef>) -> DeltaResult<Self> {
@@ -402,6 +528,26 @@ impl LogicalPlanNode {
         Ok(Self::DataVisitor(DataVisitorNode {
             child: Box::new(self),
             visitors,
+        }))
+    }
+    
+    /// Parse a JSON column into structured data.
+    ///
+    /// # Arguments
+    /// * `json_column` - Name of the column containing JSON string (e.g., "add.stats")
+    /// * `target_schema` - Schema to parse the JSON into
+    /// * `output_name` - Name for the new parsed column
+    pub fn parse_json_column(
+        self,
+        json_column: impl Into<ColumnName>,
+        target_schema: SchemaRef,
+        output_name: impl Into<String>,
+    ) -> DeltaResult<Self> {
+        Ok(Self::ParseJson(ParseJsonNode {
+            child: Box::new(self),
+            json_column: json_column.into(),
+            target_schema,
+            output_column: output_name.into(),
         }))
     }
 

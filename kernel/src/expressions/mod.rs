@@ -58,6 +58,8 @@ pub enum BinaryPredicateOp {
 pub enum UnaryExpressionOp {
     /// Convert struct data to JSON-encoded strings
     ToJson,
+    /// Parse JSON string to structured data (requires target schema in expression context)
+    ParseJson,
 }
 
 /// A binary expression operator.
@@ -834,6 +836,7 @@ impl Display for UnaryExpressionOp {
         use UnaryExpressionOp::*;
         match self {
             ToJson => write!(f, "TO_JSON"),
+            ParseJson => write!(f, "PARSE_JSON"),
         }
     }
 }

@@ -241,6 +241,9 @@ pub fn evaluate_expression(
                 "ToJson operator requires STRING output, but got {data_type:?}"
             ))),
         },
+        (Unary(UnaryExpression { op: ParseJson, .. }), _) => {
+            Err(Error::generic("ParseJson should be used via ParseJsonNode plan node, not as expression"))
+        },
         (Binary(BinaryExpression { op, left, right }), _) => {
             let left_arr = evaluate_expression(left.as_ref(), batch, None)?;
             let right_arr = evaluate_expression(right.as_ref(), batch, None)?;
