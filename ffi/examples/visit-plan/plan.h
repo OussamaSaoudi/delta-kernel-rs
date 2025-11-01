@@ -21,7 +21,6 @@ enum PlanType {
   Filter,
   Select,
   Union,
-  DataVisitor,
   ParseJson,
   FilterByExpression,
   FileListing,
@@ -64,11 +63,6 @@ struct SelectPlan {
 struct UnionPlan {
   PlanItemList left;
   PlanItemList right;
-};
-
-struct DataVisitorPlan {
-  PlanItemList child;
-  void* visitor_context;  // Opaque
 };
 
 struct FilterPlan {
@@ -182,18 +176,6 @@ void visit_plan_union(
   put_plan_item(data, sibling_list_id, union_plan, Union);
 }
 
-void visit_plan_data_visitor(
-    void* data,
-    uintptr_t sibling_list_id,
-    uintptr_t child_plan_id,
-    void* visitor_context)
-{
-  struct DataVisitorPlan* dv = malloc(sizeof(struct DataVisitorPlan));
-  dv->child = get_plan_list(data, child_plan_id);
-  dv->visitor_context = visitor_context;
-  put_plan_item(data, sibling_list_id, dv, DataVisitor);
-}
-
 void visit_plan_parse_json(
     void* data,
     uintptr_t sibling_list_id,
@@ -274,7 +256,6 @@ PlanItemList construct_logical_plan(HandleSharedLogicalPlan plan) {
     .visit_filter = visit_plan_filter,
     .visit_select = visit_plan_select,
     .visit_union = visit_plan_union,
-    .visit_data_visitor = visit_plan_data_visitor,
     .visit_parse_json = visit_plan_parse_json,
     .visit_filter_by_expression = visit_plan_filter_by_expression,
     .visit_file_listing = visit_plan_file_listing,

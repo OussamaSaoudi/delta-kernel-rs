@@ -76,16 +76,6 @@ pub struct EnginePlanVisitor {
         ),
     >,
 
-    /// Visit DataVisitor node
-    pub visit_data_visitor: Option<
-        extern "C" fn(
-            data: *mut c_void,
-            sibling_list_id: usize,
-            child_plan_id: usize,
-            visitor_context: *mut c_void, // Opaque visitor
-        ),
-    >,
-
     /// Visit ParseJson node
     #[cfg(feature = "default-engine-base")]
     pub visit_parse_json: Option<
@@ -245,27 +235,6 @@ fn visit_plan_impl(
                     left_list_id,
                     right_list_id,
                 );
-            }
-            sibling_list_id
-        }
-
-        LogicalPlanNode::DataVisitor(data_visitor) => {
-            if let Some(visit_data_visitor) = visitor.visit_data_visitor {
-                // Visit child first
-                let child_list_id = (visitor.make_plan_list)(visitor.data, 1);
-                visit_plan_impl(&data_visitor.child, visitor, child_list_id);
-
-                // Visit this node - visitors are opaque (multiple visitors in a vec)
-                // For FFI we just pass the first visitor as opaque pointer
-                if let Some(first_visitor) = data_visitor.visitors.first() {
-                    let visitor_ptr = first_visitor.as_ref() as *const _ as *mut c_void;
-                    visit_data_visitor(
-                        visitor.data,
-                        sibling_list_id,
-                        child_list_id,
-                        visitor_ptr,
-                    );
-                }
             }
             sibling_list_id
         }

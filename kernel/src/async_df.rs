@@ -144,7 +144,6 @@ impl AsyncPlanExecutor {
             LogicalPlanNode::Filter(node) => self.execute_filter(node).await,
             LogicalPlanNode::Select(node) => self.execute_select(node).await,
             LogicalPlanNode::Union(node) => self.execute_union(node).await,
-            LogicalPlanNode::DataVisitor(_) => todo!("DataVisitor not yet implemented"),
             LogicalPlanNode::ParseJson(_) => todo!("ParseJson not yet implemented in async executor"),
             LogicalPlanNode::FilterByExpression(_) => todo!("FilterByExpression not yet implemented in async executor"),
             _ => todo!(),

@@ -169,9 +169,6 @@ pub enum LogicalPlanNode {
     Select(SelectNode),
     Union(UnionNode),
     Custom(CustomNode),
-    /// Run multiple visitors on the same data stream
-    /// Useful for extracting multiple pieces of data (e.g., dedup + sidecar collection)
-    DataVisitor(DataVisitorNode),
     /// Parse a JSON column into structured data
     ParseJson(ParseJsonNode),
     /// Filter by evaluating a predicate expression
@@ -191,21 +188,6 @@ struct CustomNode {
 pub enum CustomImpl {
     AddRemoveDedup,
     StatsSkipping,
-}
-
-/// Node that runs multiple visitors on the same data stream
-pub struct DataVisitorNode {
-    pub child: Box<LogicalPlanNode>,
-    pub visitors: Vec<Arc<dyn RowVisitor + Send + Sync>>,
-}
-
-impl std::fmt::Debug for DataVisitorNode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DataVisitorNode")
-            .field("child", &self.child)
-            .field("num_visitors", &self.visitors.len())
-            .finish()
-    }
 }
 
 /// Node that parses a JSON column into structured data
@@ -360,7 +342,6 @@ impl PhysicalPlanExecutor for DefaultPlanExecutor {
             LogicalPlanNode::Select(select_node) => self.execute_select(select_node),
             LogicalPlanNode::Custom(custom_node) => self.execute_custom(custom_node),
             LogicalPlanNode::Union(union_node) => self.execute_union(union_node),
-            LogicalPlanNode::DataVisitor(_) => todo!("DataVisitor not yet implemented in DefaultPlanExecutor"),
             LogicalPlanNode::ParseJson(parse_node) => self.execute_parse_json(parse_node),
             LogicalPlanNode::FilterByExpression(filter_node) => self.execute_filter_by_expression(filter_node),
             LogicalPlanNode::FileListing(listing_node) => self.execute_file_listing(listing_node),
@@ -739,7 +720,6 @@ impl LogicalPlanNode {
             LogicalPlanNode::Select(select_node) => select_node.output_type.clone(),
             LogicalPlanNode::Union(union_node) => union_node.a.schema().clone(),
             LogicalPlanNode::Custom(_custom_node) => todo!(),
-            LogicalPlanNode::DataVisitor(visitor_node) => visitor_node.child.schema(),
             LogicalPlanNode::ParseJson(parse_node) => {
                 // Child schema + parsed column
                 let mut fields: Vec<_> = parse_node.child.schema().fields().cloned().collect();
@@ -810,13 +790,6 @@ impl LogicalPlanNode {
             file_type: FileType::Parquet,
             files,
             schema,
-        }))
-    }
-    
-    pub fn with_visitors(self, visitors: Vec<Arc<dyn RowVisitor + Send + Sync>>) -> DeltaResult<Self> {
-        Ok(Self::DataVisitor(DataVisitorNode {
-            child: Box::new(self),
-            visitors,
         }))
     }
     
