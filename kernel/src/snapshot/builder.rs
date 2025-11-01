@@ -99,6 +99,32 @@ impl SnapshotBuilder {
             Snapshot::try_new_from(existing_snapshot, log_tail, engine, self.version)
         }
     }
+    
+    /// Build a state machine for incremental Snapshot construction.
+    /// 
+    /// This returns the initial phase (CheckpointHintPhase) which can be executed
+    /// by a C++ engine to progressively build a Snapshot without calling Engine APIs.
+    /// 
+    /// # Returns
+    /// 
+    /// Initial state machine phase that reads _last_checkpoint file.
+    pub fn into_state_machine(self) -> DeltaResult<crate::state_machine::StateMachinePhase<Snapshot>> {
+        let table_root = self.table_root.ok_or_else(|| {
+            Error::generic("into_state_machine only supports new snapshots, not updates")
+        })?;
+        
+        let log_root = table_root.join("_delta_log/")?;
+        let log_tail = self.log_tail.into_iter().map(Into::into).collect();
+        
+        Ok(crate::state_machine::StateMachinePhase::Consume(
+            Box::new(crate::snapshot::CheckpointHintPhase::new(
+                table_root,
+                log_root,
+                self.version,
+                log_tail,
+            ))
+        ))
+    }
 }
 
 #[cfg(test)]

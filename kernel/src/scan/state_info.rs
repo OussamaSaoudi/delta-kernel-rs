@@ -54,7 +54,7 @@ fn validate_metadata_columns<'a>(
     table_configuration: &'a TableConfiguration,
 ) -> DeltaResult<MetadataInfo<'a>> {
     let mut metadata_info = MetadataInfo::default();
-    let partition_columns = table_configuration.metadata().partition_columns();
+    let partition_columns = table_configuration.metadata.partition_columns();
     for metadata_column in logical_schema.metadata_columns() {
         // Ensure we don't have a metadata column with same name as a partition column
         if partition_columns.contains(metadata_column.name()) {
@@ -72,7 +72,7 @@ fn validate_metadata_columns<'a>(
                     return Err(Error::unsupported("Row ids are not enabled on this table"));
                 }
                 let row_id_col = table_configuration
-                    .metadata()
+                    .metadata
                     .configuration()
                     .get("delta.rowTracking.materializedRowIdColumnName")
                     .ok_or(Error::generic("No delta.rowTracking.materializedRowIdColumnName key found in metadata configuration"))?;
@@ -102,7 +102,7 @@ impl StateInfo {
         predicate: Option<PredicateRef>,
         classifier: C,
     ) -> DeltaResult<Self> {
-        let partition_columns = table_configuration.metadata().partition_columns();
+        let partition_columns = table_configuration.metadata.partition_columns();
         let column_mapping_mode = table_configuration.column_mapping_mode();
         let mut read_fields = Vec::with_capacity(logical_schema.num_fields());
         let mut transform_spec = Vec::new();

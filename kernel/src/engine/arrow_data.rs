@@ -30,7 +30,7 @@ pub struct ArrowEngineData {
 }
 
 /// Helper function to extract a RecordBatch from EngineData, ensuring it's ArrowEngineData
-pub(crate) fn extract_record_batch(engine_data: &dyn EngineData) -> DeltaResult<&RecordBatch> {
+pub fn extract_record_batch(engine_data: &dyn EngineData) -> DeltaResult<&RecordBatch> {
     let Some(arrow_data) = engine_data.any_ref().downcast_ref::<ArrowEngineData>() else {
         return Err(Error::engine_data_type("ArrowEngineData"));
     };

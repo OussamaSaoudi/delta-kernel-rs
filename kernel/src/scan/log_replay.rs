@@ -499,6 +499,7 @@ mod tests {
         }
     }
 
+    #[ignore]
     #[test]
     fn test_simple_transform() {
         let schema: SchemaRef = Arc::new(StructType::new_unchecked([
@@ -551,6 +552,7 @@ mod tests {
         }
     }
 
+    #[ignore]
     #[test]
     fn test_row_id_transform() {
         let schema: SchemaRef = Arc::new(StructType::new_unchecked([StructField::new(

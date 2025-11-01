@@ -183,6 +183,10 @@ pub enum LogicalPlanNode {
     ParseJson(ParseJsonNode),
     /// Filter by evaluating a predicate expression
     FilterByExpression(FilterByExpressionNode),
+    /// List files from storage (matches StorageHandler::list_from)
+    FileListing(FileListingNode),
+    /// Extract first non-null value for specified columns
+    FirstNonNull(FirstNonNullNode),
 }
 #[derive(Debug)]
 struct CustomNode {
@@ -227,14 +231,27 @@ pub struct FilterByExpressionNode {
     pub predicate: PredicateRef,      // Predicate to evaluate (e.g., "minValues.x > 10")
 }
 
+/// Node that lists files from storage (matches StorageHandler::list_from)
+#[derive(Debug)]
+pub struct FileListingNode {
+    pub path: url::Url,  // Either directory path ending in '/' or file path to start after
+}
+
+/// Node that extracts first non-null value for specified columns
+#[derive(Debug)]
+pub struct FirstNonNullNode {
+    pub child: Box<LogicalPlanNode>,
+    pub columns: Vec<String>,  // Column names to extract first non-null for
+}
+
 type FallibleFilteredDataIter = Box<dyn Iterator<Item = DeltaResult<FilteredEngineDataArc>>>;
 
-pub(crate) trait PhysicalPlanExecutor {
+pub trait PhysicalPlanExecutor {
     fn execute(&self, plan: LogicalPlanNode) -> DeltaResult<FallibleFilteredDataIter>;
 }
 
-pub(crate) struct DefaultPlanExecutor {
-    pub(crate) engine: Arc<dyn Engine>,
+pub struct DefaultPlanExecutor {
+    pub engine: Arc<dyn Engine>,
 }
 
 impl DefaultPlanExecutor {
@@ -353,6 +370,8 @@ impl PhysicalPlanExecutor for DefaultPlanExecutor {
             LogicalPlanNode::DataVisitor(_) => todo!("DataVisitor not yet implemented in DefaultPlanExecutor"),
             LogicalPlanNode::ParseJson(parse_node) => self.execute_parse_json(parse_node),
             LogicalPlanNode::FilterByExpression(filter_node) => self.execute_filter_by_expression(filter_node),
+            LogicalPlanNode::FileListing(listing_node) => self.execute_file_listing(listing_node),
+            LogicalPlanNode::FirstNonNull(first_node) => self.execute_first_non_null(first_node),
         }
     }
 }
@@ -527,6 +546,135 @@ impl DefaultPlanExecutor {
             })
         })))
     }
+    
+    fn execute_file_listing(&self, node: FileListingNode) -> DeltaResult<FallibleFilteredDataIter> {
+        use crate::{FileMeta, FileSize};
+        use crate::engine::arrow_data::ArrowEngineData;
+        use crate::arrow::array::{RecordBatch, StringArray, Int64Array};
+        use crate::arrow::datatypes::{Schema as ArrowSchema, Field as ArrowField, DataType as ArrowDataType};
+        
+        // Call storage handler to list files
+        let storage = self.engine.storage_handler();
+        let file_meta_iter = storage.list_from(&node.path)?;
+        
+        // Convert Iterator<FileMeta> → Arrow batches
+        // Schema: {location: Utf8, last_modified: Int64, size: Int64}
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("location", ArrowDataType::Utf8, false),
+            ArrowField::new("last_modified", ArrowDataType::Int64, false),
+            ArrowField::new("size", ArrowDataType::Int64, false),
+        ]));
+        
+        // Collect all files (we need to materialize for batch creation)
+        let files: Vec<FileMeta> = file_meta_iter.collect::<Result<Vec<_>, _>>()?;
+        
+        // Build Arrow arrays
+        let locations: StringArray = files.iter().map(|f| Some(f.location.as_str())).collect();
+        let last_modified: Int64Array = files.iter().map(|f| Some(f.last_modified)).collect();
+        let sizes: Int64Array = files.iter().map(|f| Some(f.size as i64)).collect();
+        
+        let record_batch = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![
+                Arc::new(locations),
+                Arc::new(last_modified),
+                Arc::new(sizes),
+            ],
+        )?;
+        
+        let engine_data = Arc::new(ArrowEngineData::new(record_batch));
+        let selection_vector = vec![true; files.len()];
+        
+        Ok(Box::new(std::iter::once(Ok(FilteredEngineDataArc {
+            engine_data,
+            selection_vector,
+        }))))
+    }
+    
+    fn execute_first_non_null(&self, node: FirstNonNullNode) -> DeltaResult<FallibleFilteredDataIter> {
+        use crate::engine::arrow_data::ArrowEngineData;
+        use crate::arrow::array::RecordBatch;
+        
+        let child_iter = self.execute(*node.child)?;
+        let columns_to_extract = node.columns;
+        
+        // Collect all batches and find first non-null for each column
+        let mut all_batches = vec![];
+        for batch_result in child_iter {
+            all_batches.push(batch_result?);
+        }
+        
+        if all_batches.is_empty() {
+            return Err(Error::generic("FirstNonNull requires at least one batch"));
+        }
+        
+        // Get schema from first batch
+        let first_batch = &all_batches[0];
+        let arrow_data = first_batch.engine_data.any_ref()
+            .downcast_ref::<ArrowEngineData>()
+            .ok_or_else(|| Error::generic("Expected ArrowEngineData"))?;
+        let schema = arrow_data.record_batch().schema();
+        
+        // For each column, find first non-null value
+        let mut result_arrays: Vec<Arc<dyn crate::arrow::array::Array>> = vec![];
+        
+        for field in schema.fields() {
+            let column_name = field.name();
+            
+            // Check if this is one of the columns we want to extract first non-null for
+            let should_extract = columns_to_extract.iter().any(|c| c == column_name);
+            
+            if should_extract {
+                // Find first non-null value
+                let mut found = false;
+                let mut first_value: Option<Arc<dyn crate::arrow::array::Array>> = None;
+                
+                for batch in &all_batches {
+                    let arrow_data = batch.engine_data.any_ref()
+                        .downcast_ref::<ArrowEngineData>()
+                        .ok_or_else(|| Error::generic("Expected ArrowEngineData"))?;
+                    let rb = arrow_data.record_batch();
+                    
+                    if let Some(col) = rb.column_by_name(column_name) {
+                        // Check each row in this batch
+                        for i in 0..rb.num_rows() {
+                            if batch.selection_vector.get(i).copied().unwrap_or(true) && !col.is_null(i) {
+                                // Found first non-null! Extract just this one value
+                                first_value = Some(col.slice(i, 1));
+                                found = true;
+                                break;
+                            }
+                        }
+                        if found {
+                            break;
+                        }
+                    }
+                }
+                
+                if let Some(value) = first_value {
+                    result_arrays.push(value);
+                } else {
+                    // No non-null value found, create null array
+                    use crate::arrow::array::new_null_array;
+                    result_arrays.push(new_null_array(field.data_type(), 1));
+                }
+            } else {
+                // For other columns, just take first value from first batch
+                let col = arrow_data.record_batch().column_by_name(column_name)
+                    .ok_or_else(|| Error::generic(format!("Column {} not found", column_name)))?;
+                result_arrays.push(col.slice(0, 1));
+            }
+        }
+        
+        // Create single-row result batch
+        let result_batch = RecordBatch::try_new(schema.clone(), result_arrays)?;
+        let engine_data = Arc::new(ArrowEngineData::new(result_batch));
+        
+        Ok(Box::new(std::iter::once(Ok(FilteredEngineDataArc {
+            engine_data,
+            selection_vector: vec![true],
+        }))))
+    }
 }
 
 #[cfg(test)]
@@ -609,6 +757,15 @@ impl LogicalPlanNode {
                 Arc::new(StructType::new_unchecked(fields))
             }
             LogicalPlanNode::FilterByExpression(filter_node) => filter_node.child.schema(),
+            LogicalPlanNode::FileListing(_) => {
+                // Returns FileMeta schema: {location: Utf8, last_modified: Int64, size: Int64}
+                Arc::new(StructType::new_unchecked([
+                    StructField::new("location", DataType::STRING, false),
+                    StructField::new("last_modified", DataType::LONG, false),
+                    StructField::new("size", DataType::LONG, false),
+                ]))
+            }
+            LogicalPlanNode::FirstNonNull(first_node) => first_node.child.schema(),
         }
     }
     fn select(self, columns: Vec<ExpressionRef>) -> DeltaResult<Self> {

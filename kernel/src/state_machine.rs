@@ -1,7 +1,7 @@
 //! State machine architecture for multi-phase Delta kernel operations.
 
 use crate::kernel_df::LogicalPlanNode;
-use crate::{DeltaResult, EngineData};
+use crate::DeltaResult;
 
 /// Result of advancing a state machine phase.
 pub enum StateMachinePhase<T> {
@@ -27,6 +27,9 @@ pub trait ConsumePhase: Send + Sync {
     type Output;
     
     fn get_plan(&self) -> DeltaResult<LogicalPlanNode>;
-    fn next(self: Box<Self>, data: Box<dyn EngineData>) -> DeltaResult<StateMachinePhase<Self::Output>>;
+    fn next(
+        self: Box<Self>,
+        data: Box<dyn Iterator<Item = DeltaResult<crate::arrow::array::RecordBatch>> + Send>
+    ) -> DeltaResult<StateMachinePhase<Self::Output>>;
 }
 

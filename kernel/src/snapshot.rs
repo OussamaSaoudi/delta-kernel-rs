@@ -24,6 +24,9 @@ use delta_kernel_derive::internal_api;
 mod builder;
 pub use builder::SnapshotBuilder;
 
+pub mod phases;
+pub(crate) use phases::{CheckpointHintPhase, ListingPhase, ProtocolMetadataPhase};
+
 use tracing::debug;
 use url::Url;
 
@@ -51,7 +54,7 @@ impl std::fmt::Debug for Snapshot {
         f.debug_struct("Snapshot")
             .field("path", &self.log_segment.log_root.as_str())
             .field("version", &self.version())
-            .field("metadata", &self.table_configuration().metadata())
+            .field("metadata", &self.table_configuration().metadata)
             .finish()
     }
 }
@@ -321,6 +324,16 @@ impl Snapshot {
     #[internal_api]
     pub(crate) fn table_configuration(&self) -> &TableConfiguration {
         &self.table_configuration
+    }
+
+    /// Get the protocol of this snapshot.
+    pub fn protocol(&self) -> &crate::actions::Protocol {
+        &self.table_configuration.protocol
+    }
+
+    /// Get the metadata of this snapshot.
+    pub fn metadata(&self) -> &crate::actions::Metadata {
+        &self.table_configuration.metadata
     }
 
     /// Create a [`ScanBuilder`] for an `SnapshotRef`.

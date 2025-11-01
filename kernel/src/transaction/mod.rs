@@ -273,7 +273,6 @@ impl Transaction {
         if self.committer.any_ref().is::<FileSystemCommitter>()
             && self
                 .read_snapshot
-                .table_configuration()
                 .protocol()
                 .is_catalog_managed()
         {
@@ -501,7 +500,6 @@ impl Transaction {
         // note this is _incorrect_ if table config deems we need partition columns.
         let partition_columns = self
             .read_snapshot
-            .table_configuration()
             .metadata()
             .partition_columns();
         let schema = self.read_snapshot.schema();

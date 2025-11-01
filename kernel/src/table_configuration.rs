@@ -49,8 +49,8 @@ pub(crate) enum InCommitTimestampEnablement {
 #[internal_api]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TableConfiguration {
-    metadata: Metadata,
-    protocol: Protocol,
+    pub(crate) metadata: Metadata,
+    pub(crate) protocol: Protocol,
     schema: SchemaRef,
     table_properties: TableProperties,
     column_mapping_mode: ColumnMappingMode,
@@ -135,14 +135,12 @@ impl TableConfiguration {
     }
 
     /// The [`Metadata`] for this table at this version.
-    #[internal_api]
-    pub(crate) fn metadata(&self) -> &Metadata {
+    pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
     /// The [`Protocol`] of this table at this version.
-    #[internal_api]
-    pub(crate) fn protocol(&self) -> &Protocol {
+    pub fn protocol(&self) -> &Protocol {
         &self.protocol
     }
 
@@ -239,7 +237,7 @@ impl TableConfiguration {
     #[internal_api]
     #[allow(unused)] // needed to compile w/o default features
     pub(crate) fn is_deletion_vector_supported(&self) -> bool {
-        self.protocol()
+        self.protocol
             .has_table_feature(&TableFeature::DeletionVectors)
             && self.protocol.min_reader_version() == 3
             && self.protocol.min_writer_version() == 7
@@ -292,7 +290,7 @@ impl TableConfiguration {
     ///
     /// See: <https://github.com/delta-io/delta/blob/master/PROTOCOL.md#v2-checkpoint-table-feature>
     pub(crate) fn is_v2_checkpoint_write_supported(&self) -> bool {
-        self.protocol()
+        self.protocol
             .has_table_feature(&TableFeature::V2Checkpoint)
     }
 
@@ -303,9 +301,9 @@ impl TableConfiguration {
     /// - Have the [`TableFeature::InCommitTimestamp`] writer feature.
     #[allow(unused)]
     pub(crate) fn is_in_commit_timestamps_supported(&self) -> bool {
-        self.protocol().min_writer_version() == 7
+        self.protocol.min_writer_version() == 7
             && self
-                .protocol()
+                .protocol
                 .has_table_feature(&TableFeature::InCommitTimestamp)
     }
 
@@ -362,9 +360,9 @@ impl TableConfiguration {
     /// - Have the [`TableFeature::DomainMetadata`] writer feature.
     #[allow(unused)]
     pub(crate) fn is_domain_metadata_supported(&self) -> bool {
-        self.protocol().min_writer_version() == 7
+        self.protocol.min_writer_version() == 7
             && self
-                .protocol()
+                .protocol
                 .has_table_feature(&TableFeature::DomainMetadata)
     }
 
@@ -374,9 +372,9 @@ impl TableConfiguration {
     /// - Have a min_writer_version of 7.
     /// - Have the [`TableFeature::RowTracking`] writer feature.
     pub(crate) fn is_row_tracking_supported(&self) -> bool {
-        self.protocol().min_writer_version() == 7
+        self.protocol.min_writer_version() == 7
             && self
-                .protocol()
+                .protocol
                 .has_table_feature(&TableFeature::RowTracking)
     }
 

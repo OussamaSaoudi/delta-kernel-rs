@@ -168,11 +168,11 @@ impl TableChanges {
         require!(
             !start_snapshot
                 .table_configuration()
-                .protocol()
+                .protocol
                 .is_catalog_managed()
                 && !end_snapshot
                     .table_configuration()
-                    .protocol()
+                    .protocol
                     .is_catalog_managed(),
             Error::unsupported("Change data feed is not supported for catalog-managed tables")
         );
