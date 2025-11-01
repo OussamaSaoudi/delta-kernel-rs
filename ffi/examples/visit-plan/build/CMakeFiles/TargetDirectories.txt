@@ -1,0 +1,3 @@
+/Users/oussama.saoudi/projects/code/delta-kernel-rs/ffi/examples/visit-plan/build/CMakeFiles/visit_plan.dir
+/Users/oussama.saoudi/projects/code/delta-kernel-rs/ffi/examples/visit-plan/build/CMakeFiles/edit_cache.dir
+/Users/oussama.saoudi/projects/code/delta-kernel-rs/ffi/examples/visit-plan/build/CMakeFiles/rebuild_cache.dir
