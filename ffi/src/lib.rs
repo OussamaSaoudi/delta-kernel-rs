@@ -46,6 +46,7 @@ pub mod ffi_tracing;
 pub mod scan;
 pub mod schema;
 pub mod logical_plan;
+pub mod state_machine;
 
 #[cfg(test)]
 mod ffi_test_utils;
