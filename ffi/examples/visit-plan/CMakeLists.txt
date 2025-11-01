@@ -8,11 +8,21 @@ target_link_directories(visit_plan PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../
 target_link_libraries(visit_plan PUBLIC delta_kernel_ffi)
 target_compile_options(visit_plan PUBLIC)
 
+add_executable(test_filter test_filter.c)
+target_compile_definitions(test_filter PUBLIC DEFINE_DEFAULT_ENGINE_BASE DEFINE_TEST_FFI)
+target_include_directories(test_filter PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/ffi-headers")
+target_link_directories(test_filter PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/debug")
+target_link_libraries(test_filter PUBLIC delta_kernel_ffi)
+target_compile_options(test_filter PUBLIC)
+
 if(MSVC)
   target_compile_options(visit_plan PRIVATE /W4 /WX)
+  target_compile_options(test_filter PRIVATE /W4 /WX)
 else()
   # no-strict-prototypes because arrow headers have fn defs without prototypes
   target_compile_options(visit_plan PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes -g -fsanitize=address)
   target_link_options(visit_plan PRIVATE -g -fsanitize=address)
+  target_compile_options(test_filter PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes -g -fsanitize=address)
+  target_link_options(test_filter PRIVATE -g -fsanitize=address)
 endif()
 

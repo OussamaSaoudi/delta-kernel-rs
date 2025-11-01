@@ -5,7 +5,7 @@
 use std::os::raw::c_void;
 use std::sync::Arc;
 
-use delta_kernel::kernel_df::LogicalPlanNode;
+use delta_kernel::kernel_df::{LogicalPlanNode, RowFilter};
 use delta_kernel_ffi_macros::handle_descriptor;
 
 use crate::handle::Handle;
@@ -17,6 +17,10 @@ use crate::expressions::SharedPredicate;
 /// Opaque handle to a logical plan node
 #[handle_descriptor(target=LogicalPlanNode, mutable=false, sized=true)]
 pub struct SharedLogicalPlan;
+
+/// Opaque handle to a row filter
+#[handle_descriptor(target=dyn RowFilter, mutable=false, sized=false)]
+pub struct SharedRowFilter;
 
 /// Visitor for traversing logical plan nodes.
 ///
@@ -42,13 +46,13 @@ pub struct EnginePlanVisitor {
         ),
     >,
 
-    /// Visit Filter node (has child + custom filter)
+    /// Visit Filter node (has child + row filter)
     pub visit_filter: Option<
         extern "C" fn(
             data: *mut c_void,
             sibling_list_id: usize,
             child_plan_id: usize,
-            filter_context: *mut c_void, // RowFilter - opaque to C++
+            filter: Handle<SharedRowFilter>,
         ),
     >,
 
@@ -196,13 +200,13 @@ fn visit_plan_impl(
                 let child_list_id = (visitor.make_plan_list)(visitor.data, 1);
                 visit_plan_impl(&filter.child, visitor, child_list_id);
 
-                // Visit this node with child list
-                let filter_ptr = &*filter.filter as *const _ as *mut c_void;
+                // Create handle for the filter (filter.filter is Arc<dyn RowFilter>)
+                let filter_handle = filter.filter.clone().into();
                 visit_filter(
                     visitor.data,
                     sibling_list_id,
                     child_list_id,
-                    filter_ptr,
+                    filter_handle,
                 );
             }
             sibling_list_id
@@ -554,5 +558,261 @@ pub unsafe extern "C" fn get_testing_logical_plan() -> Handle<SharedLogicalPlan>
 #[no_mangle]
 pub unsafe extern "C" fn free_logical_plan(plan: Handle<SharedLogicalPlan>) {
     plan.drop_handle();
+}
+
+// =============================================================================
+// Row Filter FFI Functions
+// =============================================================================
+
+/// Get the schema expected by a row filter
+///
+/// # Safety
+///
+/// The caller must pass a valid SharedRowFilter handle
+///
+/// # Returns
+///
+/// A SharedSchema handle representing the columns and types required by the filter
+#[no_mangle]
+pub unsafe extern "C" fn row_filter_get_schema(
+    filter: Handle<SharedRowFilter>,
+) -> Handle<SharedSchema> {
+    use delta_kernel::schema::{StructField, StructType};
+    
+    let filter_ref = unsafe { filter.as_ref() };
+    let (names, types) = filter_ref.selected_column_names_and_types();
+    
+    // Build a StructType from the column names and types
+    let fields: Vec<StructField> = names
+        .iter()
+        .zip(types.iter())
+        .map(|(name, data_type)| {
+            // Row filters always work with nullable columns (for safety)
+            // Convert ColumnName to String using Display trait
+            let name_str = name.to_string();
+            StructField::new(name_str, data_type.clone(), true)
+        })
+        .collect();
+    
+    let schema = Arc::new(StructType::new_unchecked(fields));
+    schema.into()
+}
+
+/// Free a row filter handle
+///
+/// # Safety
+///
+/// The caller must pass a valid SharedRowFilter handle
+#[no_mangle]
+pub unsafe extern "C" fn free_row_filter(filter: Handle<SharedRowFilter>) {
+    filter.drop_handle();
+}
+
+/// Apply a row filter to an Arrow batch
+///
+/// # Safety
+///
+/// - `filter` must be a valid SharedRowFilter handle
+/// - `input_batch` and `input_schema` must be valid Arrow C Data Interface pointers
+/// - `selection_vector` can be null, or a valid Arrow boolean array (TRUE = keep row, FALSE = skip row)
+/// - `output` must be a valid pointer to write the output boolean array
+///
+/// # Arguments
+///
+/// * `filter` - The row filter to apply
+/// * `input_batch` - Arrow array containing the input data
+/// * `input_schema` - Arrow schema describing the input data
+/// * `selection_vector` - Optional pre-filter selection vector (null pointer for no pre-filter)
+/// * `output` - Output boolean array (TRUE = row passed filter, FALSE = row filtered out)
+///
+/// # Returns
+///
+/// `true` on success, `false` on error (error message printed to stderr for now)
+#[no_mangle]
+pub unsafe extern "C" fn apply_row_filter(
+    filter: Handle<SharedRowFilter>,
+    input_batch: *mut delta_kernel::arrow::ffi::FFI_ArrowArray,
+    input_schema: *mut delta_kernel::arrow::ffi::FFI_ArrowSchema,
+    selection_vector: *mut delta_kernel::arrow::ffi::FFI_ArrowArray,
+    output: *mut delta_kernel::arrow::ffi::FFI_ArrowArray,
+) -> bool {
+    use delta_kernel::arrow::array::{Array, BooleanArray};
+    use delta_kernel::arrow::ffi;
+    use delta_kernel::engine::arrow_data::ArrowEngineData;
+    use delta_kernel::kernel_df::FilterVisitor;
+    use delta_kernel::RowVisitor;
+    
+    let result: Result<(), delta_kernel::Error> = (|| {
+        // Get the Arc<dyn RowFilter> from the handle
+        // We can't use as_ref because FilterVisitor needs Arc<dyn RowFilter>
+        // We need to carefully clone the Arc without consuming the handle
+        let filter_arc = unsafe {
+            // Get a reference and manually construct an Arc by cloning the inner pointer
+            let filter_ref = filter.as_ref();
+            // Since we have &dyn RowFilter, we need to reconstruct the Arc
+            // This is tricky - we can't clone the Arc from a &dyn RowFilter
+            // Instead, let's use the handle's inner Arc directly
+            std::mem::ManuallyDrop::new(filter.into_inner()).clone()
+        };
+        
+        // Convert Arrow batch to Rust RecordBatch
+        let array_data = unsafe { ffi::from_ffi(input_batch.read(), &*input_schema)? };
+        let record_batch = delta_kernel::arrow::array::RecordBatch::from(
+            delta_kernel::arrow::array::StructArray::from(array_data)
+        );
+        
+        let num_rows = record_batch.num_rows();
+        let engine_data = ArrowEngineData::new(record_batch);
+        
+        // Parse selection vector if provided
+        let mut selection_vec = if !selection_vector.is_null() {
+            // Need to create an FFI_ArrowSchema for a boolean array
+            let sel_bool_type = delta_kernel::arrow::datatypes::DataType::Boolean;
+            let sel_ffi_schema = delta_kernel::arrow::ffi::FFI_ArrowSchema::try_from(&sel_bool_type)?;
+            let sel_array_data = ffi::from_ffi(selection_vector.read(), &sel_ffi_schema)?;
+            let sel_array = BooleanArray::from(sel_array_data);
+            (0..num_rows).map(|i| sel_array.value(i)).collect()
+        } else {
+            vec![true; num_rows]
+        };
+        
+        // Create a FilterVisitor to apply the filter
+        let mut visitor = FilterVisitor {
+            filter: std::mem::ManuallyDrop::into_inner(filter_arc),
+            selection_vector: selection_vec.clone(),
+        };
+        
+        // Visit rows to apply the filter
+        visitor.visit_rows_of(&engine_data)?;
+        selection_vec = visitor.selection_vector;
+        
+        // Build output boolean array
+        let output_array = BooleanArray::from(selection_vec);
+        let output_array_data = output_array.into_data();
+        
+        // Convert to Arrow C Data Interface
+        let (out_array, out_schema) = ffi::to_ffi(&output_array_data)?;
+        
+        unsafe {
+            *output = out_array;
+            // Schema is already in input_schema, we don't need to set it again
+            let _ = out_schema; // Suppress warning
+        }
+        
+        Ok(())
+    })();
+    
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("Error in apply_row_filter: {}", e);
+            false
+        }
+    }
+}
+
+// =============================================================================
+// Test Functions
+// =============================================================================
+
+#[cfg(feature = "test-ffi")]
+/// Create a test logical plan with a FilterNode for testing
+///
+/// Creates a simple plan: Scan -> Filter where filter keeps rows with id > 5
+///
+/// # Safety
+///
+/// This is a test function and should only be called in test contexts
+#[no_mangle]
+pub unsafe extern "C" fn get_testing_filter_plan() -> Handle<SharedLogicalPlan> {
+    use delta_kernel::kernel_df::{FileType, FilterNode, ScanNode};
+    use delta_kernel::schema::{DataType, StructField, StructType};
+    use delta_kernel::{Expression, FileMeta, Predicate};
+    use url::Url;
+    
+    // Create a simple schema with id and name columns
+    let schema = Arc::new(StructType::new_unchecked(vec![
+        StructField::new("id", DataType::INTEGER, false),
+        StructField::new("name", DataType::STRING, true),
+    ]));
+    
+    // Create a dummy file
+    let files = vec![FileMeta {
+        location: Url::parse("file:///test/data.parquet").unwrap(),
+        last_modified: 0,
+        size: 1024,
+    }];
+    
+    // Create scan node
+    let scan = LogicalPlanNode::Scan(ScanNode {
+        files,
+        schema: schema.clone(),
+        file_type: FileType::Parquet,
+    });
+    
+    // Create a filter: id > 5
+    let predicate = Arc::new(Predicate::gt(
+        Expression::column(delta_kernel::expressions::column_name!("id")),
+        Expression::literal(5i32),
+    ));
+    
+    // Wrap predicate in a RowFilter
+    // We'll use a simple wrapper that uses the predicate evaluator
+    use delta_kernel::engine_data::{GetData, TypedGetData};
+    use delta_kernel::{DeltaResult, RowVisitor};
+    use delta_kernel::expressions::ColumnName;
+    
+    struct SimplePredicateFilter {
+        predicate: Arc<Predicate>,
+        column_names: Vec<ColumnName>,
+        column_types: Vec<DataType>,
+    }
+    
+    impl RowVisitor for SimplePredicateFilter {
+        fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+            // Leak memory for test purposes - this is only used in tests
+            let names: &'static [ColumnName] = Box::leak(self.column_names.clone().into_boxed_slice());
+            let types: &'static [DataType] = Box::leak(self.column_types.clone().into_boxed_slice());
+            (names, types)
+        }
+        
+        fn visit<'a>(&mut self, _row_count: usize, _getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+            // Not needed for filter - we use filter_row instead
+            Ok(())
+        }
+    }
+    
+    impl RowFilter for SimplePredicateFilter {
+        fn filter_row<'a>(&self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
+            // For simplicity, just check if id > 5
+            // In a real implementation, we'd evaluate the predicate properly
+            let id_getter = getters[0]; // First column is 'id'
+            let id_value: i32 = id_getter.get_int(i, "id")?.expect("id should not be null");
+            Ok(id_value > 5)
+        }
+    }
+    
+    let filter_impl = Arc::new(SimplePredicateFilter {
+        predicate: predicate.clone(),
+        column_names: vec![
+            delta_kernel::expressions::column_name!("id"),
+        ],
+        column_types: vec![DataType::INTEGER],
+    }) as Arc<dyn RowFilter>;
+    
+    // Leak a static array for column_names (test only)
+    let static_column_names: &'static [ColumnName] = Box::leak(Box::new([
+        delta_kernel::expressions::column_name!("id"),
+    ]));
+    
+    // Create filter node
+    let filter = LogicalPlanNode::Filter(FilterNode {
+        child: Box::new(scan),
+        filter: filter_impl,
+        column_names: static_column_names,
+        ordered: false,
+    });
+    
+    Arc::new(filter).into()
 }
 

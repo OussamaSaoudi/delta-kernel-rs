@@ -71,6 +71,11 @@ struct DataVisitorPlan {
   void* visitor_context;  // Opaque
 };
 
+struct FilterPlan {
+  PlanItemList child;
+  HandleSharedRowFilter filter;  // Row filter handle
+};
+
 struct ParseJsonPlan {
   PlanItemList child;
   char* json_column;
@@ -145,12 +150,12 @@ void visit_plan_filter(
     void* data,
     uintptr_t sibling_list_id,
     uintptr_t child_plan_id,
-    void* filter_context)
+    HandleSharedRowFilter filter)
 {
-  struct FilterPlan* filter = malloc(sizeof(struct FilterPlan));
-  filter->child = get_plan_list(data, child_plan_id);
-  filter->filter_context = filter_context;
-  put_plan_item(data, sibling_list_id, filter, Filter);
+  struct FilterPlan* filter_plan = malloc(sizeof(struct FilterPlan));
+  filter_plan->child = get_plan_list(data, child_plan_id);
+  filter_plan->filter = filter;
+  put_plan_item(data, sibling_list_id, filter_plan, Filter);
 }
 
 void visit_plan_select(
