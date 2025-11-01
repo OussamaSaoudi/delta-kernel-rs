@@ -6,7 +6,6 @@ use std::os::raw::c_void;
 use std::sync::Arc;
 
 use delta_kernel::kernel_df::LogicalPlanNode;
-use delta_kernel::DeltaResult;
 use delta_kernel_ffi_macros::handle_descriptor;
 
 use crate::handle::Handle;

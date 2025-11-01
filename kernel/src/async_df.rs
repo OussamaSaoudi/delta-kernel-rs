@@ -5,8 +5,7 @@ use std::sync::Arc;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use futures::{future::Either, stream, Stream, StreamExt, TryStreamExt};
-use par_stream::{IndexStreamExt as _, ParParamsConfig, ParStreamExt as _};
-use std::pin::Pin;
+use par_stream::{ParStreamExt as _};
 
 use crate::{
     engine::{
@@ -16,7 +15,7 @@ use crate::{
             executor::TaskExecutor,
             file_stream::{FileOpener, FileStream},
             json::JsonOpener,
-            parquet::{ParquetOpener, PresignedUrlOpener},
+            parquet::ParquetOpener,
             DefaultEngine,
         },
     },
@@ -26,7 +25,7 @@ use crate::{
         SelectNode, UnionNode,
     },
     schema::SchemaRef,
-    DeltaResult, Engine, EngineData, Error, Expression, FileMeta,
+    DeltaResult, Engine, EngineData, Expression, FileMeta,
 };
 
 // Type alias for boxed streams

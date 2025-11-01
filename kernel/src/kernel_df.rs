@@ -1,9 +1,4 @@
-use std::{
-    any::Any,
-    cell::RefCell,
-    collections::HashSet,
-    sync::{Arc, LazyLock, Mutex, RwLock},
-};
+use std::sync::{Arc, LazyLock};
 
 use dashmap::DashSet;
 use itertools::Itertools;
@@ -11,16 +6,14 @@ use itertools::Itertools;
 use crate::{
     actions::deletion_vector::DeletionVectorDescriptor,
     engine_data::{self, GetData, TypedGetData as _},
-    log_replay::{FileActionDeduplicator, FileActionKey},
-    log_segment::LogSegment,
-    scan::log_replay::AddRemoveDedupVisitor,
+    log_replay::FileActionKey,
     schema::{ColumnName, DataType, Schema, SchemaRef},
     DeltaResult, Engine, EngineData, Error, Expression, ExpressionRef, FileMeta, PredicateRef, RowVisitor,
     Snapshot,
 };
 use crate::{
     expressions::column_name,
-    schema::{ColumnNamesAndTypes, MapType, StructField, StructType},
+    schema::{ArrayType, ColumnNamesAndTypes, MapType, StructField, StructType},
 };
 
 pub trait RowFilter: RowVisitor + Send + Sync {
@@ -548,7 +541,7 @@ impl DefaultPlanExecutor {
     }
     
     fn execute_file_listing(&self, node: FileListingNode) -> DeltaResult<FallibleFilteredDataIter> {
-        use crate::{FileMeta, FileSize};
+        use crate::FileMeta;
         use crate::engine::arrow_data::ArrowEngineData;
         use crate::arrow::array::{RecordBatch, StringArray, Int64Array};
         use crate::arrow::datatypes::{Schema as ArrowSchema, Field as ArrowField, DataType as ArrowDataType};

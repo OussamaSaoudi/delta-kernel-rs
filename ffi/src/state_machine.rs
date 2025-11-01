@@ -215,7 +215,6 @@ pub unsafe extern "C" fn consume_phase_next(
     data_stream: *mut FFI_ArrowArrayStream,
 ) -> Handle<SharedPhase> {
     let phase_inner = phase.into_inner();
-    let terminus_type = phase_inner.terminus_type;
 
     // Take ownership of the Arrow stream
     let mut stream = unsafe { FFI_ArrowArrayStream::from_raw(data_stream) };
