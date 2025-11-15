@@ -3,7 +3,7 @@
 //! Runners encapsulate the logic for executing a specific workload type. They handle
 //! setup, execution, and cleanup phases of benchmark runs.
 
-use crate::benchmarks::models::{ReadSpec, SnapshotConstructionSpec, WorkloadSpec};
+use crate::benchmarks::models::{WorkloadSpecType, WorkloadSpecVariant};
 use crate::snapshot::Snapshot;
 use crate::Engine;
 
@@ -39,14 +39,14 @@ pub trait WorkloadRunner {
 ///
 /// Measures the time to read scan metadata (list of files to read) from a Delta table.
 pub struct ReadMetadataRunner {
-    spec: ReadSpec,
+    spec: WorkloadSpecVariant,
     engine: Arc<dyn Engine>,
     snapshot: Option<Arc<Snapshot>>,
 }
 
 impl ReadMetadataRunner {
     /// Create a new ReadMetadataRunner from a spec and engine
-    pub fn new(spec: ReadSpec, engine: Arc<dyn Engine>) -> Self {
+    pub fn new(spec: WorkloadSpecVariant, engine: Arc<dyn Engine>) -> Self {
         Self {
             spec,
             engine,
@@ -57,19 +57,21 @@ impl ReadMetadataRunner {
 
 impl WorkloadRunner for ReadMetadataRunner {
     fn setup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let table_info = self.spec.table_info();
-        let table_root = table_info.resolved_table_root();
+        let table_root = self.spec.table_info.resolved_table_root();
         let url = crate::try_parse_uri(&table_root)?;
         
-        // Build snapshot (potentially at a specific version)
-        let snapshot = if let Some(version) = self.spec.version {
-            Snapshot::builder_for(url)
-                .at_version(version)
-                .build(self.engine.as_ref())?
-        } else {
-            Snapshot::builder_for(url)
-                .build(self.engine.as_ref())?
+        // Get version from the Read spec
+        let version = match &self.spec.spec_type {
+            WorkloadSpecType::Read(read_spec) => read_spec.version,
+            _ => unreachable!("ReadMetadataRunner should only be used with Read specs"),
         };
+        
+        // Build snapshot (potentially at a specific version)
+        let mut builder = Snapshot::builder_for(url);
+        if let Some(version) = version {
+            builder = builder.at_version(version);
+        }
+        let snapshot = builder.build(self.engine.as_ref())?;
         
         self.snapshot = Some(snapshot);
         Ok(())
@@ -105,15 +107,15 @@ impl WorkloadRunner for ReadMetadataRunner {
 ///
 /// Measures the time to construct a Snapshot object for a Delta table.
 pub struct SnapshotConstructionRunner {
-    spec: SnapshotConstructionSpec,
+    spec: WorkloadSpecVariant,
     engine: Arc<dyn Engine>,
     table_root: String,
 }
 
 impl SnapshotConstructionRunner {
     /// Create a new SnapshotConstructionRunner from a spec and engine
-    pub fn new(spec: SnapshotConstructionSpec, engine: Arc<dyn Engine>) -> Self {
-        let table_root = spec.table_info().resolved_table_root();
+    pub fn new(spec: WorkloadSpecVariant, engine: Arc<dyn Engine>) -> Self {
+        let table_root = spec.table_info.resolved_table_root();
         Self {
             spec,
             engine,
@@ -132,15 +134,18 @@ impl WorkloadRunner for SnapshotConstructionRunner {
     fn execute(&self) -> Result<(), Box<dyn std::error::Error>> {
         let url = crate::try_parse_uri(&self.table_root)?;
         
-        // Build snapshot - this is what we're benchmarking
-        let _snapshot = if let Some(version) = self.spec.version {
-            Snapshot::builder_for(url)
-                .at_version(version)
-                .build(self.engine.as_ref())?
-        } else {
-            Snapshot::builder_for(url)
-                .build(self.engine.as_ref())?
+        // Get version from the SnapshotConstruction spec
+        let version = match &self.spec.spec_type {
+            WorkloadSpecType::SnapshotConstruction(snapshot_spec) => snapshot_spec.version,
+            _ => unreachable!("SnapshotConstructionRunner should only be used with SnapshotConstruction specs"),
         };
+        
+        // Build snapshot - this is what we're benchmarking
+        let mut builder = Snapshot::builder_for(url);
+        if let Some(version) = version {
+            builder = builder.at_version(version);
+        }
+        let _snapshot = builder.build(self.engine.as_ref())?;
         
         Ok(())
     }
@@ -160,28 +165,28 @@ impl WorkloadRunner for SnapshotConstructionRunner {
 /// This is a factory function that creates the appropriate runner type based on
 /// the workload specification.
 pub fn create_runner(
-    spec: crate::benchmarks::models::WorkloadSpecVariant,
+    spec: WorkloadSpecVariant,
     engine: Arc<dyn Engine>,
 ) -> Result<Box<dyn WorkloadRunner>, Box<dyn std::error::Error>> {
-    use crate::benchmarks::models::{ReadOperationType, WorkloadSpecVariant};
+    use crate::benchmarks::models::{ReadOperationType, WorkloadSpecType};
     
-    match spec {
-        WorkloadSpecVariant::Read(read_spec) => {
+    match &spec.spec_type {
+        WorkloadSpecType::Read(read_spec) => {
             // Check operation type
             let operation_type = read_spec.operation_type
                 .ok_or("ReadSpec must have operation_type set")?;
             
             match operation_type {
                 ReadOperationType::ReadMetadata => {
-                    Ok(Box::new(ReadMetadataRunner::new(read_spec, engine)))
+                    Ok(Box::new(ReadMetadataRunner::new(spec, engine)))
                 }
                 ReadOperationType::ReadData => {
                     Err("read_data operation not yet implemented".into())
                 }
             }
         }
-        WorkloadSpecVariant::SnapshotConstruction(snapshot_spec) => {
-            Ok(Box::new(SnapshotConstructionRunner::new(snapshot_spec, engine)))
+        WorkloadSpecType::SnapshotConstruction(_) => {
+            Ok(Box::new(SnapshotConstructionRunner::new(spec, engine)))
         }
     }
 }

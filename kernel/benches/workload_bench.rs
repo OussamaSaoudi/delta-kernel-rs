@@ -106,34 +106,74 @@ fn workload_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("workloads");
     
     for spec in specs {
-        let workload_name = spec.full_name();
-        println!("Setting up benchmark: {}", workload_name);
-        
-        // Create the runner for this workload
-        let mut runner = match create_runner(spec, engine.clone()) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("Failed to create runner for {}: {}", workload_name, e);
-                continue;
+        // For Read specs, create benchmarks for each operation type
+        // For other specs, create a single benchmark
+        match &spec.spec_type {
+            delta_kernel::benchmarks::WorkloadSpecType::Read(read_spec) => {
+                // Currently only support read_metadata
+                for operation_type in [delta_kernel::benchmarks::ReadOperationType::ReadMetadata] {
+                    let mut read_spec = read_spec.clone();
+                    read_spec.operation_type = Some(operation_type);
+                    let workload_name = spec.full_name();
+                    println!("Setting up benchmark: {}", workload_name);
+                    
+                    let spec_variant = delta_kernel::benchmarks::WorkloadSpecVariant {
+                        table_info: spec.table_info.clone(),
+                        case_name: spec.case_name.clone(),
+                        spec_type: delta_kernel::benchmarks::WorkloadSpecType::Read(read_spec),
+                    };
+                    
+                    let mut runner = match create_runner(spec_variant, engine.clone()) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("Failed to create runner for {}: {}", workload_name, e);
+                            continue;
+                        }
+                    };
+                    
+                    if let Err(e) = runner.setup() {
+                        eprintln!("Failed to setup runner for {}: {}", workload_name, e);
+                        continue;
+                    }
+                    
+                    group.bench_function(BenchmarkId::from_parameter(&workload_name), |b| {
+                        b.iter(|| {
+                            runner.execute().expect("Benchmark execution failed");
+                        });
+                    });
+                    
+                    if let Err(e) = runner.cleanup() {
+                        eprintln!("Failed to cleanup runner for {}: {}", workload_name, e);
+                    }
+                }
             }
-        };
-
-        // Set up the runner (this happens once, not timed)
-        if let Err(e) = runner.setup() {
-            eprintln!("Failed to setup runner for {}: {}", workload_name, e);
-            continue;
-        }
-
-        // Run the benchmark
-        group.bench_function(BenchmarkId::from_parameter(&workload_name), |b| {
-            b.iter(|| {
-                runner.execute().expect("Benchmark execution failed");
-            });
-        });
-
-        // Clean up after this workload
-        if let Err(e) = runner.cleanup() {
-            eprintln!("Failed to cleanup runner for {}: {}", workload_name, e);
+            delta_kernel::benchmarks::WorkloadSpecType::SnapshotConstruction(_) => {
+                let workload_name = spec.full_name();
+                println!("Setting up benchmark: {}", workload_name);
+                
+                let mut runner = match create_runner(spec, engine.clone()) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("Failed to create runner for {}: {}", workload_name, e);
+                        continue;
+                    }
+                };
+                
+                if let Err(e) = runner.setup() {
+                    eprintln!("Failed to setup runner for {}: {}", workload_name, e);
+                    continue;
+                }
+                
+                group.bench_function(BenchmarkId::from_parameter(&workload_name), |b| {
+                    b.iter(|| {
+                        runner.execute().expect("Benchmark execution failed");
+                    });
+                });
+                
+                if let Err(e) = runner.cleanup() {
+                    eprintln!("Failed to cleanup runner for {}: {}", workload_name, e);
+                }
+            }
         }
     }
 

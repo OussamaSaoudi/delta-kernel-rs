@@ -87,7 +87,15 @@ pub fn load_all_workloads<P: AsRef<Path>>(
     spec_dir_path: P,
 ) -> Result<Vec<WorkloadSpecVariant>, WorkloadLoadError> {
     let spec_dir = spec_dir_path.as_ref();
-    validate_workload_directory(spec_dir)?;
+    
+    // Validate that the workload directory exists and is accessible
+    if !spec_dir.exists() {
+        return Err(WorkloadLoadError::DirectoryNotFound(spec_dir.to_path_buf()));
+    }
+    
+    if !spec_dir.is_dir() {
+        return Err(WorkloadLoadError::NotADirectory(spec_dir.to_path_buf()));
+    }
     
     let table_directories = find_table_directories(spec_dir)?;
     
@@ -98,19 +106,6 @@ pub fn load_all_workloads<P: AsRef<Path>>(
     }
     
     Ok(all_specs)
-}
-
-/// Validate that a workload directory exists and is accessible
-fn validate_workload_directory(path: &Path) -> Result<(), WorkloadLoadError> {
-    if !path.exists() {
-        return Err(WorkloadLoadError::DirectoryNotFound(path.to_path_buf()));
-    }
-    
-    if !path.is_dir() {
-        return Err(WorkloadLoadError::NotADirectory(path.to_path_buf()));
-    }
-    
-    Ok(())
 }
 
 /// Find all table directories within the workload specifications directory
@@ -133,19 +128,23 @@ fn find_table_directories(spec_dir: &Path) -> Result<Vec<PathBuf>, WorkloadLoadE
 
 /// Load all workload specifications from a single table directory
 fn load_specs_from_table(table_dir: &Path) -> Result<Vec<WorkloadSpecVariant>, WorkloadLoadError> {
-    validate_table_structure(table_dir)?;
+    let specs_dir = table_dir.join(SPECS_DIR);
+    
+    // Validate that the specs directory exists
+    if !specs_dir.exists() || !specs_dir.is_dir() {
+        return Err(WorkloadLoadError::SpecsDirectoryNotFound(specs_dir));
+    }
     
     let table_info_path = table_dir.join(TABLE_INFO_FILE);
     let table_info = TableInfo::from_json_path(&table_info_path)
         .map_err(|e| WorkloadLoadError::TableInfoParseError(table_info_path.clone(), e))?;
     
-    let specs_dir = table_dir.join(SPECS_DIR);
     let spec_directories = find_spec_directories(&specs_dir)?;
     
-    let mut all_variants = Vec::new();
+    let mut all_specs = Vec::new();
     for spec_dir in spec_directories {
         match load_single_spec(&spec_dir, table_info.clone()) {
-            Ok(variants) => all_variants.extend(variants),
+            Ok(spec) => all_specs.push(spec),
             Err(WorkloadLoadError::ParseError(path, e)) => {
                 // Skip unsupported workload types gracefully
                 eprintln!("Warning: Skipping unsupported workload spec {}: {}", path.display(), e);
@@ -155,18 +154,7 @@ fn load_specs_from_table(table_dir: &Path) -> Result<Vec<WorkloadSpecVariant>, W
         }
     }
     
-    Ok(all_variants)
-}
-
-/// Validate that a table directory has the required structure
-fn validate_table_structure(table_dir: &Path) -> Result<(), WorkloadLoadError> {
-    let specs_dir = table_dir.join(SPECS_DIR);
-    
-    if !specs_dir.exists() || !specs_dir.is_dir() {
-        return Err(WorkloadLoadError::SpecsDirectoryNotFound(specs_dir));
-    }
-    
-    Ok(())
+    Ok(all_specs)
 }
 
 /// Find all specification directories within the specs directory
@@ -187,11 +175,11 @@ fn find_spec_directories(specs_dir: &Path) -> Result<Vec<PathBuf>, WorkloadLoadE
     Ok(spec_dirs)
 }
 
-/// Load a single workload specification and generate all its variants
+/// Load a single workload specification
 fn load_single_spec(
     spec_dir: &Path,
     table_info: TableInfo,
-) -> Result<Vec<WorkloadSpecVariant>, WorkloadLoadError> {
+) -> Result<WorkloadSpecVariant, WorkloadLoadError> {
     let spec_file = spec_dir.join(SPEC_FILE);
     
     if !spec_file.exists() || !spec_file.is_file() {
@@ -204,13 +192,12 @@ fn load_single_spec(
         .ok_or_else(|| WorkloadLoadError::SpecFileNotFound(spec_dir.to_path_buf()))?
         .to_string();
     
-    let mut spec = WorkloadSpecVariant::from_json_path(&spec_file)
+    let spec_type = WorkloadSpecVariant::from_json_path(&spec_file)
         .map_err(|e| WorkloadLoadError::ParseError(spec_file.clone(), e))?;
     
-    // Set table info and case name on the loaded spec
-    spec.set_table_info(table_info);
-    spec.set_case_name(case_name);
-    
-    // Generate variants from the base spec
-    Ok(spec.generate_variants())
+    Ok(WorkloadSpecVariant {
+        table_info,
+        case_name,
+        spec_type,
+    })
 }

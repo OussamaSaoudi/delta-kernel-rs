@@ -28,8 +28,8 @@ pub mod runners;
 pub mod utils;
 
 pub use models::{
-    ReadOperationType, ReadSpec, SnapshotConstructionSpec, TableInfo, WorkloadSpec,
-    WorkloadSpecVariant,
+    ReadOperationType, ReadSpec, SnapshotConstructionSpec, TableInfo,
+    WorkloadSpecType, WorkloadSpecVariant,
 };
 pub use runners::{create_runner, ReadMetadataRunner, SnapshotConstructionRunner, WorkloadRunner};
 pub use utils::{load_all_workloads, WorkloadLoadError};
