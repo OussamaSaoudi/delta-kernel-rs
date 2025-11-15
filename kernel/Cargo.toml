@@ -170,3 +170,8 @@ harness = false
 [[bench]]
 name = "expression_bench"
 harness = false
+
+[[bench]]
+name = "workload_bench"
+harness = false
+required-features = ["arrow", "default-engine-rustls", "internal-api"]

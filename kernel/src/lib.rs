@@ -103,6 +103,10 @@ pub mod table_properties;
 pub mod transaction;
 pub(crate) mod transforms;
 
+// Benchmarking infrastructure (only public for benchmarks and tests)
+#[cfg(any(test, feature = "internal-api"))]
+pub mod benchmarks;
+
 pub use log_path::LogPath;
 
 mod row_tracking;
