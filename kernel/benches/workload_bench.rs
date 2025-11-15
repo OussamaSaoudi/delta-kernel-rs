@@ -5,7 +5,7 @@
 //!
 //! You can run this benchmark with `cargo bench --bench workload_bench`.
 //!
-//! By default, it uses the Java kernel's workload specs for compatibility testing.
+//! By default, it uses local workload specs in the benches/workload_specs directory.
 //! To use a different directory, set the WORKLOAD_SPECS_DIR environment variable:
 //! ```bash
 //! WORKLOAD_SPECS_DIR=/path/to/specs cargo bench --bench workload_bench
@@ -34,31 +34,16 @@ use delta_kernel::engine::default::DefaultEngine;
 /// 
 /// Checks in order:
 /// 1. WORKLOAD_SPECS_DIR environment variable
-/// 2. Java kernel's workload specs (for compatibility testing)
-/// 3. Rust kernel's local workload specs (fallback)
+/// 2. Local workload specs in benches/workload_specs (default)
 fn get_workload_specs_path() -> PathBuf {
     // Check environment variable first
     if let Ok(custom_path) = std::env::var("WORKLOAD_SPECS_DIR") {
+        println!("Using custom workload specs: {}", custom_path);
         return PathBuf::from(custom_path);
     }
     
-    // Try Java kernel's workload specs (relative to workspace root)
-    // This assumes the Java kernel is checked out alongside delta-kernel-rs
-    let workspace_root = env!("CARGO_MANIFEST_DIR");
-    let java_specs = PathBuf::from(workspace_root)
-        .parent()  // kernel -> delta-kernel-rs
-        .and_then(|p| p.parent())  // delta-kernel-rs -> projects/code
-        .map(|p| p.join("delta/kernel/kernel-benchmarks/src/test/resources/workload_specs"));
-    
-    if let Some(ref path) = java_specs {
-        if path.exists() {
-            println!("Using Java kernel workload specs: {}", path.display());
-            return path.clone();
-        }
-    }
-    
-    // Fallback to local workload specs
-    let local_specs = PathBuf::from(workspace_root)
+    // Use local workload specs as default
+    let local_specs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("benches")
         .join("workload_specs");
     
@@ -76,6 +61,39 @@ fn setup_engine() -> Arc<DefaultEngine<TokioBackgroundExecutor>> {
     let dummy_url = try_parse_uri(".").expect("Failed to parse current directory");
     let store = store_from_url(&dummy_url).expect("Failed to create store");
     Arc::new(DefaultEngine::new(store))
+}
+
+/// Helper function to run a single benchmark
+fn run_benchmark(
+    group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
+    spec: delta_kernel::benchmarks::WorkloadSpecVariant,
+    engine: Arc<DefaultEngine<TokioBackgroundExecutor>>,
+) {
+    let workload_name = spec.full_name();
+    println!("Setting up benchmark: {}", workload_name);
+    
+    let mut runner = match create_runner(spec, engine) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to create runner for {}: {}", workload_name, e);
+            return;
+        }
+    };
+    
+    if let Err(e) = runner.setup() {
+        eprintln!("Failed to setup runner for {}: {}", workload_name, e);
+        return;
+    }
+    
+    group.bench_function(BenchmarkId::from_parameter(&workload_name), |b| {
+        b.iter(|| {
+            runner.execute().expect("Benchmark execution failed");
+        });
+    });
+    
+    if let Err(e) = runner.cleanup() {
+        eprintln!("Failed to cleanup runner for {}: {}", workload_name, e);
+    }
 }
 
 /// Main benchmark function that loads and runs all workloads
@@ -107,72 +125,22 @@ fn workload_benchmarks(c: &mut Criterion) {
     
     for spec in specs {
         // For Read specs, create benchmarks for each operation type
-        // For other specs, create a single benchmark
         match &spec.spec_type {
             delta_kernel::benchmarks::WorkloadSpecType::Read(read_spec) => {
                 // Currently only support read_metadata
                 for operation_type in [delta_kernel::benchmarks::ReadOperationType::ReadMetadata] {
-                    let mut read_spec = read_spec.clone();
-                    read_spec.operation_type = Some(operation_type);
-                    let workload_name = spec.full_name();
-                    println!("Setting up benchmark: {}", workload_name);
-                    
-                    let spec_variant = delta_kernel::benchmarks::WorkloadSpecVariant {
+                    let spec_with_op = delta_kernel::benchmarks::WorkloadSpecVariant {
                         table_info: spec.table_info.clone(),
                         case_name: spec.case_name.clone(),
-                        spec_type: delta_kernel::benchmarks::WorkloadSpecType::Read(read_spec),
+                        spec_type: delta_kernel::benchmarks::WorkloadSpecType::Read(
+                            read_spec.clone().with_operation_type(operation_type)
+                        ),
                     };
-                    
-                    let mut runner = match create_runner(spec_variant, engine.clone()) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            eprintln!("Failed to create runner for {}: {}", workload_name, e);
-                            continue;
-                        }
-                    };
-                    
-                    if let Err(e) = runner.setup() {
-                        eprintln!("Failed to setup runner for {}: {}", workload_name, e);
-                        continue;
-                    }
-                    
-                    group.bench_function(BenchmarkId::from_parameter(&workload_name), |b| {
-                        b.iter(|| {
-                            runner.execute().expect("Benchmark execution failed");
-                        });
-                    });
-                    
-                    if let Err(e) = runner.cleanup() {
-                        eprintln!("Failed to cleanup runner for {}: {}", workload_name, e);
-                    }
+                    run_benchmark(&mut group, spec_with_op, engine.clone());
                 }
             }
             delta_kernel::benchmarks::WorkloadSpecType::SnapshotConstruction(_) => {
-                let workload_name = spec.full_name();
-                println!("Setting up benchmark: {}", workload_name);
-                
-                let mut runner = match create_runner(spec, engine.clone()) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("Failed to create runner for {}: {}", workload_name, e);
-                        continue;
-                    }
-                };
-                
-                if let Err(e) = runner.setup() {
-                    eprintln!("Failed to setup runner for {}: {}", workload_name, e);
-                    continue;
-                }
-                
-                group.bench_function(BenchmarkId::from_parameter(&workload_name), |b| {
-                    b.iter(|| {
-                        runner.execute().expect("Benchmark execution failed");
-                    });
-                });
-                
-                if let Err(e) = runner.cleanup() {
-                    eprintln!("Failed to cleanup runner for {}: {}", workload_name, e);
-                }
+                run_benchmark(&mut group, spec, engine.clone());
             }
         }
     }

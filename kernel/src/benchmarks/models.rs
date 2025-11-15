@@ -69,6 +69,14 @@ pub struct ReadSpec {
     pub operation_type: Option<ReadOperationType>,
 }
 
+impl ReadSpec {
+    /// Create a copy of this spec with a specific operation type
+    pub fn with_operation_type(mut self, operation_type: ReadOperationType) -> Self {
+        self.operation_type = Some(operation_type);
+        self
+    }
+}
+
 /// Specification for snapshot construction workloads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotConstructionSpec {

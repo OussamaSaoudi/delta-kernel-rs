@@ -109,30 +109,24 @@ impl WorkloadRunner for ReadMetadataRunner {
 pub struct SnapshotConstructionRunner {
     spec: WorkloadSpecVariant,
     engine: Arc<dyn Engine>,
-    table_root: String,
 }
 
 impl SnapshotConstructionRunner {
     /// Create a new SnapshotConstructionRunner from a spec and engine
     pub fn new(spec: WorkloadSpecVariant, engine: Arc<dyn Engine>) -> Self {
-        let table_root = spec.table_info.resolved_table_root();
-        Self {
-            spec,
-            engine,
-            table_root,
-        }
+        Self { spec, engine }
     }
 }
 
 impl WorkloadRunner for SnapshotConstructionRunner {
     fn setup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Validate that the table path can be parsed
-        let _ = crate::try_parse_uri(&self.table_root)?;
+        // No setup needed for snapshot construction benchmarks
         Ok(())
     }
     
     fn execute(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let url = crate::try_parse_uri(&self.table_root)?;
+        let table_root = self.spec.table_info.resolved_table_root();
+        let url = crate::try_parse_uri(&table_root)?;
         
         // Get version from the SnapshotConstruction spec
         let version = match &self.spec.spec_type {
