@@ -84,6 +84,21 @@ impl ScanLogReplayProcessor {
             state_info,
         })
     }
+
+    /// Get a reference to the seen file keys (for serialization).
+    pub(crate) fn seen_file_keys(&self) -> &HashSet<FileActionKey> {
+        &self.seen_file_keys
+    }
+
+    /// Get a reference to the state info (for serialization).
+    pub(crate) fn state_info(&self) -> &Arc<StateInfo> {
+        &self.state_info
+    }
+
+    /// Set the seen file keys (for deserialization).
+    pub(crate) fn set_seen_file_keys(&mut self, seen_file_keys: HashSet<FileActionKey>) {
+        self.seen_file_keys = seen_file_keys;
+    }
 }
 
 /// A visitor that deduplicates a stream of add and remove actions into a stream of valid adds. Log
