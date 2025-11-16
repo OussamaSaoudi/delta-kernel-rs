@@ -31,18 +31,24 @@ use crate::{DeltaResult, Engine, Error, FileMeta};
 ///     // Process metadata
 /// }
 ///
-/// // Extract processor and files for distribution
-/// let (processor, files) = driver.finish()?;
-///
-/// // Serialize processor and partition files across executors
-/// let serialized = processor.serialize()?;
-/// let partitions = partition_files(files, num_executors);
-/// for (executor, partition) in partitions {
-///     executor.send(serialized.clone(), partition)?;
+/// // Extract processor and files for distribution (if needed)
+/// match driver.finish()? {
+///     Some((processor, files)) => {
+///         // Executor phase needed - distribute files
+///         let serialized = processor.serialize()?;
+///         let partitions = partition_files(files, num_executors);
+///         for (executor, partition) in partitions {
+///             executor.send(serialized.clone(), partition)?;
+///         }
+///     }
+///     None => {
+///         // No executor phase needed - all processing complete
+///         println!("Log replay complete on driver");
+///     }
 /// }
 /// ```
 pub(crate) struct DriverV2<P: LogReplayProcessor> {
-    state: DriverState<P>,
+    state: Option<DriverState<P>>,
     log_segment: Arc<LogSegment>,
     engine: Arc<dyn Engine>,
 }
@@ -50,7 +56,10 @@ pub(crate) struct DriverV2<P: LogReplayProcessor> {
 enum DriverState<P: LogReplayProcessor> {
     Commit(CommitPhase<P>),
     Manifest(ManifestPhase<P>),
-    Done { processor: P, files: Vec<FileMeta> },
+    /// Executor phase needed - has files to distribute
+    ExecutorPhase { processor: P, files: Vec<FileMeta> },
+    /// Done - no more work needed
+    Done,
 }
 
 impl<P: LogReplayProcessor> DriverV2<P> {
@@ -67,7 +76,7 @@ impl<P: LogReplayProcessor> DriverV2<P> {
     ) -> DeltaResult<Self> {
         let commit = CommitPhase::new(processor, &log_segment, engine.clone())?;
         Ok(Self {
-            state: DriverState::Commit(commit),
+            state: Some(DriverState::Commit(commit)),
             log_segment,
             engine,
         })
@@ -78,14 +87,15 @@ impl<P: LogReplayProcessor> DriverV2<P> {
     /// Must be called after the iterator is exhausted.
     ///
     /// # Returns
-    /// - `processor`: The log replay processor (ready for serialization)
-    /// - `files`: Files to distribute to executors (sidecars or multi-part checkpoint parts)
+    /// - `Some((processor, files))`: Executor phase needed - distribute files to executors
+    /// - `None`: No executor phase needed - all processing complete on driver
     ///
     /// # Errors
     /// Returns an error if called before iterator exhaustion.
-    pub fn finish(self) -> DeltaResult<(P, Vec<FileMeta>)> {
+    pub fn finish(self) -> DeltaResult<Option<(P, Vec<FileMeta>)>> {
         match self.state {
-            DriverState::Done { processor, files } => Ok((processor, files)),
+            Some(DriverState::ExecutorPhase { processor, files }) => Ok(Some((processor, files))),
+            Some(DriverState::Done) => Ok(None),
             _ => Err(Error::generic(
                 "Must exhaust iterator before calling finish()",
             )),
@@ -98,93 +108,86 @@ impl<P: LogReplayProcessor> Iterator for DriverV2<P> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            match &mut self.state {
+            // Try to get item from current phase
+            match self.state.as_mut()? {
                 DriverState::Commit(phase) => {
                     if let Some(item) = phase.next() {
                         return Some(item);
                     }
-
-                    // Phase exhausted, transition to next
-                    let DriverState::Commit(phase) = std::mem::replace(
-                        &mut self.state,
-                        DriverState::Done {
-                            processor: unsafe { std::mem::zeroed() }, // Temporary
-                            files: vec![],
-                        },
-                    ) else {
-                        unreachable!()
-                    };
-
-                    self.state = match phase.into_next(&self.log_segment) {
-                        Ok(AfterCommit::Manifest {
-                            processor,
-                            manifest_file,
-                            log_root,
-                        }) => {
-                            match ManifestPhase::new(
-                                processor,
-                                manifest_file,
-                                log_root,
-                                self.engine.clone(),
-                            ) {
-                                Ok(m) => DriverState::Manifest(m),
-                                Err(e) => return Some(Err(e)),
-                            }
-                        }
-                        Ok(AfterCommit::LeafManifest {
-                            processor,
-                            leaf_files,
-                        }) => {
-                            // Multi-part checkpoint - return as files to distribute
-                            DriverState::Done {
-                                processor,
-                                files: leaf_files,
-                            }
-                        }
-                        Ok(AfterCommit::Done(p)) => DriverState::Done {
-                            processor: p,
-                            files: vec![],
-                        },
-                        Err(e) => return Some(Err(e)),
-                    };
                 }
-
                 DriverState::Manifest(phase) => {
                     if let Some(item) = phase.next() {
                         return Some(item);
                     }
-
-                    let DriverState::Manifest(phase) = std::mem::replace(
-                        &mut self.state,
-                        DriverState::Done {
-                            processor: unsafe { std::mem::zeroed() },
-                            files: vec![],
-                        },
-                    ) else {
-                        unreachable!()
-                    };
-
-                    self.state = match phase.into_next() {
-                        Ok(AfterManifest::Sidecars {
-                            processor,
-                            sidecars,
-                        }) => DriverState::Done {
-                            processor,
-                            files: sidecars,
-                        },
-                        Ok(AfterManifest::Done(p)) => DriverState::Done {
-                            processor: p,
-                            files: vec![],
-                        },
-                        Err(e) => return Some(Err(e)),
-                    };
-
-                    return None;
                 }
+                DriverState::ExecutorPhase { .. } | DriverState::Done => return None,
+            }
 
-                DriverState::Done { .. } => return None,
+            // Phase exhausted - transition
+            let old_state = self.state.take()?;
+            match self.transition(old_state) {
+                Ok(new_state) => self.state = Some(new_state),
+                Err(e) => return Some(Err(e)),
             }
         }
+    }
+}
+
+impl<P: LogReplayProcessor> DriverV2<P> {
+    fn transition(&self, state: DriverState<P>) -> DeltaResult<DriverState<P>> {
+        let result = match state {
+            DriverState::Commit(phase) => match phase.into_next(&self.log_segment)? {
+                AfterCommit::Manifest {
+                    processor,
+                    manifest_file,
+                    log_root,
+                } => DriverState::Manifest(ManifestPhase::new(
+                    processor,
+                    manifest_file,
+                    log_root,
+                    self.engine.clone(),
+                )?),
+                AfterCommit::LeafManifest {
+                    processor,
+                    leaf_files,
+                } => {
+                    // Multi-part checkpoint - need executor phase
+                    DriverState::ExecutorPhase {
+                        processor,
+                        files: leaf_files,
+                    }
+                }
+                AfterCommit::Done(_) => {
+                    // No checkpoint - done
+                    DriverState::Done
+                }
+            },
+
+            DriverState::Manifest(phase) => match phase.into_next()? {
+                AfterManifest::Sidecars {
+                    processor,
+                    sidecars,
+                } => {
+                    // Has sidecars - need executor phase
+                    DriverState::ExecutorPhase {
+                        processor,
+                        files: sidecars,
+                    }
+                }
+                AfterManifest::Done(_) => {
+                    // No sidecars - done
+                    DriverState::Done
+                }
+            },
+
+            DriverState::ExecutorPhase { processor, files } => {
+                // Already in final state
+                DriverState::ExecutorPhase { processor, files }
+            }
+            DriverState::Done => DriverState::Done,
+        };
+
+        Ok(result)
     }
 }
 

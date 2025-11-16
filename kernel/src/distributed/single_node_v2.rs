@@ -28,7 +28,7 @@ use crate::{DeltaResult, Engine};
 /// }
 /// ```
 pub(crate) struct SingleNodeV2<P: LogReplayProcessor> {
-    state: SingleNodeState<P>,
+    state: Option<SingleNodeState<P>>,
     log_segment: Arc<LogSegment>,
     engine: Arc<dyn Engine>,
 }
@@ -54,7 +54,7 @@ impl<P: LogReplayProcessor> SingleNodeV2<P> {
     ) -> DeltaResult<Self> {
         let commit = CommitPhase::new(processor, &log_segment, engine.clone())?;
         Ok(Self {
-            state: SingleNodeState::Commit(commit),
+            state: Some(SingleNodeState::Commit(commit)),
             log_segment,
             engine,
         })
@@ -66,82 +66,75 @@ impl<P: LogReplayProcessor> Iterator for SingleNodeV2<P> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            match &mut self.state {
+            // Try to get item from current phase
+            match self.state.as_mut()? {
                 SingleNodeState::Commit(phase) => {
                     if let Some(item) = phase.next() {
                         return Some(item);
                     }
-
-                    // Phase exhausted, transition to next
-                    let SingleNodeState::Commit(phase) =
-                        std::mem::replace(&mut self.state, SingleNodeState::Done)
-                    else {
-                        unreachable!()
-                    };
-
-                    self.state = match phase.into_next(&self.log_segment) {
-                        Ok(AfterCommit::Manifest {
-                            processor,
-                            manifest_file,
-                            log_root,
-                        }) => {
-                            match ManifestPhase::new(
-                                processor,
-                                manifest_file,
-                                log_root,
-                                self.engine.clone(),
-                            ) {
-                                Ok(m) => SingleNodeState::Manifest(m),
-                                Err(e) => return Some(Err(e)),
-                            }
-                        }
-                        Ok(AfterCommit::LeafManifest {
-                            processor,
-                            leaf_files,
-                        }) => {
-                            match SidecarPhase::new(processor, leaf_files, self.engine.clone()) {
-                                Ok(s) => SingleNodeState::Sidecar(s),
-                                Err(e) => return Some(Err(e)),
-                            }
-                        }
-                        Ok(AfterCommit::Done(_)) => SingleNodeState::Done,
-                        Err(e) => return Some(Err(e)),
-                    };
                 }
-
                 SingleNodeState::Manifest(phase) => {
                     if let Some(item) = phase.next() {
                         return Some(item);
                     }
-
-                    let SingleNodeState::Manifest(phase) =
-                        std::mem::replace(&mut self.state, SingleNodeState::Done)
-                    else {
-                        unreachable!()
-                    };
-
-                    self.state = match phase.into_next() {
-                        Ok(AfterManifest::Sidecars {
-                            processor,
-                            sidecars,
-                        }) => {
-                            match SidecarPhase::new(processor, sidecars, self.engine.clone()) {
-                                Ok(s) => SingleNodeState::Sidecar(s),
-                                Err(e) => return Some(Err(e)),
-                            }
-                        }
-                        Ok(AfterManifest::Done(_)) => SingleNodeState::Done,
-                        Err(e) => return Some(Err(e)),
-                    };
                 }
-
-                SingleNodeState::Sidecar(phase) => {
-                    return phase.next();
-                }
-
+                SingleNodeState::Sidecar(phase) => return phase.next(),
                 SingleNodeState::Done => return None,
             }
+
+            // Phase exhausted - transition
+            let old_state = self.state.take()?;
+            match self.transition(old_state) {
+                Ok(new_state) => self.state = Some(new_state),
+                Err(e) => return Some(Err(e)),
+            }
         }
+    }
+}
+
+impl<P: LogReplayProcessor> SingleNodeV2<P> {
+    fn transition(&self, state: SingleNodeState<P>) -> DeltaResult<SingleNodeState<P>> {
+        let result = match state {
+            SingleNodeState::Commit(phase) => {
+                match phase.into_next(&self.log_segment)? {
+                    AfterCommit::Manifest {
+                        processor,
+                        manifest_file,
+                        log_root,
+                    } => SingleNodeState::Manifest(ManifestPhase::new(
+                        processor,
+                        manifest_file,
+                        log_root,
+                        self.engine.clone(),
+                    )?),
+                    AfterCommit::LeafManifest {
+                        processor,
+                        leaf_files,
+                    } => SingleNodeState::Sidecar(SidecarPhase::new(
+                        processor,
+                        leaf_files,
+                        self.engine.clone(),
+                    )?),
+                    AfterCommit::Done(_) => SingleNodeState::Done,
+                }
+            }
+
+            SingleNodeState::Manifest(phase) => match phase.into_next()? {
+                AfterManifest::Sidecars {
+                    processor,
+                    sidecars,
+                } => SingleNodeState::Sidecar(SidecarPhase::new(
+                    processor,
+                    sidecars,
+                    self.engine.clone(),
+                )?),
+                AfterManifest::Done(_) => SingleNodeState::Done,
+            },
+
+            SingleNodeState::Sidecar(_) | SingleNodeState::Done => SingleNodeState::Done,
+        };
+
+        Ok(result)
     }
 }
 
