@@ -403,9 +403,23 @@ impl Scan {
     ///   from disk is already in the correct logical state.
     pub fn scan_metadata(
         &self,
-        engine: &dyn Engine,
+        engine: Arc<dyn Engine>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanMetadata>>> {
-        self.scan_metadata_inner(engine, self.replay_for_scan_metadata(engine)?)
+        use crate::distributed::single_node_v2::SingleNodeV2;
+        use crate::scan::log_replay::ScanLogReplayProcessor;
+        
+        if let PhysicalPredicate::StaticSkipAll = self.state_info.physical_predicate {
+            return Ok(None.into_iter().flatten());
+        }
+        
+        let processor = ScanLogReplayProcessor::new(engine.as_ref(), self.state_info.clone())?;
+        let single_node = SingleNodeV2::new(
+            processor,
+            Arc::new(self.snapshot.log_segment().clone()),
+            engine,
+        )?;
+        
+        Ok(Some(single_node).into_iter().flatten())
     }
 
     /// Get an updated iterator of [`ScanMetadata`]s based on an existing iterator of [`EngineData`]s.
@@ -453,7 +467,7 @@ impl Scan {
     #[internal_api]
     pub(crate) fn scan_metadata_from(
         &self,
-        engine: &dyn Engine,
+        engine: Arc<dyn Engine>,
         existing_version: Version,
         existing_data: impl IntoIterator<Item = Box<dyn EngineData>> + 'static,
         _existing_predicate: Option<PredicateRef>,
@@ -494,7 +508,7 @@ impl Scan {
         // in order to be processed by our log replay, we must re-shape the existing scan metadata
         // back into shape as we read it from the log. Since it is already reconciled data,
         // we treat it as if it originated from a checkpoint.
-        let transform = engine.evaluation_handler().new_expression_evaluator(
+        let transform = engine.as_ref().evaluation_handler().new_expression_evaluator(
             scan_row_schema(),
             get_scan_metadata_transform_expr(),
             RESTORED_ADD_SCHEMA.clone(),
@@ -507,7 +521,7 @@ impl Scan {
         // to apply file skipping and provide the required transformations.
         if existing_version == self.snapshot.version() {
             let scan = existing_data.into_iter().map(apply_transform);
-            return Ok(Box::new(self.scan_metadata_inner(engine, scan)?));
+            return Ok(Box::new(self.scan_metadata_inner(engine.as_ref(), scan)?));
         }
 
         let log_segment = self.snapshot.log_segment();
@@ -539,14 +553,14 @@ impl Scan {
 
         let it = new_log_segment
             .read_actions_with_projected_checkpoint_actions(
-                engine,
+                engine.as_ref(),
                 COMMIT_READ_SCHEMA.clone(),
                 CHECKPOINT_READ_SCHEMA.clone(),
                 None,
             )?
             .chain(existing_data.into_iter().map(apply_transform));
 
-        Ok(Box::new(self.scan_metadata_inner(engine, it)?))
+        Ok(Box::new(self.scan_metadata_inner(engine.as_ref(), it)?))
     }
 
     fn scan_metadata_inner(
@@ -618,7 +632,7 @@ impl Scan {
 
         let table_root = self.snapshot.table_root().clone();
 
-        let scan_metadata_iter = self.scan_metadata(engine.as_ref())?;
+        let scan_metadata_iter = self.scan_metadata(engine.clone())?;
         let scan_files_iter = scan_metadata_iter
             .map(|res| {
                 let scan_metadata = res?;
@@ -1087,7 +1101,7 @@ mod tests {
         }
     }
 
-    fn get_files_for_scan(scan: Scan, engine: &dyn Engine) -> DeltaResult<Vec<String>> {
+    fn get_files_for_scan(scan: Scan, engine: Arc<dyn Engine>) -> DeltaResult<Vec<String>> {
         let scan_metadata_iter = scan.scan_metadata(engine)?;
         fn scan_metadata_callback(
             paths: &mut Vec<String>,
@@ -1114,11 +1128,11 @@ mod tests {
         let path =
             std::fs::canonicalize(PathBuf::from("./tests/data/table-without-dv-small/")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
-        let engine = SyncEngine::new();
+        let engine = Arc::new(SyncEngine::new());
 
-        let snapshot = Snapshot::builder_for(url).build(&engine).unwrap();
+        let snapshot = Snapshot::builder_for(url).build(engine.as_ref()).unwrap();
         let scan = snapshot.scan_builder().build().unwrap();
-        let files = get_files_for_scan(scan, &engine).unwrap();
+        let files = get_files_for_scan(scan, engine).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(
             files[0],
@@ -1153,7 +1167,7 @@ mod tests {
         let version = snapshot.version();
         let scan = snapshot.scan_builder().build().unwrap();
         let files: Vec<_> = scan
-            .scan_metadata(engine.as_ref())
+            .scan_metadata(engine.clone())
             .unwrap()
             .map_ok(|ScanMetadata { scan_files, .. }| {
                 let (underlying_data, selection_vector) = scan_files.into_parts();
@@ -1167,7 +1181,7 @@ mod tests {
             .try_collect()
             .unwrap();
         let new_files: Vec<_> = scan
-            .scan_metadata_from(engine.as_ref(), version, files, None)
+            .scan_metadata_from(engine.clone(), version, files, None)
             .unwrap()
             .try_collect()
             .unwrap();
@@ -1189,7 +1203,7 @@ mod tests {
             .unwrap();
         let scan = snapshot.scan_builder().build().unwrap();
         let files: Vec<_> = scan
-            .scan_metadata(engine.as_ref())
+            .scan_metadata(engine.clone())
             .unwrap()
             .map_ok(|ScanMetadata { scan_files, .. }| {
                 let (underlying_data, selection_vector) = scan_files.into_parts();
@@ -1213,7 +1227,7 @@ mod tests {
             .unwrap();
         let scan = snapshot.scan_builder().build().unwrap();
         let new_files: Vec<_> = scan
-            .scan_metadata_from(engine.as_ref(), 0, files, None)
+            .scan_metadata_from(engine.clone(), 0, files, None)
             .unwrap()
             .map_ok(|ScanMetadata { scan_files, .. }| {
                 let (underlying_data, selection_vector) = scan_files.into_parts();
@@ -1375,11 +1389,11 @@ mod tests {
         ))?;
 
         let url = url::Url::from_directory_path(path).unwrap();
-        let engine = SyncEngine::new();
+        let engine = Arc::new(SyncEngine::new());
 
-        let snapshot = Snapshot::builder_for(url).build(&engine).unwrap();
+        let snapshot = Snapshot::builder_for(url).build(engine.as_ref()).unwrap();
         let scan = snapshot.scan_builder().build()?;
-        let files = get_files_for_scan(scan, &engine)?;
+        let files = get_files_for_scan(scan, engine)?;
         // test case:
         //
         // commit0:     P and M, no add/remove
