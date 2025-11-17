@@ -39,6 +39,7 @@ impl ManifestPhase {
     /// - `log_root`: Root URL for resolving sidecar paths
     /// - `engine`: Engine for reading files
     pub fn new(
+        // TODO: Change to ParsedLogPath so that we already have the extension type
         manifest_file: FileMeta,
         log_root: Url,
         engine: Arc<dyn Engine>,
@@ -83,6 +84,7 @@ impl ManifestPhase {
     /// - `Sidecars`: Extracted sidecar files
     /// - `Done`: No sidecars found
     pub fn into_next(self) -> DeltaResult<AfterManifest> {
+        // TODO: Check that stream is exhausted. We can track a boolean flag  on whether we saw a None yet.
         let sidecars = self
             .sidecar_visitor
             .sidecars
@@ -109,6 +111,8 @@ impl Iterator for ManifestPhase {
                 // Extract sidecar references from the batch
                 self.sidecar_visitor.visit_rows_of(batch.actions())?;
                 // Return the batch
+                // TODO: un-select sidecar actions
+                // TODO: project out sidecar actions 
                 Ok(batch)
             })
         })

@@ -52,6 +52,15 @@ impl<P: LogReplayProcessor> ExecutorV2<P> {
         files: Vec<FileMeta>,
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<Self> {
+
+        // TODO: Executor may take an iterator of EngineData instead of us applying
+        // the leaf manifest directly. This is so that the engine can split up the work 
+        // to the level of RowGroups instead of the level of the entire file.
+
+        // Example: This could result from a shuffle where there are no more "files", 
+        // there are just batches resulting from the shuffle.
+
+        // TODO: implement P&M. Think about appId, txn, etc.
         let phase = SidecarPhase::new(files, engine)?;
         Ok(Self { processor, phase })
     }
