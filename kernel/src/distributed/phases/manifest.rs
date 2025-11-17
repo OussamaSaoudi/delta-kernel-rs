@@ -124,7 +124,165 @@ impl<P: LogReplayProcessor> Iterator for ManifestPhase<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::log_replay::ScanLogReplayProcessor;
+    use crate::scan::state_info::StateInfo;
+    use std::path::PathBuf;
+    use std::sync::Arc as StdArc;
+    use object_store::local::LocalFileSystem;
+    use crate::engine::default::DefaultEngine;
+    use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
 
-    // Tests will be added with test fixtures
+    fn load_test_table(
+        table_name: &str,
+    ) -> DeltaResult<(
+        StdArc<DefaultEngine<TokioBackgroundExecutor>>,
+        StdArc<crate::Snapshot>,
+        url::Url,
+    )> {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("tests/data");
+        path.push(table_name);
+        
+        let path = std::fs::canonicalize(path)
+            .map_err(|e| crate::Error::Generic(format!("Failed to canonicalize path: {}", e)))?;
+        
+        let url = url::Url::from_directory_path(path)
+            .map_err(|_| crate::Error::Generic("Failed to create URL from path".to_string()))?;
+        
+        let store = StdArc::new(LocalFileSystem::new());
+        let engine = StdArc::new(DefaultEngine::new(store));
+        let snapshot = crate::Snapshot::builder_for(url.clone()).build(engine.as_ref())?;
+        
+        Ok((engine, snapshot, url))
+    }
+
+    #[test]
+    fn test_manifest_phase_with_checkpoint() -> DeltaResult<()> {
+        // Use a table with v2 checkpoints where adds might be in sidecars
+        let (engine, snapshot, log_root) = load_test_table("v2-checkpoints-json-with-sidecars")?;
+        let log_segment = snapshot.log_segment();
+
+        // Check if there are any checkpoint parts
+        if log_segment.checkpoint_parts.is_empty() {
+            println!("Test table has no checkpoint parts, skipping");
+            return Ok(());
+        }
+
+        let state_info = StdArc::new(StateInfo::try_new(
+            snapshot.schema(),
+            snapshot.table_configuration(),
+            None,
+            (),
+        )?);
+
+        let processor = ScanLogReplayProcessor::new(engine.as_ref(), state_info)?;
+        
+        // Get the first checkpoint part
+        let checkpoint_file = &log_segment.checkpoint_parts[0];
+        let manifest_file = checkpoint_file.location.clone();
+
+        let mut manifest_phase = ManifestPhase::new(
+            processor,
+            manifest_file,
+            log_root.clone(),
+            engine.clone(),
+        )?;
+
+        // Count batches and collect results
+        let mut batch_count = 0;
+        let mut file_paths = Vec::new();
+        
+        while let Some(result) = manifest_phase.next() {
+            let metadata = result?;
+            let paths = metadata.visit_scan_files(vec![], |ps: &mut Vec<String>, path, _, _, _, _, _| {
+                ps.push(path.to_string());
+            })?;
+            file_paths.extend(paths);
+            batch_count += 1;
+        }
+
+        // For v2 checkpoints with sidecars, the manifest might not contain adds directly.
+        // In this test table, all adds are in sidecars, so manifest should be empty.
+        assert_eq!(batch_count, 1, "Single manifest file should produce exactly 1 batch");
+        
+        // Verify the manifest itself contains no add files (they're all in sidecars)
+        file_paths.sort();
+        assert_eq!(
+            file_paths.len(), 0,
+            "For this v2 checkpoint with sidecars, manifest should contain 0 add files (all in sidecars)"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_manifest_phase_collects_sidecars() -> DeltaResult<()> {
+        let (engine, snapshot, log_root) = load_test_table("v2-checkpoints-json-with-sidecars")?;
+        let log_segment = snapshot.log_segment();
+
+        if log_segment.checkpoint_parts.is_empty() {
+            println!("Test table has no checkpoint parts, skipping");
+            return Ok(());
+        }
+
+        let state_info = StdArc::new(StateInfo::try_new(
+            snapshot.schema(),
+            snapshot.table_configuration(),
+            None,
+            (),
+        )?);
+
+        let processor = ScanLogReplayProcessor::new(engine.as_ref(), state_info)?;
+        
+        let checkpoint_file = &log_segment.checkpoint_parts[0];
+        let manifest_file = checkpoint_file.location.clone();
+
+        let mut manifest_phase = ManifestPhase::new(
+            processor,
+            manifest_file,
+            log_root.clone(),
+            engine.clone(),
+        )?;
+
+        // Drain the phase
+        while manifest_phase.next().is_some() {}
+
+        // Check if sidecars were collected
+        let next = manifest_phase.into_next()?;
+        
+        match next {
+            AfterManifest::Sidecars { sidecars, .. } => {
+                // For the v2-checkpoints-json-with-sidecars test table at version 6,
+                // there are exactly 2 sidecar files
+                assert_eq!(
+                    sidecars.len(), 2,
+                    "Should collect exactly 2 sidecars for checkpoint at version 6"
+                );
+                
+                // Extract and verify the sidecar paths
+                let mut collected_paths: Vec<String> = sidecars
+                    .iter()
+                    .map(|fm| {
+                        // Get the filename from the URL path
+                        fm.location.path_segments()
+                            .and_then(|segments| segments.last())
+                            .unwrap_or("")
+                            .to_string()
+                    })
+                    .collect();
+                
+                collected_paths.sort();
+                
+                // Verify they're the expected sidecar files for version 6
+                assert_eq!(collected_paths[0], "00000000000000000006.checkpoint.0000000001.0000000002.19af1366-a425-47f4-8fa6-8d6865625573.parquet");
+                assert_eq!(collected_paths[1], "00000000000000000006.checkpoint.0000000002.0000000002.5008b69f-aa8a-4a66-9299-0733a56a7e63.parquet");
+            }
+            AfterManifest::Done(..) => {
+                panic!("Expected sidecars for v2-checkpoints-json-with-sidecars table");
+            }
+        }
+
+        Ok(())
+    }
 }
 

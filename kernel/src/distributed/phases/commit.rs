@@ -137,7 +137,105 @@ impl<P: LogReplayProcessor> Iterator for CommitPhase<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::log_replay::ScanLogReplayProcessor;
+    use crate::scan::state_info::StateInfo;
+    use std::path::PathBuf;
+    use std::sync::Arc as StdArc;
+    use object_store::local::LocalFileSystem;
+    use crate::engine::default::DefaultEngine;
+    use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
 
-    // Tests will be added with test fixtures
+    fn load_test_table(
+        table_name: &str,
+    ) -> DeltaResult<(
+        StdArc<DefaultEngine<TokioBackgroundExecutor>>,
+        StdArc<crate::Snapshot>,
+        url::Url,
+    )> {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("tests/data");
+        path.push(table_name);
+        
+        let path = std::fs::canonicalize(path)
+            .map_err(|e| crate::Error::Generic(format!("Failed to canonicalize path: {}", e)))?;
+        
+        let url = url::Url::from_directory_path(path)
+            .map_err(|_| crate::Error::Generic("Failed to create URL from path".to_string()))?;
+        
+        let store = StdArc::new(LocalFileSystem::new());
+        let engine = StdArc::new(DefaultEngine::new(store));
+        let snapshot = crate::Snapshot::builder_for(url.clone()).build(engine.as_ref())?;
+        
+        Ok((engine, snapshot.into(), url))
+    }
+
+    #[test]
+    fn test_commit_phase_processes_commits() -> DeltaResult<()> {
+        let (engine, snapshot, _url) = load_test_table("table-without-dv-small")?;
+        let log_segment = StdArc::new(snapshot.log_segment().clone());
+
+        let state_info = StdArc::new(StateInfo::try_new(
+            snapshot.schema(),
+            snapshot.table_configuration(),
+            None,
+            (),
+        )?);
+
+        let processor = ScanLogReplayProcessor::new(engine.as_ref(), state_info)?;
+        let mut commit_phase = CommitPhase::new(processor, &log_segment, engine.clone())?;
+
+        let mut batch_count = 0;
+        let mut file_paths = Vec::new();
+        
+        while let Some(result) = commit_phase.next() {
+            let metadata = result?;
+            let paths = metadata.visit_scan_files(vec![], |ps: &mut Vec<String>, path, _, _, _, _, _| {
+                ps.push(path.to_string());
+            })?;
+            file_paths.extend(paths);
+            batch_count += 1;
+        }
+
+        // table-without-dv-small has exactly 1 commit file
+        assert_eq!(batch_count, 1, "table-without-dv-small should have exactly 1 commit batch");
+        
+        // table-without-dv-small has exactly 1 add file
+        file_paths.sort();
+        let expected_files = vec!["part-00000-517f5d32-9c95-48e8-82b4-0229cc194867-c000.snappy.parquet"];
+        assert_eq!(
+            file_paths, expected_files,
+            "CommitPhase should find exactly the expected file"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_commit_phase_transition_with_checkpoint() -> DeltaResult<()> {
+        let (engine, snapshot, _url) = load_test_table("with_checkpoint_no_last_checkpoint")?;
+        let log_segment = StdArc::new(snapshot.log_segment().clone());
+
+        let state_info = StdArc::new(StateInfo::try_new(
+            snapshot.schema(),
+            snapshot.table_configuration(),
+            None,
+            (),
+        )?);
+
+        let processor = ScanLogReplayProcessor::new(engine.as_ref(), state_info)?;
+        let mut commit_phase = CommitPhase::new(processor, &log_segment, engine.clone())?;
+
+        // Drain the phase
+        while commit_phase.next().is_some() {}
+
+        // Transition should indicate checkpoint exists
+        let next = commit_phase.into_next(&log_segment)?;
+        assert!(
+            matches!(next, AfterCommit::Manifest { .. }),
+            "Should transition to Manifest when checkpoint exists"
+        );
+
+        Ok(())
+    }
 }
 

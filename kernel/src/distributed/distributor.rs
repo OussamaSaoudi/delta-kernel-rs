@@ -3,9 +3,9 @@ use std::sync::Arc;
 use itertools::Itertools;
 
 use crate::{
-    actions::{visitors::SidecarVisitor, Sidecar},
+    actions::visitors::SidecarVisitor,
     log_replay::{ActionsBatch, LogReplayProcessor},
-    log_segment::{self, LogSegment},
+    log_segment::LogSegment,
     scan::{CHECKPOINT_READ_SCHEMA, COMMIT_READ_SCHEMA, MANIFEST_READ_SCHEMA},
     utils::require,
     DeltaResult, Engine, Error, FileMeta, RowVisitor, SnapshotRef,
@@ -130,7 +130,7 @@ impl DistributorState {
     }
 }
 
-pub struct Distributor<P: LogReplayProcessor> {
+pub(crate) struct Distributor<P: LogReplayProcessor> {
     pub snapshot: SnapshotRef,
     pub processor: P,
     curr_iter: Box<dyn Iterator<Item = DeltaResult<ActionsBatch>>>,

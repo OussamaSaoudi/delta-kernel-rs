@@ -9,3 +9,6 @@ pub(crate) mod driver_v2;
 pub(crate) mod executor_v2;
 pub(crate) mod incremental_v2;
 pub(crate) mod serialization;
+
+#[cfg(test)]
+mod tests;

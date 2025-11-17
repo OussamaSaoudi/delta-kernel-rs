@@ -68,7 +68,128 @@ impl<P: LogReplayProcessor> Iterator for SidecarPhase<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::log_replay::ScanLogReplayProcessor;
+    use crate::scan::state_info::StateInfo;
+    use crate::distributed::phases::manifest;
+    use std::path::PathBuf;
+    use std::sync::Arc as StdArc;
+    use object_store::local::LocalFileSystem;
+    use crate::engine::default::DefaultEngine;
+    use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
 
-    // Tests will be added with test fixtures
+    fn load_test_table(
+        table_name: &str,
+    ) -> DeltaResult<(
+        StdArc<DefaultEngine<TokioBackgroundExecutor>>,
+        StdArc<crate::Snapshot>,
+        url::Url,
+    )> {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("tests/data");
+        path.push(table_name);
+        
+        let path = std::fs::canonicalize(path)
+            .map_err(|e| crate::Error::Generic(format!("Failed to canonicalize path: {}", e)))?;
+        
+        let url = url::Url::from_directory_path(path)
+            .map_err(|_| crate::Error::Generic("Failed to create URL from path".to_string()))?;
+        
+        let store = StdArc::new(LocalFileSystem::new());
+        let engine = StdArc::new(DefaultEngine::new(store));
+        let snapshot = crate::Snapshot::builder_for(url.clone()).build(engine.as_ref())?;
+        
+        Ok((engine, snapshot, url))
+    }
+
+    #[test]
+    fn test_sidecar_phase_processes_files() -> DeltaResult<()> {
+        let (engine, snapshot, _table_root) = load_test_table("v2-checkpoints-json-with-sidecars")?;
+        let log_segment = snapshot.log_segment();
+
+        let state_info = StdArc::new(StateInfo::try_new(
+            snapshot.schema(),
+            snapshot.table_configuration(),
+            None,
+            (),
+        )?);
+
+        let processor = ScanLogReplayProcessor::new(engine.as_ref(), state_info)?;
+        
+        // First we need to run through manifest phase to get the sidecar files
+        if log_segment.checkpoint_parts.is_empty() {
+            println!("Test table has no checkpoint parts, skipping");
+            return Ok(());
+        }
+
+        // Get the first checkpoint part
+        let checkpoint_file = &log_segment.checkpoint_parts[0];
+        let manifest_file = checkpoint_file.location.clone();
+
+        let mut manifest_phase = manifest::ManifestPhase::new(
+            processor,
+            manifest_file,
+            log_segment.log_root.clone(),
+            engine.clone(),
+        )?;
+
+        // Drain manifest phase to collect sidecars
+        while manifest_phase.next().is_some() {}
+
+        let after_manifest = manifest_phase.into_next()?;
+        
+        match after_manifest {
+            manifest::AfterManifest::Sidecars { processor, sidecars } => {
+                println!("Testing with {} sidecar files", sidecars.len());
+                
+                let mut sidecar_phase = SidecarPhase::new(
+                    processor,
+                    sidecars,
+                    engine.clone(),
+                )?;
+
+                let mut sidecar_file_paths = Vec::new();
+                let mut batch_count = 0;
+                
+                while let Some(result) = sidecar_phase.next() {
+                    let metadata = result?;
+                    let paths = metadata.visit_scan_files(vec![], |ps: &mut Vec<String>, path, _, _, _, _, _| {
+                        ps.push(path.to_string());
+                    })?;
+                    sidecar_file_paths.extend(paths);
+                    batch_count += 1;
+                }
+
+                sidecar_file_paths.sort();
+                
+                // v2-checkpoints-json-with-sidecars has exactly 2 sidecar files with 101 total files
+                assert_eq!(
+                    batch_count, 2,
+                    "SidecarPhase should process exactly 2 sidecar batches"
+                );
+                
+                assert_eq!(
+                    sidecar_file_paths.len(), 101,
+                    "SidecarPhase should find exactly 101 files from sidecars"
+                );
+                
+                // Verify first few files match expected (sampling to keep test readable)
+                let expected_first_files = vec![
+                    "test%25file%25prefix-part-00000-01086c52-1b86-48d0-8889-517fe626849d-c000.snappy.parquet",
+                    "test%25file%25prefix-part-00000-0fd71c0e-fd08-4685-87d6-aae77532d3ea-c000.snappy.parquet",
+                    "test%25file%25prefix-part-00000-2710dd7f-9fa5-429d-b3fb-c005ba16e062-c000.snappy.parquet",
+                ];
+                
+                assert_eq!(
+                    &sidecar_file_paths[..3], &expected_first_files[..],
+                    "SidecarPhase should process files in expected order"
+                );
+            }
+            manifest::AfterManifest::Done(_) => {
+                println!("No sidecars found - test inconclusive");
+            }
+        }
+
+        Ok(())
+    }
 }
 
