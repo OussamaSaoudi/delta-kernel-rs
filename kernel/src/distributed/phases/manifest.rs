@@ -5,44 +5,40 @@ use std::sync::Arc;
 use url::Url;
 
 use crate::actions::visitors::SidecarVisitor;
-use crate::log_replay::{ActionsBatch, LogReplayProcessor};
+use crate::log_replay::ActionsBatch;
 use crate::scan::MANIFEST_READ_SCHEMA;
 use crate::{DeltaResult, Engine, Error, FileMeta, RowVisitor};
 
 /// Phase that processes single-part checkpoint manifest files.
 ///
 /// Extracts sidecar references while processing the manifest.
-pub(crate) struct ManifestPhase<P: LogReplayProcessor> {
-    processor: P,
+pub(crate) struct ManifestPhase {
     actions: Box<dyn Iterator<Item = DeltaResult<ActionsBatch>> + Send>,
     sidecar_visitor: SidecarVisitor,
     log_root: Url,
 }
 
 /// Possible transitions after ManifestPhase completes.
-pub(crate) enum AfterManifest<P: LogReplayProcessor> {
-    /// Has sidecars → return processor + sidecar files
+pub(crate) enum AfterManifest {
+    /// Has sidecars → return sidecar files
     Sidecars {
-        processor: P,
         sidecars: Vec<FileMeta>,
     },
     /// No sidecars
-    Done(P),
+    Done,
 }
 
-impl<P: LogReplayProcessor> ManifestPhase<P> {
+impl ManifestPhase {
     /// Create a new manifest phase for a single-part checkpoint.
     ///
     /// Processes the manifest file using `MANIFEST_READ_SCHEMA` and accumulates
     /// sidecar references via `SidecarVisitor`.
     ///
     /// # Parameters
-    /// - `processor`: The log replay processor
     /// - `manifest_file`: The checkpoint manifest file to process
     /// - `log_root`: Root URL for resolving sidecar paths
     /// - `engine`: Engine for reading files
     pub fn new(
-        processor: P,
         manifest_file: FileMeta,
         log_root: Url,
         engine: Arc<dyn Engine>,
@@ -75,7 +71,6 @@ impl<P: LogReplayProcessor> ManifestPhase<P> {
         let actions = actions.map(|batch| batch.map(|b| ActionsBatch::new(b, false)));
 
         Ok(Self {
-            processor,
             actions: Box::new(actions),
             sidecar_visitor: SidecarVisitor::default(),
             log_root,
@@ -85,9 +80,9 @@ impl<P: LogReplayProcessor> ManifestPhase<P> {
     /// Transition to the next phase.
     ///
     /// Returns an enum indicating what comes next:
-    /// - `Sidecars`: Extracted sidecar files and processor
+    /// - `Sidecars`: Extracted sidecar files
     /// - `Done`: No sidecars found
-    pub fn into_next(self) -> DeltaResult<AfterManifest<P>> {
+    pub fn into_next(self) -> DeltaResult<AfterManifest> {
         let sidecars = self
             .sidecar_visitor
             .sidecars
@@ -96,26 +91,25 @@ impl<P: LogReplayProcessor> ManifestPhase<P> {
             .collect::<Result<Vec<_>, _>>()?;
 
         if sidecars.is_empty() {
-            Ok(AfterManifest::Done(self.processor))
+            Ok(AfterManifest::Done)
         } else {
             Ok(AfterManifest::Sidecars {
-                processor: self.processor,
                 sidecars,
             })
         }
     }
 }
 
-impl<P: LogReplayProcessor> Iterator for ManifestPhase<P> {
-    type Item = DeltaResult<P::Output>;
+impl Iterator for ManifestPhase {
+    type Item = DeltaResult<ActionsBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.actions.next().map(|batch_result| {
             batch_result.and_then(|batch| {
                 // Extract sidecar references from the batch
                 self.sidecar_visitor.visit_rows_of(batch.actions())?;
-                // Process the batch through the processor
-                self.processor.process_actions_batch(batch)
+                // Return the batch
+                Ok(batch)
             })
         })
     }
@@ -124,6 +118,7 @@ impl<P: LogReplayProcessor> Iterator for ManifestPhase<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log_replay::LogReplayProcessor;
     use crate::scan::log_replay::ScanLogReplayProcessor;
     use crate::scan::state_info::StateInfo;
     use std::path::PathBuf;
@@ -175,14 +170,13 @@ mod tests {
             (),
         )?);
 
-        let processor = ScanLogReplayProcessor::new(engine.as_ref(), state_info)?;
+        let mut processor = ScanLogReplayProcessor::new(engine.as_ref(), state_info)?;
         
         // Get the first checkpoint part
         let checkpoint_file = &log_segment.checkpoint_parts[0];
         let manifest_file = checkpoint_file.location.clone();
 
         let mut manifest_phase = ManifestPhase::new(
-            processor,
             manifest_file,
             log_root.clone(),
             engine.clone(),
@@ -193,7 +187,8 @@ mod tests {
         let mut file_paths = Vec::new();
         
         while let Some(result) = manifest_phase.next() {
-            let metadata = result?;
+            let batch = result?;
+            let metadata = processor.process_actions_batch(batch)?;
             let paths = metadata.visit_scan_files(vec![], |ps: &mut Vec<String>, path, _, _, _, _, _| {
                 ps.push(path.to_string());
             })?;
@@ -225,20 +220,10 @@ mod tests {
             return Ok(());
         }
 
-        let state_info = StdArc::new(StateInfo::try_new(
-            snapshot.schema(),
-            snapshot.table_configuration(),
-            None,
-            (),
-        )?);
-
-        let processor = ScanLogReplayProcessor::new(engine.as_ref(), state_info)?;
-        
         let checkpoint_file = &log_segment.checkpoint_parts[0];
         let manifest_file = checkpoint_file.location.clone();
 
         let mut manifest_phase = ManifestPhase::new(
-            processor,
             manifest_file,
             log_root.clone(),
             engine.clone(),
@@ -251,7 +236,7 @@ mod tests {
         let next = manifest_phase.into_next()?;
         
         match next {
-            AfterManifest::Sidecars { sidecars, .. } => {
+            AfterManifest::Sidecars { sidecars } => {
                 // For the v2-checkpoints-json-with-sidecars test table at version 6,
                 // there are exactly 2 sidecar files
                 assert_eq!(
@@ -277,7 +262,7 @@ mod tests {
                 assert_eq!(collected_paths[0], "00000000000000000006.checkpoint.0000000001.0000000002.19af1366-a425-47f4-8fa6-8d6865625573.parquet");
                 assert_eq!(collected_paths[1], "00000000000000000006.checkpoint.0000000002.0000000002.5008b69f-aa8a-4a66-9299-0733a56a7e63.parquet");
             }
-            AfterManifest::Done(..) => {
+            AfterManifest::Done => {
                 panic!("Expected sidecars for v2-checkpoints-json-with-sidecars table");
             }
         }

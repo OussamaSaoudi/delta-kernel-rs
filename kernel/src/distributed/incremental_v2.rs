@@ -41,7 +41,8 @@ use crate::{DeltaResult, Engine, EngineData, FileMeta};
 /// let final_processor = incremental.finish();
 /// ```
 pub(crate) struct IncrementalUpdateV2<P: LogReplayProcessor> {
-    phase: CommitPhase<P>,
+    processor: P,
+    phase: CommitPhase,
 }
 
 impl<P: LogReplayProcessor> IncrementalUpdateV2<P> {
@@ -58,13 +59,13 @@ impl<P: LogReplayProcessor> IncrementalUpdateV2<P> {
         cached_metadata: Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>,
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<Self> {
-        let phase = CommitPhase::with_cached(processor, new_commit_files, cached_metadata, engine)?;
-        Ok(Self { phase })
+        let phase = CommitPhase::with_cached(new_commit_files, cached_metadata, engine)?;
+        Ok(Self { processor, phase })
     }
 
     /// Extract the processor after processing completes.
     pub fn finish(self) -> P {
-        self.phase.into_processor()
+        self.processor
     }
 }
 
@@ -72,7 +73,9 @@ impl<P: LogReplayProcessor> Iterator for IncrementalUpdateV2<P> {
     type Item = DeltaResult<P::Output>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.phase.next()
+        self.phase
+            .next()
+            .map(|batch| batch.and_then(|b| self.processor.process_actions_batch(b)))
     }
 }
 

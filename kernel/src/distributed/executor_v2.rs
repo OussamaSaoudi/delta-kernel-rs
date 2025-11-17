@@ -36,7 +36,8 @@ use crate::{DeltaResult, Engine, FileMeta};
 /// let final_processor = executor.finish();
 /// ```
 pub(crate) struct ExecutorV2<P: LogReplayProcessor> {
-    phase: SidecarPhase<P>,
+    processor: P,
+    phase: SidecarPhase,
 }
 
 impl<P: LogReplayProcessor> ExecutorV2<P> {
@@ -51,15 +52,15 @@ impl<P: LogReplayProcessor> ExecutorV2<P> {
         files: Vec<FileMeta>,
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<Self> {
-        let phase = SidecarPhase::new(processor, files, engine)?;
-        Ok(Self { phase })
+        let phase = SidecarPhase::new(files, engine)?;
+        Ok(Self { processor, phase })
     }
 
     /// Extract the processor after processing completes.
     ///
     /// The processor contains the final state after processing this partition.
     pub fn finish(self) -> P {
-        self.phase.into_processor()
+        self.processor
     }
 }
 
@@ -67,7 +68,9 @@ impl<P: LogReplayProcessor> Iterator for ExecutorV2<P> {
     type Item = DeltaResult<P::Output>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.phase.next()
+        self.phase
+            .next()
+            .map(|batch| batch.and_then(|b| self.processor.process_actions_batch(b)))
     }
 }
 

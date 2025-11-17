@@ -48,18 +48,53 @@ use crate::{DeltaResult, Engine, Error, FileMeta};
 /// }
 /// ```
 pub(crate) struct DriverV2<P: LogReplayProcessor> {
-    state: Option<DriverState<P>>,
+    processor: P,
+    state: Option<DriverState>,
     log_segment: Arc<LogSegment>,
     engine: Arc<dyn Engine>,
+    /// Pre-initialized next phase for concurrent IO (based on phase hint)
+    next_stage_hint: Option<DriverState>,
 }
 
-enum DriverState<P: LogReplayProcessor> {
-    Commit(CommitPhase<P>),
-    Manifest(ManifestPhase<P>),
+enum DriverState {
+    Commit(CommitPhase),
+    Manifest(ManifestPhase),
     /// Executor phase needed - has files to distribute
-    ExecutorPhase { processor: P, files: Vec<FileMeta> },
+    ExecutorPhase { files: Vec<FileMeta> },
     /// Done - no more work needed
     Done,
+}
+
+impl DriverState {
+    /// Convert AfterCommit hint into appropriate DriverState
+    fn from_after_commit(
+        after_commit: AfterCommit,
+        engine: Arc<dyn Engine>,
+    ) -> DeltaResult<Self> {
+        match after_commit {
+            AfterCommit::Manifest { manifest_file, log_root } => {
+                Ok(DriverState::Manifest(ManifestPhase::new(
+                    manifest_file,
+                    log_root,
+                    engine,
+                )?))
+            }
+            AfterCommit::LeafManifest { leaf_files } => {
+                Ok(DriverState::ExecutorPhase { files: leaf_files })
+            }
+            AfterCommit::Done => Ok(DriverState::Done),
+        }
+    }
+
+    /// Convert AfterManifest into appropriate DriverState
+    fn from_after_manifest(after_manifest: AfterManifest) -> Self {
+        match after_manifest {
+            AfterManifest::Sidecars { sidecars } => {
+                DriverState::ExecutorPhase { files: sidecars }
+            }
+            AfterManifest::Done => DriverState::Done,
+        }
+    }
 }
 
 impl<P: LogReplayProcessor> DriverV2<P> {
@@ -74,11 +109,20 @@ impl<P: LogReplayProcessor> DriverV2<P> {
         log_segment: Arc<LogSegment>,
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<Self> {
-        let commit = CommitPhase::new(processor, &log_segment, engine.clone())?;
+        let commit = CommitPhase::new(&log_segment, engine.clone())?;
+        
+        // Use next_phase_hint to enable concurrent IO for all checkpoint types
+        let next_stage_hint = Some(DriverState::from_after_commit(
+            commit.next_phase_hint(&log_segment)?,
+            engine.clone(),
+        )?);
+        
         Ok(Self {
+            processor,
             state: Some(DriverState::Commit(commit)),
             log_segment,
             engine,
+            next_stage_hint,
         })
     }
 
@@ -94,7 +138,7 @@ impl<P: LogReplayProcessor> DriverV2<P> {
     /// Returns an error if called before iterator exhaustion.
     pub fn finish(self) -> DeltaResult<Option<(P, Vec<FileMeta>)>> {
         match self.state {
-            Some(DriverState::ExecutorPhase { processor, files }) => Ok(Some((processor, files))),
+            Some(DriverState::ExecutorPhase { files }) => Ok(Some((self.processor, files))),
             Some(DriverState::Done) => Ok(None),
             _ => Err(Error::generic(
                 "Must exhaust iterator before calling finish()",
@@ -109,80 +153,54 @@ impl<P: LogReplayProcessor> Iterator for DriverV2<P> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             // Try to get item from current phase
-            match self.state.as_mut()? {
-                DriverState::Commit(phase) => {
-                    if let Some(item) = phase.next() {
-                        return Some(item);
-                    }
-                }
-                DriverState::Manifest(phase) => {
-                    if let Some(item) = phase.next() {
-                        return Some(item);
-                    }
-                }
+            let batch_result = match self.state.as_mut()? {
+                DriverState::Commit(phase) => phase.next(),
+                DriverState::Manifest(phase) => phase.next(),
                 DriverState::ExecutorPhase { .. } | DriverState::Done => return None,
-            }
+            };
 
-            // Phase exhausted - transition
-            let old_state = self.state.take()?;
-            match self.transition(old_state) {
-                Ok(new_state) => self.state = Some(new_state),
-                Err(e) => return Some(Err(e)),
+            match batch_result {
+                Some(Ok(batch)) => {
+                    // Process the batch through the processor
+                    return Some(self.processor.process_actions_batch(batch));
+                }
+                Some(Err(e)) => return Some(Err(e)),
+                None => {
+                    // Phase exhausted - transition
+                    let old_state = self.state.take()?;
+                    match self.transition(old_state) {
+                        Ok(new_state) => self.state = Some(new_state),
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
             }
         }
     }
 }
 
 impl<P: LogReplayProcessor> DriverV2<P> {
-    fn transition(&self, state: DriverState<P>) -> DeltaResult<DriverState<P>> {
+    fn transition(&mut self, state: DriverState) -> DeltaResult<DriverState> {
+        // Try using pre-initialized hint first
+        if let Some(hint) = self.next_stage_hint.take() {
+            return Ok(hint);
+        }
+
+        // Otherwise, compute transition from current state
         let result = match state {
-            DriverState::Commit(phase) => match phase.into_next(&self.log_segment)? {
-                AfterCommit::Manifest {
-                    processor,
-                    manifest_file,
-                    log_root,
-                } => DriverState::Manifest(ManifestPhase::new(
-                    processor,
-                    manifest_file,
-                    log_root,
+            DriverState::Commit(phase) => {
+                DriverState::from_after_commit(
+                    phase.into_next(&self.log_segment)?,
                     self.engine.clone(),
-                )?),
-                AfterCommit::LeafManifest {
-                    processor,
-                    leaf_files,
-                } => {
-                    // Multi-part checkpoint - need executor phase
-                    DriverState::ExecutorPhase {
-                        processor,
-                        files: leaf_files,
-                    }
-                }
-                AfterCommit::Done(_) => {
-                    // No checkpoint - done
-                    DriverState::Done
-                }
-            },
+                )?
+            }
 
-            DriverState::Manifest(phase) => match phase.into_next()? {
-                AfterManifest::Sidecars {
-                    processor,
-                    sidecars,
-                } => {
-                    // Has sidecars - need executor phase
-                    DriverState::ExecutorPhase {
-                        processor,
-                        files: sidecars,
-                    }
-                }
-                AfterManifest::Done(_) => {
-                    // No sidecars - done
-                    DriverState::Done
-                }
-            },
+            DriverState::Manifest(phase) => {
+                DriverState::from_after_manifest(phase.into_next()?)
+            }
 
-            DriverState::ExecutorPhase { processor, files } => {
+            DriverState::ExecutorPhase { files } => {
                 // Already in final state
-                DriverState::ExecutorPhase { processor, files }
+                DriverState::ExecutorPhase { files }
             }
             DriverState::Done => DriverState::Done,
         };

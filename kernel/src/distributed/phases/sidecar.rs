@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::log_replay::{ActionsBatch, LogReplayProcessor};
+use crate::log_replay::ActionsBatch;
 use crate::scan::CHECKPOINT_READ_SCHEMA;
 use crate::{DeltaResult, Engine, FileMeta};
 
@@ -10,13 +10,12 @@ use crate::{DeltaResult, Engine, FileMeta};
 ///
 /// This phase is distributable - you can partition `files` and create multiple
 /// instances on different executors.
-pub(crate) struct SidecarPhase<P: LogReplayProcessor> {
-    processor: P,
+pub(crate) struct SidecarPhase {
     actions: Box<dyn Iterator<Item = DeltaResult<ActionsBatch>> + Send>,
 }
 
-impl<P: LogReplayProcessor> SidecarPhase<P> {
-    /// Create a new sidecar phase from processor + file list.
+impl SidecarPhase {
+    /// Create a new sidecar phase from file list.
     ///
     /// Processes parquet files using `CHECKPOINT_READ_SCHEMA`.
     ///
@@ -24,15 +23,12 @@ impl<P: LogReplayProcessor> SidecarPhase<P> {
     ///
     /// This phase is designed to be distributable. To distribute:
     /// 1. Partition `files` across N executors
-    /// 2. Serialize the processor state
-    /// 3. Create N `SidecarPhase` instances, one per executor with its file partition
+    /// 2. Create N `SidecarPhase` instances, one per executor with its file partition
     ///
     /// # Parameters
-    /// - `processor`: The log replay processor
     /// - `files`: Sidecar/leaf files to process
     /// - `engine`: Engine for reading files
     pub fn new(
-        processor: P,
         files: Vec<FileMeta>,
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<Self> {
@@ -46,28 +42,22 @@ impl<P: LogReplayProcessor> SidecarPhase<P> {
             Box::new(actions) as Box<dyn Iterator<Item = _> + Send>
         };
 
-        Ok(Self { processor, actions })
-    }
-
-    /// Extract the processor after processing completes.
-    pub fn into_processor(self) -> P {
-        self.processor
+        Ok(Self { actions })
     }
 }
 
-impl<P: LogReplayProcessor> Iterator for SidecarPhase<P> {
-    type Item = DeltaResult<P::Output>;
+impl Iterator for SidecarPhase {
+    type Item = DeltaResult<ActionsBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.actions
-            .next()
-            .map(|batch| batch.and_then(|b| self.processor.process_actions_batch(b)))
+        self.actions.next()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log_replay::LogReplayProcessor;
     use crate::scan::log_replay::ScanLogReplayProcessor;
     use crate::scan::state_info::StateInfo;
     use crate::distributed::phases::manifest;
@@ -113,7 +103,7 @@ mod tests {
             (),
         )?);
 
-        let processor = ScanLogReplayProcessor::new(engine.as_ref(), state_info)?;
+        let mut processor = ScanLogReplayProcessor::new(engine.as_ref(), state_info)?;
         
         // First we need to run through manifest phase to get the sidecar files
         if log_segment.checkpoint_parts.is_empty() {
@@ -126,23 +116,24 @@ mod tests {
         let manifest_file = checkpoint_file.location.clone();
 
         let mut manifest_phase = manifest::ManifestPhase::new(
-            processor,
             manifest_file,
             log_segment.log_root.clone(),
             engine.clone(),
         )?;
 
-        // Drain manifest phase to collect sidecars
-        while manifest_phase.next().is_some() {}
+        // Drain manifest phase and apply processor
+        while let Some(batch) = manifest_phase.next() {
+            let batch = batch?;
+            processor.process_actions_batch(batch)?;
+        }
 
         let after_manifest = manifest_phase.into_next()?;
         
         match after_manifest {
-            manifest::AfterManifest::Sidecars { processor, sidecars } => {
+            manifest::AfterManifest::Sidecars { sidecars } => {
                 println!("Testing with {} sidecar files", sidecars.len());
                 
                 let mut sidecar_phase = SidecarPhase::new(
-                    processor,
                     sidecars,
                     engine.clone(),
                 )?;
@@ -151,7 +142,8 @@ mod tests {
                 let mut batch_count = 0;
                 
                 while let Some(result) = sidecar_phase.next() {
-                    let metadata = result?;
+                    let batch = result?;
+                    let metadata = processor.process_actions_batch(batch)?;
                     let paths = metadata.visit_scan_files(vec![], |ps: &mut Vec<String>, path, _, _, _, _, _| {
                         ps.push(path.to_string());
                     })?;
@@ -184,7 +176,7 @@ mod tests {
                     "SidecarPhase should process files in expected order"
                 );
             }
-            manifest::AfterManifest::Done(_) => {
+            manifest::AfterManifest::Done => {
                 println!("No sidecars found - test inconclusive");
             }
         }

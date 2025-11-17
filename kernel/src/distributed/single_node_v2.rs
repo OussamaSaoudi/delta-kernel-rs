@@ -28,16 +28,60 @@ use crate::{DeltaResult, Engine};
 /// }
 /// ```
 pub(crate) struct SingleNodeV2<P: LogReplayProcessor> {
-    state: Option<SingleNodeState<P>>,
+    processor: P,
+    state: Option<SingleNodeState>,
     log_segment: Arc<LogSegment>,
     engine: Arc<dyn Engine>,
+    /// Pre-initialized next phase for concurrent IO (based on phase hint)
+    next_stage_hint: Option<SingleNodeState>,
 }
 
-enum SingleNodeState<P: LogReplayProcessor> {
-    Commit(CommitPhase<P>),
-    Manifest(ManifestPhase<P>),
-    Sidecar(SidecarPhase<P>),
+enum SingleNodeState {
+    Commit(CommitPhase),
+    Manifest(ManifestPhase),
+    Sidecar(SidecarPhase),
     Done,
+}
+
+impl SingleNodeState {
+    /// Convert AfterCommit hint into appropriate SingleNodeState
+    fn from_after_commit(
+        after_commit: AfterCommit,
+        engine: Arc<dyn Engine>,
+    ) -> DeltaResult<Self> {
+        match after_commit {
+            AfterCommit::Manifest { manifest_file, log_root } => {
+                Ok(SingleNodeState::Manifest(ManifestPhase::new(
+                    manifest_file,
+                    log_root,
+                    engine,
+                )?))
+            }
+            AfterCommit::LeafManifest { leaf_files } => {
+                Ok(SingleNodeState::Sidecar(SidecarPhase::new(
+                    leaf_files,
+                    engine,
+                )?))
+            }
+            AfterCommit::Done => Ok(SingleNodeState::Done),
+        }
+    }
+
+    /// Convert AfterManifest into appropriate SingleNodeState
+    fn from_after_manifest(
+        after_manifest: AfterManifest,
+        engine: Arc<dyn Engine>,
+    ) -> DeltaResult<Self> {
+        match after_manifest {
+            AfterManifest::Sidecars { sidecars } => {
+                Ok(SingleNodeState::Sidecar(SidecarPhase::new(
+                    sidecars,
+                    engine,
+                )?))
+            }
+            AfterManifest::Done => Ok(SingleNodeState::Done),
+        }
+    }
 }
 
 impl<P: LogReplayProcessor> SingleNodeV2<P> {
@@ -52,11 +96,20 @@ impl<P: LogReplayProcessor> SingleNodeV2<P> {
         log_segment: Arc<LogSegment>,
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<Self> {
-        let commit = CommitPhase::new(processor, &log_segment, engine.clone())?;
+        let commit = CommitPhase::new(&log_segment, engine.clone())?;
+        
+        // Use next_phase_hint to enable concurrent IO for all checkpoint types
+        let next_stage_hint = Some(SingleNodeState::from_after_commit(
+            commit.next_phase_hint(&log_segment)?,
+            engine.clone(),
+        )?);
+        
         Ok(Self {
+            processor,
             state: Some(SingleNodeState::Commit(commit)),
             log_segment,
             engine,
+            next_stage_hint,
         })
     }
 }
@@ -67,69 +120,51 @@ impl<P: LogReplayProcessor> Iterator for SingleNodeV2<P> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             // Try to get item from current phase
-            match self.state.as_mut()? {
-                SingleNodeState::Commit(phase) => {
-                    if let Some(item) = phase.next() {
-                        return Some(item);
-                    }
-                }
-                SingleNodeState::Manifest(phase) => {
-                    if let Some(item) = phase.next() {
-                        return Some(item);
-                    }
-                }
-                SingleNodeState::Sidecar(phase) => return phase.next(),
+            let batch_result = match self.state.as_mut()? {
+                SingleNodeState::Commit(phase) => phase.next(),
+                SingleNodeState::Manifest(phase) => phase.next(),
+                SingleNodeState::Sidecar(phase) => phase.next(),
                 SingleNodeState::Done => return None,
-            }
+            };
 
-            // Phase exhausted - transition
-            let old_state = self.state.take()?;
-            match self.transition(old_state) {
-                Ok(new_state) => self.state = Some(new_state),
-                Err(e) => return Some(Err(e)),
+            match batch_result {
+                Some(Ok(batch)) => {
+                    // Process the batch through the processor
+                    return Some(self.processor.process_actions_batch(batch));
+                }
+                Some(Err(e)) => return Some(Err(e)),
+                None => {
+                    // Phase exhausted - transition
+                    let old_state = self.state.take()?;
+                    match self.transition(old_state) {
+                        Ok(new_state) => self.state = Some(new_state),
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
             }
         }
     }
 }
 
 impl<P: LogReplayProcessor> SingleNodeV2<P> {
-    fn transition(&self, state: SingleNodeState<P>) -> DeltaResult<SingleNodeState<P>> {
+    fn transition(&mut self, state: SingleNodeState) -> DeltaResult<SingleNodeState> {
+        // Try using pre-initialized hint first
+        if let Some(hint) = self.next_stage_hint.take() {
+            return Ok(hint);
+        }
+
+        // Otherwise, compute transition from current state
         let result = match state {
             SingleNodeState::Commit(phase) => {
-                match phase.into_next(&self.log_segment)? {
-                    AfterCommit::Manifest {
-                        processor,
-                        manifest_file,
-                        log_root,
-                    } => SingleNodeState::Manifest(ManifestPhase::new(
-                        processor,
-                        manifest_file,
-                        log_root,
-                        self.engine.clone(),
-                    )?),
-                    AfterCommit::LeafManifest {
-                        processor,
-                        leaf_files,
-                    } => SingleNodeState::Sidecar(SidecarPhase::new(
-                        processor,
-                        leaf_files,
-                        self.engine.clone(),
-                    )?),
-                    AfterCommit::Done(_) => SingleNodeState::Done,
-                }
+                SingleNodeState::from_after_commit(
+                    phase.into_next(&self.log_segment)?,
+                    self.engine.clone(),
+                )?
             }
 
-            SingleNodeState::Manifest(phase) => match phase.into_next()? {
-                AfterManifest::Sidecars {
-                    processor,
-                    sidecars,
-                } => SingleNodeState::Sidecar(SidecarPhase::new(
-                    processor,
-                    sidecars,
-                    self.engine.clone(),
-                )?),
-                AfterManifest::Done(_) => SingleNodeState::Done,
-            },
+            SingleNodeState::Manifest(phase) => {
+                SingleNodeState::from_after_manifest(phase.into_next()?, self.engine.clone())?
+            }
 
             SingleNodeState::Sidecar(_) | SingleNodeState::Done => SingleNodeState::Done,
         };
