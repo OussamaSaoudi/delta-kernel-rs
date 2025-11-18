@@ -6,8 +6,12 @@
 use std::sync::Arc;
 
 use crate::actions::get_commit_schema;
-use crate::distributed::phases::{AfterCommit, AfterManifest, CommitPhase, ManifestPhase, NextPhase, SidecarPhase};
-use crate::log_replay::{ActionsBatch, LogReplayProcessor, LogReplayReducer, LogReplaySchemaProvider};
+use crate::distributed::phases::{
+    AfterCommit, AfterManifest, CommitPhase, ManifestPhase, NextPhase, SidecarPhase,
+};
+use crate::log_replay::{
+    ActionsBatch, LogReplayProcessor, LogReplayReducer, LogReplaySchemaProvider,
+};
 use crate::log_segment::LogSegment;
 use crate::schema::SchemaRef;
 use crate::{DeltaResult, Engine};
@@ -67,21 +71,18 @@ impl SingleNodeState {
         schema: SchemaRef,
     ) -> DeltaResult<Self> {
         match after_commit {
-            AfterCommit::Manifest { manifest_file, log_root } => {
-                Ok(SingleNodeState::Manifest(ManifestPhase::new(
-                    manifest_file,
-                    log_root,
-                    engine,
-                    schema,
-                )?))
-            }
-            AfterCommit::LeafManifest { leaf_files } => {
-                Ok(SingleNodeState::Sidecar(SidecarPhase::new(
-                    leaf_files,
-                    engine,
-                    schema,
-                )?))
-            }
+            AfterCommit::Manifest {
+                manifest_file,
+                log_root,
+            } => Ok(SingleNodeState::Manifest(ManifestPhase::new(
+                manifest_file,
+                log_root,
+                engine,
+                schema,
+            )?)),
+            AfterCommit::LeafManifest { leaf_files } => Ok(SingleNodeState::Sidecar(
+                SidecarPhase::new(leaf_files, engine, schema)?,
+            )),
             AfterCommit::Done => Ok(SingleNodeState::Done),
         }
     }
@@ -93,13 +94,9 @@ impl SingleNodeState {
         schema: SchemaRef,
     ) -> DeltaResult<Self> {
         match after_manifest {
-            AfterManifest::Sidecars { sidecars } => {
-                Ok(SingleNodeState::Sidecar(SidecarPhase::new(
-                    sidecars,
-                    engine,
-                    schema,
-                )?))
-            }
+            AfterManifest::Sidecars { sidecars } => Ok(SingleNodeState::Sidecar(
+                SidecarPhase::new(sidecars, engine, schema)?,
+            )),
             AfterManifest::Done => Ok(SingleNodeState::Done),
         }
     }
@@ -122,17 +119,18 @@ impl<P: LogReplaySchemaProvider> SingleNodeV2<P> {
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<Self> {
         let commit_schema = get_commit_schema().project(processor.required_commit_columns())?;
-        let checkpoint_schema = get_commit_schema().project(processor.required_checkpoint_columns())?;
-        
+        let checkpoint_schema =
+            get_commit_schema().project(processor.required_checkpoint_columns())?;
+
         let mut commit = CommitPhase::new(&log_segment, engine.clone(), commit_schema)?;
-        
+
         // Use next_phase_hint to enable concurrent IO for all checkpoint types
         let next_stage_hint = Some(SingleNodeState::from_after_commit(
             commit.next_phase_hint(&log_segment)?,
             engine.clone(),
             checkpoint_schema.clone(),
         )?);
-        
+
         Ok(Self {
             processor,
             state: Some(SingleNodeState::Commit(commit)),
@@ -146,7 +144,6 @@ impl<P: LogReplaySchemaProvider> SingleNodeV2<P> {
 
 // Core shared implementation (no trait bounds)
 impl<P> SingleNodeV2<P> {
-
     /// Get next batch from current phase, handling phase transitions.
     /// Returns None when all phases are complete.
     fn next_batch(&mut self) -> Option<DeltaResult<ActionsBatch>> {
@@ -158,24 +155,19 @@ impl<P> SingleNodeV2<P> {
                 SingleNodeState::Sidecar(phase) => phase.next(),
                 SingleNodeState::Done => return None,
             };
-            
-            match batch_result {
-                Some(result) => return Some(result),  // Got a batch (Ok or Err)
-                None => {
-                    // Current phase exhausted, transition to next
-                    let old_state = match self.state.take() {
-                        Some(state) => state,
-                        None => return None,
-                    };
-                    
-                    match self.transition(old_state) {
-                        Ok(new_state) => {
-                            self.state = Some(new_state);
-                            continue;  // Try next phase
-                        }
-                        Err(e) => return Some(Err(e)),
-                    }
+
+            if let Some(result) = batch_result {
+                return Some(result);
+            }
+
+            // Current phase exhausted, transition to next
+            let old_state = self.state.take()?;
+            match self.transition(old_state) {
+                Ok(new_state) => {
+                    self.state = Some(new_state);
+                    continue; // Try next phase
                 }
+                Err(e) => return Some(Err(e)),
             }
         }
     }
@@ -186,19 +178,26 @@ impl<P> SingleNodeV2<P> {
                 match phase.into_next(&self.log_segment)? {
                     NextPhase::UsePreinitialized => {
                         // Take the pre-initialized hint
-                        self.next_stage_hint.take()
-                            .ok_or_else(|| crate::Error::generic("UsePreinitialized but no hint available"))?
+                        self.next_stage_hint.take().ok_or_else(|| {
+                            crate::Error::generic("UsePreinitialized but no hint available")
+                        })?
                     }
                     NextPhase::Computed(after_commit) => {
                         // Convert the computed AfterCommit
-                        SingleNodeState::from_after_commit(after_commit, self.engine.clone(), self.schema.clone())?
+                        SingleNodeState::from_after_commit(
+                            after_commit,
+                            self.engine.clone(),
+                            self.schema.clone(),
+                        )?
                     }
                 }
             }
 
-            SingleNodeState::Manifest(phase) => {
-                SingleNodeState::from_after_manifest(phase.into_next()?, self.engine.clone(), self.schema.clone())?
-            }
+            SingleNodeState::Manifest(phase) => SingleNodeState::from_after_manifest(
+                phase.into_next()?,
+                self.engine.clone(),
+                self.schema.clone(),
+            )?,
 
             SingleNodeState::Sidecar(_) | SingleNodeState::Done => SingleNodeState::Done,
         };
@@ -216,7 +215,7 @@ impl<P: LogReplayProcessor> Iterator for SingleNodeV2<P> {
     fn next(&mut self) -> Option<Self::Item> {
         // Shared: get next batch from phases
         let batch_result = self.next_batch()?;
-        
+
         // Streaming-specific: process batch (pure map - always produces output)
         Some(batch_result.and_then(|batch| self.processor.process_actions_batch(batch)))
     }
@@ -241,7 +240,7 @@ impl<P: LogReplayReducer> SingleNodeV2<P> {
             if self.processor.is_complete() {
                 break;
             }
-            
+
             // Shared: get next batch from phases
             match self.next_batch() {
                 Some(Ok(batch)) => {
@@ -249,10 +248,10 @@ impl<P: LogReplayReducer> SingleNodeV2<P> {
                     self.processor.process_batch_for_reduce(batch)?;
                 }
                 Some(Err(e)) => return Err(e),
-                None => break,  // All phases exhausted
+                None => break, // All phases exhausted
             }
         }
-        
+
         Ok(())
     }
 
@@ -274,13 +273,13 @@ impl<P: LogReplayReducer> SingleNodeV2<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
+    use crate::engine::default::DefaultEngine;
     use crate::scan::log_replay::ScanLogReplayProcessor;
     use crate::scan::state_info::StateInfo;
+    use object_store::local::LocalFileSystem;
     use std::path::PathBuf;
     use std::sync::Arc as StdArc;
-    use object_store::local::LocalFileSystem;
-    use crate::engine::default::DefaultEngine;
-    use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
 
     fn load_test_table(
         table_name: &str,
@@ -292,17 +291,17 @@ mod tests {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.push("tests/data");
         path.push(table_name);
-        
+
         let path = std::fs::canonicalize(path)
             .map_err(|e| crate::Error::Generic(format!("Failed to canonicalize path: {}", e)))?;
-        
+
         let url = url::Url::from_directory_path(path)
             .map_err(|_| crate::Error::Generic("Failed to create URL from path".to_string()))?;
-        
+
         let store = StdArc::new(LocalFileSystem::new());
         let engine = StdArc::new(DefaultEngine::new(store));
         let snapshot = crate::Snapshot::builder_for(url.clone()).build(engine.as_ref())?;
-        
+
         Ok((engine, snapshot, url))
     }
 
@@ -323,21 +322,28 @@ mod tests {
 
         let mut batch_count = 0;
         let mut file_paths = Vec::new();
-        
+
         for result in single_node {
             let metadata = result?;
-            let paths = metadata.visit_scan_files(vec![], |ps: &mut Vec<String>, path, _, _, _, _, _| {
-                ps.push(path.to_string());
-            })?;
+            let paths = metadata.visit_scan_files(
+                vec![],
+                |ps: &mut Vec<String>, path, _, _, _, _, _| {
+                    ps.push(path.to_string());
+                },
+            )?;
             file_paths.extend(paths);
             batch_count += 1;
         }
 
         // table-without-dv-small has exactly 1 commit
-        assert_eq!(batch_count, 1, "SingleNodeV2 should process exactly 1 batch for table-without-dv-small");
-        
+        assert_eq!(
+            batch_count, 1,
+            "SingleNodeV2 should process exactly 1 batch for table-without-dv-small"
+        );
+
         file_paths.sort();
-        let expected_files = vec!["part-00000-517f5d32-9c95-48e8-82b4-0229cc194867-c000.snappy.parquet"];
+        let expected_files =
+            vec!["part-00000-517f5d32-9c95-48e8-82b4-0229cc194867-c000.snappy.parquet"];
         assert_eq!(
             file_paths, expected_files,
             "SingleNodeV2 should find exactly the expected file"
@@ -362,36 +368,40 @@ mod tests {
         let single_node = SingleNodeV2::new(processor, log_segment, engine.clone())?;
 
         let mut file_paths = Vec::new();
-        
+
         for result in single_node {
             let metadata = result?;
-            let paths = metadata.visit_scan_files(vec![], |ps: &mut Vec<String>, path, _, _, _, _, _| {
-                ps.push(path.to_string());
-            })?;
+            let paths = metadata.visit_scan_files(
+                vec![],
+                |ps: &mut Vec<String>, path, _, _, _, _, _| {
+                    ps.push(path.to_string());
+                },
+            )?;
             file_paths.extend(paths);
         }
 
         file_paths.sort();
-        
+
         // v2-checkpoints-json-with-sidecars has exactly 101 files total
         assert_eq!(
-            file_paths.len(), 101,
+            file_paths.len(),
+            101,
             "SingleNodeV2 should process exactly 101 files for v2-checkpoints-json-with-sidecars"
         );
-        
+
         // Verify first few files match expected
         let expected_first_files = vec![
             "test%25file%25prefix-part-00000-01086c52-1b86-48d0-8889-517fe626849d-c000.snappy.parquet",
             "test%25file%25prefix-part-00000-0fd71c0e-fd08-4685-87d6-aae77532d3ea-c000.snappy.parquet",
             "test%25file%25prefix-part-00000-2710dd7f-9fa5-429d-b3fb-c005ba16e062-c000.snappy.parquet",
         ];
-        
+
         assert_eq!(
-            &file_paths[..3], &expected_first_files[..],
+            &file_paths[..3],
+            &expected_first_files[..],
             "SingleNodeV2 should process files in expected order"
         );
 
         Ok(())
     }
 }
-
