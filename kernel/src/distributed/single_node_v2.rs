@@ -5,33 +5,49 @@
 
 use std::sync::Arc;
 
-use crate::distributed::phases::{AfterCommit, AfterManifest, CommitPhase, ManifestPhase, SidecarPhase};
-use crate::log_replay::LogReplayProcessor;
+use crate::actions::get_commit_schema;
+use crate::distributed::phases::{AfterCommit, AfterManifest, CommitPhase, ManifestPhase, NextPhase, SidecarPhase};
+use crate::log_replay::{ActionsBatch, LogReplayProcessor, LogReplayReducer, LogReplaySchemaProvider};
 use crate::log_segment::LogSegment;
+use crate::schema::SchemaRef;
 use crate::{DeltaResult, Engine};
 
 /// Single-node log replay that processes all phases locally.
 ///
-/// This iterator chains:
+/// This supports both streaming (via `Iterator`) and folding (via `into_accumulated()`)
+/// operations depending on which traits the processor implements:
+///
+/// - **Streaming**: When `P: LogReplayProcessor`, use as an `Iterator`
+/// - **Folding**: When `P: LogReplayReducer`, call `into_accumulated()`
+/// - **Hybrid**: When `P` implements both, use both APIs
+///
+/// Chains these phases:
 /// 1. CommitPhase - processes JSON commit files
 /// 2. ManifestPhase - processes single-part checkpoint manifest (if any)
 /// 3. SidecarPhase - processes sidecar files or multi-part checkpoint parts
 ///
-/// # Example
+/// # Examples
 ///
+/// **Streaming (Scan):**
 /// ```ignore
-/// let single_node = SingleNodeV2::new(processor, log_segment, engine)?;
-/// 
-/// for batch in single_node {
-///     let metadata = batch?;
-///     // Process batch
+/// let single_node = SingleNodeV2::new(scan_processor, log_segment, engine)?;
+/// for metadata in single_node {
+///     process(metadata?);
 /// }
 /// ```
-pub(crate) struct SingleNodeV2<P: LogReplayProcessor> {
+///
+/// **Folding (P&M):**
+/// ```ignore
+/// let single_node = SingleNodeV2::new(pm_processor, log_segment, engine)?;
+/// let (protocol, metadata) = single_node.into_accumulated()?;
+/// ```
+pub(crate) struct SingleNodeV2<P> {
     processor: P,
     state: Option<SingleNodeState>,
     log_segment: Arc<LogSegment>,
     engine: Arc<dyn Engine>,
+    /// Schema for reading checkpoint/sidecar files
+    schema: SchemaRef,
     /// Pre-initialized next phase for concurrent IO (based on phase hint)
     next_stage_hint: Option<SingleNodeState>,
 }
@@ -48,6 +64,7 @@ impl SingleNodeState {
     fn from_after_commit(
         after_commit: AfterCommit,
         engine: Arc<dyn Engine>,
+        schema: SchemaRef,
     ) -> DeltaResult<Self> {
         match after_commit {
             AfterCommit::Manifest { manifest_file, log_root } => {
@@ -55,12 +72,14 @@ impl SingleNodeState {
                     manifest_file,
                     log_root,
                     engine,
+                    schema,
                 )?))
             }
             AfterCommit::LeafManifest { leaf_files } => {
                 Ok(SingleNodeState::Sidecar(SidecarPhase::new(
                     leaf_files,
                     engine,
+                    schema,
                 )?))
             }
             AfterCommit::Done => Ok(SingleNodeState::Done),
@@ -71,12 +90,14 @@ impl SingleNodeState {
     fn from_after_manifest(
         after_manifest: AfterManifest,
         engine: Arc<dyn Engine>,
+        schema: SchemaRef,
     ) -> DeltaResult<Self> {
         match after_manifest {
             AfterManifest::Sidecars { sidecars } => {
                 Ok(SingleNodeState::Sidecar(SidecarPhase::new(
                     sidecars,
                     engine,
+                    schema,
                 )?))
             }
             AfterManifest::Done => Ok(SingleNodeState::Done),
@@ -84,11 +105,15 @@ impl SingleNodeState {
     }
 }
 
-impl<P: LogReplayProcessor> SingleNodeV2<P> {
-    /// Create a new single-node log replay iterator.
+// Unified constructor for both streaming and folding
+impl<P: LogReplaySchemaProvider> SingleNodeV2<P> {
+    /// Create a new single-node log replay.
+    ///
+    /// Works for both streaming (`LogReplayProcessor`) and folding (`LogReplayReducer`) operations.
+    /// Extracts schema requirements from the processor/reducer and passes them to phases.
     ///
     /// # Parameters
-    /// - `processor`: The log replay processor
+    /// - `processor`: The log replay processor or reducer
     /// - `log_segment`: The log segment to process
     /// - `engine`: Engine for reading files
     pub fn new(
@@ -96,12 +121,16 @@ impl<P: LogReplayProcessor> SingleNodeV2<P> {
         log_segment: Arc<LogSegment>,
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<Self> {
-        let commit = CommitPhase::new(&log_segment, engine.clone())?;
+        let commit_schema = get_commit_schema().project(processor.required_commit_columns())?;
+        let checkpoint_schema = get_commit_schema().project(processor.required_checkpoint_columns())?;
+        
+        let mut commit = CommitPhase::new(&log_segment, engine.clone(), commit_schema)?;
         
         // Use next_phase_hint to enable concurrent IO for all checkpoint types
         let next_stage_hint = Some(SingleNodeState::from_after_commit(
             commit.next_phase_hint(&log_segment)?,
             engine.clone(),
+            checkpoint_schema.clone(),
         )?);
         
         Ok(Self {
@@ -109,67 +138,136 @@ impl<P: LogReplayProcessor> SingleNodeV2<P> {
             state: Some(SingleNodeState::Commit(commit)),
             log_segment,
             engine,
+            schema: checkpoint_schema,
             next_stage_hint,
         })
     }
 }
 
-impl<P: LogReplayProcessor> Iterator for SingleNodeV2<P> {
-    type Item = DeltaResult<P::Output>;
+// Core shared implementation (no trait bounds)
+impl<P> SingleNodeV2<P> {
 
-    fn next(&mut self) -> Option<Self::Item> {
+    /// Get next batch from current phase, handling phase transitions.
+    /// Returns None when all phases are complete.
+    fn next_batch(&mut self) -> Option<DeltaResult<ActionsBatch>> {
         loop {
-            // Try to get item from current phase
+            // Try to get batch from current phase
             let batch_result = match self.state.as_mut()? {
                 SingleNodeState::Commit(phase) => phase.next(),
                 SingleNodeState::Manifest(phase) => phase.next(),
                 SingleNodeState::Sidecar(phase) => phase.next(),
                 SingleNodeState::Done => return None,
             };
-
+            
             match batch_result {
-                Some(Ok(batch)) => {
-                    // Process the batch through the processor
-                    return Some(self.processor.process_actions_batch(batch));
-                }
-                Some(Err(e)) => return Some(Err(e)),
+                Some(result) => return Some(result),  // Got a batch (Ok or Err)
                 None => {
-                    // Phase exhausted - transition
-                    let old_state = self.state.take()?;
+                    // Current phase exhausted, transition to next
+                    let old_state = match self.state.take() {
+                        Some(state) => state,
+                        None => return None,
+                    };
+                    
                     match self.transition(old_state) {
-                        Ok(new_state) => self.state = Some(new_state),
+                        Ok(new_state) => {
+                            self.state = Some(new_state);
+                            continue;  // Try next phase
+                        }
                         Err(e) => return Some(Err(e)),
                     }
                 }
             }
         }
     }
-}
 
-impl<P: LogReplayProcessor> SingleNodeV2<P> {
     fn transition(&mut self, state: SingleNodeState) -> DeltaResult<SingleNodeState> {
-        // Try using pre-initialized hint first
-        if let Some(hint) = self.next_stage_hint.take() {
-            return Ok(hint);
-        }
-
-        // Otherwise, compute transition from current state
         let result = match state {
             SingleNodeState::Commit(phase) => {
-                SingleNodeState::from_after_commit(
-                    phase.into_next(&self.log_segment)?,
-                    self.engine.clone(),
-                )?
+                match phase.into_next(&self.log_segment)? {
+                    NextPhase::UsePreinitialized => {
+                        // Take the pre-initialized hint
+                        self.next_stage_hint.take()
+                            .ok_or_else(|| crate::Error::generic("UsePreinitialized but no hint available"))?
+                    }
+                    NextPhase::Computed(after_commit) => {
+                        // Convert the computed AfterCommit
+                        SingleNodeState::from_after_commit(after_commit, self.engine.clone(), self.schema.clone())?
+                    }
+                }
             }
 
             SingleNodeState::Manifest(phase) => {
-                SingleNodeState::from_after_manifest(phase.into_next()?, self.engine.clone())?
+                SingleNodeState::from_after_manifest(phase.into_next()?, self.engine.clone(), self.schema.clone())?
             }
 
             SingleNodeState::Sidecar(_) | SingleNodeState::Done => SingleNodeState::Done,
         };
 
         Ok(result)
+    }
+}
+
+// ============================================================================
+// Streaming API: available when P implements LogReplayProcessor
+// ============================================================================
+impl<P: LogReplayProcessor> Iterator for SingleNodeV2<P> {
+    type Item = DeltaResult<P::Output>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Shared: get next batch from phases
+        let batch_result = self.next_batch()?;
+        
+        // Streaming-specific: process batch (pure map - always produces output)
+        Some(batch_result.and_then(|batch| self.processor.process_actions_batch(batch)))
+    }
+}
+
+// ============================================================================
+// Fold/Reduce API: available when P implements LogReplayReducer
+// ============================================================================
+
+impl<P: LogReplayReducer> SingleNodeV2<P> {
+    /// Process all batches through the reducer.
+    ///
+    /// This method processes batches from all phases (Commit → Manifest → Sidecar)
+    /// until either:
+    /// - All phases are exhausted, OR
+    /// - [`LogReplayReducer::is_complete`] returns true (early termination)
+    ///
+    /// After calling this, use [`into_accumulated`](Self::into_accumulated) to extract the result.
+    pub fn run_to_completion(&mut self) -> DeltaResult<()> {
+        loop {
+            // Check for early termination
+            if self.processor.is_complete() {
+                break;
+            }
+            
+            // Shared: get next batch from phases
+            match self.next_batch() {
+                Some(Ok(batch)) => {
+                    // Fold-specific: accumulate in reducer (may trigger early completion)
+                    self.processor.process_batch_for_reduce(batch)?;
+                }
+                Some(Err(e)) => return Err(e),
+                None => break,  // All phases exhausted
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Extract the accumulated result after processing completes.
+    ///
+    /// Must be called after [`run_to_completion`](Self::run_to_completion).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut pm = SingleNodeV2::new(pm_processor, log_segment, engine)?;
+    /// pm.run_to_completion()?;
+    /// let (protocol, metadata) = pm.into_accumulated()?;
+    /// ```
+    pub fn into_accumulated(self) -> DeltaResult<P::Accumulated> {
+        self.processor.into_accumulated()
     }
 }
 

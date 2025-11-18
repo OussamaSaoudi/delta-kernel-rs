@@ -10,5 +10,8 @@ pub(crate) mod executor_v2;
 pub(crate) mod incremental_v2;
 pub(crate) mod serialization;
 
+// Protocol & Metadata processor
+pub(crate) mod pm_processor;
+
 #[cfg(test)]
 mod tests;

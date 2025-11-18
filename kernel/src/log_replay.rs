@@ -279,8 +279,31 @@ impl ActionsBatch {
 ///   necessary to write to the checkpoint file (`Add`, `Remove`, `Metadata`, `Protocol` actions),
 ///   filtered by the **selection vector** to determine which rows are included in the final checkpoint.
 ///
+/// Base trait for schema requirements in log replay operations.
+///
+/// All log replay processors/reducers must specify which columns they need from the log.
+/// This enables projection pushdown for efficient reading.
+pub(crate) trait LogReplaySchemaProvider {
+    /// Schema columns needed when reading commit JSON files (driver phase).
+    ///
+    /// Returns a slice of column names to project from the commit schema.
+    fn required_commit_columns(&self) -> &[&'static str];
+
+    /// Schema columns needed when reading checkpoint/sidecar parquet files (executor phase).
+    ///
+    /// Returns a slice of column names to project from the checkpoint schema.
+    fn required_checkpoint_columns(&self) -> &[&'static str];
+}
+
+/// Streaming processor for log replay operations that emit transformed results.
+///
+/// This trait is used for operations like table scanning, checkpoint writing, or CDF processing
+/// that transform action batches into output batches (e.g., scan metadata, filtered actions).
+///
+/// Extends [`LogReplaySchemaProvider`] to specify schema requirements for projection pushdown.
+///
 /// TODO: Refactor the Change Data Feed (CDF) processor to use this trait.
-pub(crate) trait LogReplayProcessor: Sized {
+pub(crate) trait LogReplayProcessor: LogReplaySchemaProvider + Sized {
     /// The type of results produced by this processor must implement the
     /// [`HasSelectionVector`] trait to allow filtering out batches with no selected rows.
     type Output: HasSelectionVector;
@@ -291,7 +314,7 @@ pub(crate) trait LogReplayProcessor: Sized {
     ///   representing a batch of actions and a boolean flag indicating whether the batch originates
     ///   from a commit log, `false` if from a checkpoint.
     ///
-    /// Returns a [`DeltaResult`] containing the processor’s output, which includes only selected actions.
+    /// Returns a [`DeltaResult`] containing the processor's output, which includes only selected actions.
     ///
     /// Note: Since log replay is stateful, processing may update internal processor state (e.g., deduplication sets).
     fn process_actions_batch(&mut self, actions_batch: ActionsBatch) -> DeltaResult<Self::Output>;
@@ -349,6 +372,80 @@ pub(crate) trait LogReplayProcessor: Sized {
     /// when building the initial selection vector in `build_selection_vector`.
     /// If `None` is returned, no filter is applied, and all rows are selected.
     fn data_skipping_filter(&self) -> Option<&DataSkippingFilter>;
+}
+
+/// Folding/accumulation processor for log replay operations that reduce to a single result.
+///
+/// This trait is used for operations like Protocol & Metadata extraction, SetTransaction search,
+/// or DomainMetadata extraction that need to accumulate state and terminate early once complete.
+///
+/// Unlike [`LogReplayProcessor`] which streams transformed results, reducers process batches
+/// to build up internal state and return a final accumulated result.
+///
+/// # Examples
+///
+/// - **Protocol & Metadata extraction**: Accumulate the latest Protocol and Metadata actions,
+///   terminate early once both are found.
+/// - **SetTransaction search**: Search for a specific transaction by app ID, terminate when found.
+/// - **DomainMetadata extraction**: Accumulate domain metadata, filtering by domain name.
+///
+/// # Early Termination
+///
+/// Reducers can implement [`is_complete`](LogReplayReducer::is_complete) to signal when
+/// accumulation is done, allowing choreographers to stop processing batches early without
+/// reading the entire log.
+pub(crate) trait LogReplayReducer: LogReplaySchemaProvider + Sized {
+    /// The type of the accumulated result.
+    type Accumulated;
+
+    /// Schema columns needed for reduction (same across all phases).
+    ///
+    /// Returns a slice of column names to project from the log schema.
+    /// Unlike streaming processors, reducers typically need the same columns
+    /// across both commit and checkpoint phases.
+    ///
+    /// Default implementations delegate to this method for both commit and checkpoint.
+    fn required_columns(&self) -> &[&'static str];
+    
+    /// Default: Use same schema for commits.
+    fn required_commit_columns(&self) -> &[&'static str] {
+        self.required_columns()
+    }
+    
+    /// Default: Use same schema for checkpoints.
+    fn required_checkpoint_columns(&self) -> &[&'static str] {
+        self.required_columns()
+    }
+
+    /// Process a batch of actions and update internal accumulation state.
+    ///
+    /// # Parameters
+    /// - `actions_batch`: The batch of actions to process
+    ///
+    /// # Returns
+    /// `Ok(())` if the batch was processed successfully.
+    ///
+    /// Note: Since log replay is stateful, processing may update internal state.
+    fn process_batch_for_reduce(&mut self, actions_batch: ActionsBatch) -> DeltaResult<()>;
+
+    /// Check if accumulation is complete (for early termination).
+    ///
+    /// When this returns `true`, choreographers can stop processing batches and call
+    /// [`into_accumulated`](LogReplayReducer::into_accumulated) to get the final result.
+    ///
+    /// Default implementation returns `false` (never terminates early).
+    fn is_complete(&self) -> bool {
+        false
+    }
+
+    /// Extract the accumulated result, consuming the reducer.
+    ///
+    /// This should be called after all relevant batches have been processed
+    /// (or early if [`is_complete`](LogReplayReducer::is_complete) returns `true`).
+    ///
+    /// # Returns
+    /// The final accumulated result.
+    fn into_accumulated(self) -> DeltaResult<Self::Accumulated>;
 }
 
 /// This trait is used to determine if a processor's output contains any selected rows.

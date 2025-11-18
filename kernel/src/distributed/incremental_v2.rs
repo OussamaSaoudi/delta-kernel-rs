@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use crate::actions::get_commit_schema;
 use crate::distributed::phases::CommitPhase;
 use crate::log_replay::LogReplayProcessor;
 use crate::{DeltaResult, Engine, EngineData, FileMeta};
@@ -48,6 +49,8 @@ pub(crate) struct IncrementalUpdateV2<P: LogReplayProcessor> {
 impl<P: LogReplayProcessor> IncrementalUpdateV2<P> {
     /// Create a new incremental update iterator.
     ///
+    /// Extracts schema requirements from the processor and passes them to the commit phase.
+    ///
     /// # Parameters
     /// - `processor`: The log replay processor
     /// - `new_commit_files`: New commit files to process
@@ -59,7 +62,10 @@ impl<P: LogReplayProcessor> IncrementalUpdateV2<P> {
         cached_metadata: Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>,
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<Self> {
-        let phase = CommitPhase::with_cached(new_commit_files, cached_metadata, engine)?;
+        // Extract schema from processor
+        let commit_schema = get_commit_schema().project(processor.required_commit_columns())?;
+        
+        let phase = CommitPhase::with_cached(new_commit_files, cached_metadata, engine, commit_schema)?;
         Ok(Self { processor, phase })
     }
 

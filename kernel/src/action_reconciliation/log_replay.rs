@@ -33,6 +33,7 @@
 use crate::engine_data::{FilteredEngineData, GetData, RowVisitor, TypedGetData as _};
 use crate::log_replay::{
     ActionsBatch, FileActionDeduplicator, FileActionKey, HasSelectionVector, LogReplayProcessor,
+    LogReplaySchemaProvider,
 };
 use crate::scan::data_skipping::DataSkippingFilter;
 use crate::schema::{column_name, ColumnName, ColumnNamesAndTypes, DataType};
@@ -157,6 +158,18 @@ impl Iterator for ActionReconciliationIterator {
     fn next(&mut self) -> Option<Self::Item> {
         let batch = self.inner.next();
         self.transform_batch(batch)
+    }
+}
+
+impl LogReplaySchemaProvider for ActionReconciliationProcessor {
+    fn required_commit_columns(&self) -> &[&'static str] {
+        // Needs all action types for reconciliation: add, remove, protocol, metadata, txn
+        &["add", "remove", "metaData", "protocol", "txn"]
+    }
+
+    fn required_checkpoint_columns(&self) -> &[&'static str] {
+        // Same schema for checkpoints
+        &["add", "remove", "metaData", "protocol", "txn"]
     }
 }
 

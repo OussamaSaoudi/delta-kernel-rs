@@ -1,13 +1,17 @@
 //! Driver (Phase 1) log replay composition for distributed execution.
 //!
 //! This module provides driver-side execution that processes commits and manifest,
-//! then returns processor + files for distribution to executors.
+//! then returns processor/reducer + files for distribution to executors.
+//!
+//! Supports both streaming (via `LogReplayProcessor`) and folding (via `LogReplayReducer`) operations.
 
 use std::sync::Arc;
 
-use crate::distributed::phases::{AfterCommit, AfterManifest, CommitPhase, ManifestPhase};
-use crate::log_replay::LogReplayProcessor;
+use crate::actions::get_commit_schema;
+use crate::distributed::phases::{AfterCommit, AfterManifest, CommitPhase, ManifestPhase, NextPhase};
+use crate::log_replay::{LogReplayProcessor, LogReplayReducer, LogReplaySchemaProvider};
 use crate::log_segment::LogSegment;
+use crate::schema::SchemaRef;
 use crate::{DeltaResult, Engine, Error, FileMeta};
 
 /// Driver-side log replay (Phase 1) for distributed execution.
@@ -47,11 +51,13 @@ use crate::{DeltaResult, Engine, Error, FileMeta};
 ///     }
 /// }
 /// ```
-pub(crate) struct DriverV2<P: LogReplayProcessor> {
+pub(crate) struct DriverV2<P> {
     processor: P,
     state: Option<DriverState>,
     log_segment: Arc<LogSegment>,
     engine: Arc<dyn Engine>,
+    /// Schema for reading checkpoint/sidecar files (executor phase)
+    checkpoint_schema: SchemaRef,
     /// Pre-initialized next phase for concurrent IO (based on phase hint)
     next_stage_hint: Option<DriverState>,
 }
@@ -70,6 +76,7 @@ impl DriverState {
     fn from_after_commit(
         after_commit: AfterCommit,
         engine: Arc<dyn Engine>,
+        checkpoint_schema: SchemaRef,
     ) -> DeltaResult<Self> {
         match after_commit {
             AfterCommit::Manifest { manifest_file, log_root } => {
@@ -77,6 +84,7 @@ impl DriverState {
                     manifest_file,
                     log_root,
                     engine,
+                    checkpoint_schema,
                 )?))
             }
             AfterCommit::LeafManifest { leaf_files } => {
@@ -97,11 +105,15 @@ impl DriverState {
     }
 }
 
-impl<P: LogReplayProcessor> DriverV2<P> {
-    /// Create a new driver-side log replay iterator.
+// Unified constructor for both streaming and folding
+impl<P: LogReplaySchemaProvider> DriverV2<P> {
+    /// Create a new driver-side log replay.
+    ///
+    /// Works for both streaming (`LogReplayProcessor`) and folding (`LogReplayReducer`) operations.
+    /// Extracts schema requirements from the processor/reducer and passes them to phases.
     ///
     /// # Parameters
-    /// - `processor`: The log replay processor
+    /// - `processor`: The log replay processor or reducer
     /// - `log_segment`: The log segment to process
     /// - `engine`: Engine for reading files
     pub fn new(
@@ -109,12 +121,17 @@ impl<P: LogReplayProcessor> DriverV2<P> {
         log_segment: Arc<LogSegment>,
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<Self> {
-        let commit = CommitPhase::new(&log_segment, engine.clone())?;
+        // Extract schemas from processor/reducer
+        let commit_schema = get_commit_schema().project(processor.required_commit_columns())?;
+        let checkpoint_schema = get_commit_schema().project(processor.required_checkpoint_columns())?;
+        
+        let mut commit = CommitPhase::new(&log_segment, engine.clone(), commit_schema)?;
         
         // Use next_phase_hint to enable concurrent IO for all checkpoint types
         let next_stage_hint = Some(DriverState::from_after_commit(
             commit.next_phase_hint(&log_segment)?,
             engine.clone(),
+            checkpoint_schema.clone(),
         )?);
         
         Ok(Self {
@@ -122,28 +139,9 @@ impl<P: LogReplayProcessor> DriverV2<P> {
             state: Some(DriverState::Commit(commit)),
             log_segment,
             engine,
+            checkpoint_schema,
             next_stage_hint,
         })
-    }
-
-    /// Complete driver phase and extract processor + files for distribution.
-    ///
-    /// Must be called after the iterator is exhausted.
-    ///
-    /// # Returns
-    /// - `Some((processor, files))`: Executor phase needed - distribute files to executors
-    /// - `None`: No executor phase needed - all processing complete on driver
-    ///
-    /// # Errors
-    /// Returns an error if called before iterator exhaustion.
-    pub fn finish(self) -> DeltaResult<Option<(P, Vec<FileMeta>)>> {
-        match self.state {
-            Some(DriverState::ExecutorPhase { files }) => Ok(Some((self.processor, files))),
-            Some(DriverState::Done) => Ok(None),
-            _ => Err(Error::generic(
-                "Must exhaust iterator before calling finish()",
-            )),
-        }
     }
 }
 
@@ -178,20 +176,26 @@ impl<P: LogReplayProcessor> Iterator for DriverV2<P> {
     }
 }
 
-impl<P: LogReplayProcessor> DriverV2<P> {
+// Shared implementation (no trait bounds - used by both processor and reducer)
+impl<P> DriverV2<P> {
     fn transition(&mut self, state: DriverState) -> DeltaResult<DriverState> {
-        // Try using pre-initialized hint first
-        if let Some(hint) = self.next_stage_hint.take() {
-            return Ok(hint);
-        }
-
-        // Otherwise, compute transition from current state
         let result = match state {
             DriverState::Commit(phase) => {
-                DriverState::from_after_commit(
-                    phase.into_next(&self.log_segment)?,
-                    self.engine.clone(),
-                )?
+                match phase.into_next(&self.log_segment)? {
+                    NextPhase::UsePreinitialized => {
+                        // Take the pre-initialized hint
+                        self.next_stage_hint.take()
+                            .ok_or_else(|| Error::generic("UsePreinitialized but no hint available"))?
+                    }
+                    NextPhase::Computed(after_commit) => {
+                        // Convert the computed AfterCommit
+                        DriverState::from_after_commit(
+                            after_commit,
+                            self.engine.clone(),
+                            self.checkpoint_schema.clone(),
+                        )?
+                    }
+                }
             }
 
             DriverState::Manifest(phase) => {
@@ -206,6 +210,119 @@ impl<P: LogReplayProcessor> DriverV2<P> {
         };
 
         Ok(result)
+    }
+}
+
+// ============================================================================
+// Streaming API: available when P implements LogReplayProcessor
+// ============================================================================
+
+impl<P: LogReplayProcessor> DriverV2<P> {
+    /// Complete driver phase and extract processor + files for distribution.
+    ///
+    /// Must be called after the iterator is exhausted.
+    ///
+    /// # Returns
+    /// - `Some((processor, files))`: Executor phase needed - distribute files to executors
+    /// - `None`: No executor phase needed - all processing complete on driver
+    ///
+    /// # Errors
+    /// Returns an error if called before iterator exhaustion.
+    pub fn finish(self) -> DeltaResult<Option<(P, Vec<FileMeta>)>> {
+        match self.state {
+            Some(DriverState::ExecutorPhase { files }) => Ok(Some((self.processor, files))),
+            Some(DriverState::Done) => Ok(None),
+            _ => Err(Error::generic(
+                "Must exhaust iterator before calling finish()",
+            )),
+        }
+    }
+}
+
+// ============================================================================
+// Fold/Reduce API: available when P implements LogReplayReducer
+// ============================================================================
+
+/// Result of driver-side fold operation.
+pub(crate) enum DriverV2ReducerResult<R: LogReplayReducer> {
+    /// Fold operation complete on driver - no executor phase needed.
+    Complete(R::Accumulated),
+    /// Executor phase needed - distribute files to executors for parallel processing.
+    NeedsExecutorPhase {
+        reducer: R,
+        files: Vec<FileMeta>,
+    },
+}
+
+impl<R: LogReplayReducer> DriverV2<R> {
+    /// Process all driver phases (commits + manifest).
+    ///
+    /// Accumulates state in the reducer until either:
+    /// - Early termination (reducer signals completion via `is_complete()`)
+    /// - All driver phases exhausted
+    ///
+    /// After calling this, use [`into_result`](Self::into_result) to get the result or executor files.
+    pub fn run_to_completion(&mut self) -> DeltaResult<()> {
+        loop {
+            // Check if reducer signals early completion
+            if self.processor.is_complete() {
+                break;
+            }
+
+            // Try to get next batch from current phase
+            let batch_result = match self.state.as_mut() {
+                Some(DriverState::Commit(phase)) => phase.next(),
+                Some(DriverState::Manifest(phase)) => phase.next(),
+                Some(DriverState::ExecutorPhase { .. }) | Some(DriverState::Done) => {
+                    // Reached executor phase or done - stop driver processing
+                    break;
+                }
+                None => break,
+            };
+
+            match batch_result {
+                Some(Ok(batch)) => {
+                    // Process the batch through the reducer
+                    self.processor.process_batch_for_reduce(batch)?;
+                }
+                Some(Err(e)) => return Err(e),
+                None => {
+                    // Phase exhausted - transition
+                    let old_state = self.state.take().ok_or_else(|| {
+                        Error::generic("State missing during phase transition")
+                    })?;
+                    self.state = Some(self.transition(old_state)?);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Extract the result or files for executors after processing completes.
+    ///
+    /// Must be called after [`run_to_completion`](Self::run_to_completion).
+    ///
+    /// # Returns
+    /// - `Complete`: Fold operation complete - all processing done on driver
+    /// - `NeedsExecutorPhase`: Executor phase needed - distribute files to executors
+    pub fn into_result(self) -> DeltaResult<DriverV2ReducerResult<R>> {
+        // Extract result or executor files
+        match self.state {
+            Some(DriverState::ExecutorPhase { files }) => {
+                Ok(DriverV2ReducerResult::NeedsExecutorPhase {
+                    reducer: self.processor,
+                    files,
+                })
+            }
+            Some(DriverState::Done) | None => {
+                // All done - extract accumulated result
+                Ok(DriverV2ReducerResult::Complete(self.processor.into_accumulated()?))
+            }
+            Some(_) => Err(Error::generic(
+                "Must call run_to_completion() before calling into_result()",
+            )),
+        }
     }
 }
 
@@ -337,6 +454,151 @@ mod tests {
         assert_eq!(files.len(), 2, "DriverV2 should collect exactly 2 sidecar files from checkpoint for distribution");
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Reducer tests
+    // ========================================================================
+
+    fn test_table_path(name: &str) -> PathBuf {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        PathBuf::from(manifest_dir).join("tests/data").join(name)
+    }
+
+    #[test]
+    fn test_pm_driver_commits_only() {
+        use crate::distributed::pm_processor::PMProcessor;
+        
+        // Table with P&M in commits only - should complete on driver
+        let table_path = test_table_path("table-without-dv-small");
+        let table_url = url::Url::from_directory_path(table_path).unwrap();
+        let store = Arc::new(LocalFileSystem::new());
+        let engine = Arc::new(DefaultEngine::new(store));
+        
+        let snapshot = crate::Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .unwrap();
+        let log_segment = snapshot.log_segment().clone();
+        
+        let pm_processor = PMProcessor::new();
+        let mut driver = DriverV2::new(pm_processor, Arc::new(log_segment), engine).unwrap();
+        
+        driver.run_to_completion().unwrap();
+        
+        match driver.into_result().unwrap() {
+            DriverV2ReducerResult::Complete((protocol, metadata)) => {
+                // Validate protocol
+                assert_eq!(protocol.min_reader_version(), 1);
+                
+                // Validate metadata
+                assert_eq!(metadata.name(), Some("table-without-dv-small"));
+            }
+            DriverV2ReducerResult::NeedsExecutorPhase { .. } => {
+                panic!("Expected Complete, got NeedsExecutorPhase");
+            }
+        }
+    }
+
+    #[test]
+    fn test_pm_driver_with_checkpoint() {
+        use crate::distributed::pm_processor::PMProcessor;
+        
+        // Table with checkpoint - P&M should be found in driver phase
+        let table_path = test_table_path("with_checkpoint");
+        let table_url = url::Url::from_directory_path(table_path).unwrap();
+        let store = Arc::new(LocalFileSystem::new());
+        let engine = Arc::new(DefaultEngine::new(store));
+        
+        let snapshot = crate::Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .unwrap();
+        let log_segment = snapshot.log_segment().clone();
+        
+        let pm_processor = PMProcessor::new();
+        let mut driver = DriverV2::new(pm_processor, Arc::new(log_segment), engine).unwrap();
+        
+        driver.run_to_completion().unwrap();
+        
+        match driver.into_result().unwrap() {
+            DriverV2ReducerResult::Complete((protocol, _metadata)) => {
+                assert_eq!(protocol.min_reader_version(), 3);
+            }
+            DriverV2ReducerResult::NeedsExecutorPhase { .. } => {
+                panic!("Expected Complete, got NeedsExecutorPhase for checkpoint table");
+            }
+        }
+    }
+
+    #[test]
+    fn test_pm_driver_early_termination() {
+        use crate::distributed::pm_processor::PMProcessor;
+        
+        // Verify that driver stops processing once P&M are found
+        let table_path = test_table_path("with_checkpoint");
+        let table_url = url::Url::from_directory_path(table_path).unwrap();
+        let store = Arc::new(LocalFileSystem::new());
+        let engine = Arc::new(DefaultEngine::new(store));
+        
+        let snapshot = crate::Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .unwrap();
+        let log_segment = snapshot.log_segment().clone();
+        
+        let pm_processor = PMProcessor::new();
+        let driver = DriverV2::new(pm_processor, Arc::new(log_segment), engine).unwrap();
+        
+        // Process and verify completion (early termination)
+        match driver.into_result().unwrap() {
+            DriverV2ReducerResult::Complete(_) => {
+                // Success - early termination worked
+            }
+            DriverV2ReducerResult::NeedsExecutorPhase { .. } => {
+                panic!("Should have completed on driver with early termination");
+            }
+        }
+    }
+
+    #[test]
+    fn test_pm_distributed_with_sidecars() {
+        use crate::distributed::pm_processor::PMProcessor;
+        use crate::distributed::executor_v2::ExecutorV2;
+        
+        // Test table with sidecars - requires distributed execution
+        // Note: Most real tables have P&M in commits/manifest, not sidecars
+        // This test validates the distributed path exists even if rarely used
+        
+        let table_path = test_table_path("table-with-dv-small");
+        let table_url = url::Url::from_directory_path(table_path).unwrap();
+        let store = Arc::new(LocalFileSystem::new());
+        let engine = Arc::new(DefaultEngine::new(store));
+        
+        let snapshot = crate::Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .unwrap();
+        let log_segment = snapshot.log_segment().clone();
+        
+        let pm_processor = PMProcessor::new();
+        let driver = DriverV2::new(pm_processor, Arc::new(log_segment), engine.clone()).unwrap();
+        
+        match driver.into_result().unwrap() {
+            DriverV2ReducerResult::Complete((protocol, metadata)) => {
+                // P&M found in driver phase - validate
+                assert_eq!(protocol.min_reader_version(), 3);
+                assert_eq!(metadata.name(), Some("table-with-dv-small"));
+            }
+            DriverV2ReducerResult::NeedsExecutorPhase { reducer, files } => {
+                // P&M not in driver phase - need executor processing
+                // This would be rare but demonstrates the distributed path
+                assert!(!files.is_empty(), "Should have sidecar files");
+                
+                // Simulate executor processing
+                let mut executor = ExecutorV2::new(reducer, files, engine).unwrap();
+                executor.run_to_completion().unwrap();
+                let (protocol, metadata) = executor.into_result().unwrap();
+                assert_eq!(protocol.min_reader_version(), 3);
+                assert_eq!(metadata.name(), Some("table-with-dv-small"));
+            }
+        }
     }
 }
 

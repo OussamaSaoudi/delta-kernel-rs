@@ -2,11 +2,14 @@
 //!
 //! This module provides executor-side execution that processes a partition of
 //! sidecar or multi-part checkpoint files.
+//!
+//! Supports both streaming (via `LogReplayProcessor`) and folding (via `LogReplayReducer`) operations.
 
 use std::sync::Arc;
 
+use crate::actions::get_commit_schema;
 use crate::distributed::phases::SidecarPhase;
-use crate::log_replay::LogReplayProcessor;
+use crate::log_replay::{LogReplayProcessor, LogReplayReducer, LogReplaySchemaProvider};
 use crate::{DeltaResult, Engine, FileMeta};
 
 /// Executor-side log replay (Phase 2) for distributed execution.
@@ -35,16 +38,20 @@ use crate::{DeltaResult, Engine, FileMeta};
 /// // Extract final processor state
 /// let final_processor = executor.finish();
 /// ```
-pub(crate) struct ExecutorV2<P: LogReplayProcessor> {
+pub(crate) struct ExecutorV2<P> {
     processor: P,
     phase: SidecarPhase,
 }
 
-impl<P: LogReplayProcessor> ExecutorV2<P> {
-    /// Create a new executor-side log replay iterator.
+// Unified constructor for both streaming and folding
+impl<P: LogReplaySchemaProvider> ExecutorV2<P> {
+    /// Create a new executor-side log replay.
+    ///
+    /// Works for both streaming (`LogReplayProcessor`) and folding (`LogReplayReducer`) operations.
+    /// Extracts schema requirements from the processor/reducer and passes them to SidecarPhase.
     ///
     /// # Parameters
-    /// - `processor`: The deserialized log replay processor from the driver
+    /// - `processor`: The deserialized log replay processor or reducer from the driver
     /// - `files`: Partition of sidecar/leaf files to process on this executor
     /// - `engine`: Engine for reading files
     pub fn new(
@@ -60,10 +67,15 @@ impl<P: LogReplayProcessor> ExecutorV2<P> {
         // Example: This could result from a shuffle where there are no more "files", 
         // there are just batches resulting from the shuffle.
 
-        // TODO: implement P&M. Think about appId, txn, etc.
-        let phase = SidecarPhase::new(files, engine)?;
+        // Extract schema from processor/reducer for checkpoint/sidecar files
+        let checkpoint_schema = get_commit_schema().project(processor.required_checkpoint_columns())?;
+        
+        let phase = SidecarPhase::new(files, engine, checkpoint_schema)?;
         Ok(Self { processor, phase })
     }
+}
+
+impl<P: LogReplayProcessor> ExecutorV2<P> {
 
     /// Extract the processor after processing completes.
     ///
@@ -80,6 +92,52 @@ impl<P: LogReplayProcessor> Iterator for ExecutorV2<P> {
         self.phase
             .next()
             .map(|batch| batch.and_then(|b| self.processor.process_actions_batch(b)))
+    }
+}
+
+// ============================================================================
+// Fold/Reduce API: available when P implements LogReplayReducer
+// ============================================================================
+
+impl<R: LogReplayReducer> ExecutorV2<R> {
+    /// Process all files in this partition.
+    ///
+    /// Accumulates state in the reducer until either:
+    /// - Early termination (reducer signals completion via `is_complete()`)
+    /// - All files in partition exhausted
+    ///
+    /// After calling this, use [`into_result`](Self::into_result) to extract the partial result.
+    pub fn run_to_completion(&mut self) -> DeltaResult<()> {
+        loop {
+            // Check if reducer signals early completion
+            if self.processor.is_complete() {
+                break;
+            }
+
+            // Try to get next batch from phase
+            match self.phase.next() {
+                Some(Ok(batch)) => {
+                    // Process the batch through the reducer
+                    self.processor.process_batch_for_reduce(batch)?;
+                }
+                Some(Err(e)) => return Err(e),
+                None => {
+                    // Phase exhausted - all files processed
+                    break;
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Extract the partial accumulated result after processing completes.
+    ///
+    /// Must be called after [`run_to_completion`](Self::run_to_completion).
+    ///
+    /// The result will be sent back to the driver to be merged with results from other executors.
+    pub fn into_result(self) -> DeltaResult<R::Accumulated> {
+        self.processor.into_accumulated()
     }
 }
 

@@ -10,7 +10,8 @@ use crate::actions::get_log_add_schema;
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_name, ColumnName, Expression, ExpressionRef, PredicateRef};
 use crate::kernel_predicates::{DefaultKernelPredicateEvaluator, KernelPredicateEvaluator as _};
-use crate::log_replay::{ActionsBatch, FileActionDeduplicator, FileActionKey, LogReplayProcessor};
+use crate::actions::{ADD_NAME, REMOVE_NAME};
+use crate::log_replay::{ActionsBatch, FileActionDeduplicator, FileActionKey, LogReplayProcessor, LogReplaySchemaProvider};
 use crate::scan::Scalar;
 use crate::schema::ToSchema as _;
 use crate::schema::{ColumnNamesAndTypes, DataType, MapType, StructField, StructType};
@@ -364,6 +365,18 @@ pub(crate) fn get_scan_metadata_transform_expr() -> ExpressionRef {
         ))]))
     });
     EXPR.clone()
+}
+
+impl LogReplaySchemaProvider for ScanLogReplayProcessor {
+    fn required_commit_columns(&self) -> &[&'static str] {
+        // Driver phase needs both add and remove for deduplication
+        &[ADD_NAME, REMOVE_NAME]
+    }
+
+    fn required_checkpoint_columns(&self) -> &[&'static str] {
+        // Executor phase only processes adds from checkpoints
+        &[ADD_NAME]
+    }
 }
 
 impl LogReplayProcessor for ScanLogReplayProcessor {

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::log_replay::ActionsBatch;
-use crate::scan::CHECKPOINT_READ_SCHEMA;
+use crate::schema::SchemaRef;
 use crate::{DeltaResult, Engine, FileMeta};
 
 /// Phase that processes sidecar or leaf parquet files.
@@ -17,8 +17,6 @@ pub(crate) struct SidecarPhase {
 impl SidecarPhase {
     /// Create a new sidecar phase from file list.
     ///
-    /// Processes parquet files using `CHECKPOINT_READ_SCHEMA`.
-    ///
     /// # Distributability
     ///
     /// This phase is designed to be distributable. To distribute:
@@ -28,16 +26,18 @@ impl SidecarPhase {
     /// # Parameters
     /// - `files`: Sidecar/leaf files to process
     /// - `engine`: Engine for reading files
+    /// - `schema`: Schema to use when reading sidecar files (projected based on processor requirements)
     pub fn new(
         files: Vec<FileMeta>,
         engine: Arc<dyn Engine>,
+        schema: SchemaRef,
     ) -> DeltaResult<Self> {
         let actions = if files.is_empty() {
             Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _> + Send>
         } else {
             let actions = engine
                 .parquet_handler()
-                .read_parquet_files(&files, CHECKPOINT_READ_SCHEMA.clone(), None)?
+                .read_parquet_files(&files, schema, None)?
                 .map(|batch| batch.map(|b| ActionsBatch::new(b, false)));
             Box::new(actions) as Box<dyn Iterator<Item = _> + Send>
         };
@@ -115,10 +115,14 @@ mod tests {
         let checkpoint_file = &log_segment.checkpoint_parts[0];
         let manifest_file = checkpoint_file.location.clone();
 
+        let schema = crate::actions::get_commit_schema()
+            .project(&[crate::actions::ADD_NAME])?;
+        
         let mut manifest_phase = manifest::ManifestPhase::new(
             manifest_file,
             log_segment.log_root.clone(),
             engine.clone(),
+            schema,
         )?;
 
         // Drain manifest phase and apply processor
@@ -133,9 +137,13 @@ mod tests {
             manifest::AfterManifest::Sidecars { sidecars } => {
                 println!("Testing with {} sidecar files", sidecars.len());
                 
+                let schema = crate::actions::get_commit_schema()
+                    .project(&[crate::actions::ADD_NAME])?;
+                
                 let mut sidecar_phase = SidecarPhase::new(
                     sidecars,
                     engine.clone(),
+                    schema,
                 )?;
 
                 let mut sidecar_file_paths = Vec::new();

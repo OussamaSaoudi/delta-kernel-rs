@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use url::Url;
 
-use crate::actions::visitors::SidecarVisitor;
+use crate::actions::{get_all_actions_schema, visitors::SidecarVisitor, SIDECAR_NAME};
 use crate::log_replay::ActionsBatch;
-use crate::scan::MANIFEST_READ_SCHEMA;
+use crate::schema::SchemaRef;
 use crate::{DeltaResult, Engine, Error, FileMeta, RowVisitor};
 
 /// Phase that processes single-part checkpoint manifest files.
@@ -28,23 +28,53 @@ pub(crate) enum AfterManifest {
     Done,
 }
 
+/// Augment a schema with the sidecar column.
+///
+/// The manifest phase ALWAYS needs the sidecar column to detect and extract
+/// sidecar references, regardless of what the processor needs. This function
+/// adds the sidecar column to the base schema provided by the processor.
+///
+/// # Parameters
+/// - `base_schema`: The schema columns required by the processor
+///
+/// # Returns
+/// A schema that includes both the processor's columns and the sidecar column.
+fn augment_schema_with_sidecar(base_schema: SchemaRef) -> DeltaResult<SchemaRef> {
+    let mut columns: Vec<&str> = base_schema
+        .fields()
+        .map(|f| f.name().as_str())
+        .collect();
+    
+    // Add sidecar if not already present
+    if !columns.contains(&SIDECAR_NAME) {
+        columns.push(SIDECAR_NAME);
+    }
+    
+    get_all_actions_schema().project(&columns)
+}
+
 impl ManifestPhase {
     /// Create a new manifest phase for a single-part checkpoint.
     ///
-    /// Processes the manifest file using `MANIFEST_READ_SCHEMA` and accumulates
-    /// sidecar references via `SidecarVisitor`.
+    /// The schema is automatically augmented with the sidecar column since the manifest
+    /// phase needs to extract sidecar references for phase transitions.
     ///
     /// # Parameters
     /// - `manifest_file`: The checkpoint manifest file to process
     /// - `log_root`: Root URL for resolving sidecar paths
     /// - `engine`: Engine for reading files
+    /// - `base_schema`: Schema columns required by the processor (will be augmented with sidecar)
     pub fn new(
         // TODO: Change to ParsedLogPath so that we already have the extension type
         manifest_file: FileMeta,
         log_root: Url,
         engine: Arc<dyn Engine>,
+        base_schema: SchemaRef,
     ) -> DeltaResult<Self> {
         let files = vec![manifest_file.clone()];
+        
+        // Always augment with sidecar for phase transitions
+        let schema = augment_schema_with_sidecar(base_schema)?;
 
         // Determine file type from extension
         let extension = manifest_file
@@ -57,10 +87,10 @@ impl ManifestPhase {
         let actions = match extension {
             "json" => engine
                 .json_handler()
-                .read_json_files(&files, MANIFEST_READ_SCHEMA.clone(), None)?,
+                .read_json_files(&files, schema.clone(), None)?,
             "parquet" => engine
                 .parquet_handler()
-                .read_parquet_files(&files, MANIFEST_READ_SCHEMA.clone(), None)?,
+                .read_parquet_files(&files, schema.clone(), None)?,
             ext => {
                 return Err(Error::generic(format!(
                     "Unsupported checkpoint extension: {}",
@@ -180,10 +210,14 @@ mod tests {
         let checkpoint_file = &log_segment.checkpoint_parts[0];
         let manifest_file = checkpoint_file.location.clone();
 
+        let schema = crate::actions::get_commit_schema()
+            .project(&[crate::actions::ADD_NAME])?;
+
         let mut manifest_phase = ManifestPhase::new(
             manifest_file,
             log_root.clone(),
             engine.clone(),
+            schema,
         )?;
 
         // Count batches and collect results
@@ -227,10 +261,14 @@ mod tests {
         let checkpoint_file = &log_segment.checkpoint_parts[0];
         let manifest_file = checkpoint_file.location.clone();
 
+        let schema = crate::actions::get_commit_schema()
+            .project(&[crate::actions::ADD_NAME])?;
+
         let mut manifest_phase = ManifestPhase::new(
             manifest_file,
             log_root.clone(),
             engine.clone(),
+            schema,
         )?;
 
         // Drain the phase
