@@ -20,41 +20,6 @@
 
 use crate::benchmarks::models::{TableInfo, WorkloadSpecVariant};
 use std::path::{Path, PathBuf};
-use thiserror::Error;
-
-/// Errors that can occur when loading workload specifications
-#[derive(Error, Debug)]
-pub enum WorkloadLoadError {
-    #[error("Workload directory does not exist: {0}")]
-    DirectoryNotFound(PathBuf),
-    
-    #[error("Path is not a directory: {0}")]
-    NotADirectory(PathBuf),
-    
-    #[error("Cannot read directory: {0}")]
-    CannotReadDirectory(PathBuf, #[source] std::io::Error),
-    
-    #[error("No table directories found in {0}")]
-    NoTableDirectories(PathBuf),
-    
-    #[error("Specs directory not found: {0}")]
-    SpecsDirectoryNotFound(PathBuf),
-    
-    #[error("No spec directories found in {0}")]
-    NoSpecDirectories(PathBuf),
-    
-    #[error("Spec file not found: {0}")]
-    SpecFileNotFound(PathBuf),
-    
-    #[error("Failed to parse spec file {0}")]
-    ParseError(PathBuf, #[source] serde_json::Error),
-    
-    #[error("Failed to parse table_info.json {0}")]
-    TableInfoParseError(PathBuf, #[source] serde_json::Error),
-    
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
-}
 
 const TABLE_INFO_FILE: &str = "table_info.json";
 const SPECS_DIR: &str = "specs";
@@ -85,16 +50,12 @@ const SPEC_FILE: &str = "spec.json";
 /// ```
 pub fn load_all_workloads<P: AsRef<Path>>(
     spec_dir_path: P,
-) -> Result<Vec<WorkloadSpecVariant>, WorkloadLoadError> {
+) -> Result<Vec<WorkloadSpecVariant>, String> {
     let spec_dir = spec_dir_path.as_ref();
     
-    // Validate that the workload directory exists and is accessible
-    if !spec_dir.exists() {
-        return Err(WorkloadLoadError::DirectoryNotFound(spec_dir.to_path_buf()));
-    }
-    
+    // Validate that the workload directory exists and is a directory
     if !spec_dir.is_dir() {
-        return Err(WorkloadLoadError::NotADirectory(spec_dir.to_path_buf()));
+        return Err(format!("Path does not exist or is not a directory: {}", spec_dir.display()));
     }
     
     let table_directories = find_table_directories(spec_dir)?;
@@ -109,9 +70,9 @@ pub fn load_all_workloads<P: AsRef<Path>>(
 }
 
 /// Find all table directories within the workload specifications directory
-fn find_table_directories(spec_dir: &Path) -> Result<Vec<PathBuf>, WorkloadLoadError> {
+fn find_table_directories(spec_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let entries = std::fs::read_dir(spec_dir)
-        .map_err(|e| WorkloadLoadError::CannotReadDirectory(spec_dir.to_path_buf(), e))?;
+        .map_err(|e| format!("Cannot read directory {}: {}", spec_dir.display(), e))?;
     
     let table_dirs: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok())
@@ -120,24 +81,24 @@ fn find_table_directories(spec_dir: &Path) -> Result<Vec<PathBuf>, WorkloadLoadE
         .collect();
     
     if table_dirs.is_empty() {
-        return Err(WorkloadLoadError::NoTableDirectories(spec_dir.to_path_buf()));
+        return Err(format!("No table directories found in {}", spec_dir.display()));
     }
     
     Ok(table_dirs)
 }
 
 /// Load all workload specifications from a single table directory
-fn load_specs_from_table(table_dir: &Path) -> Result<Vec<WorkloadSpecVariant>, WorkloadLoadError> {
+fn load_specs_from_table(table_dir: &Path) -> Result<Vec<WorkloadSpecVariant>, String> {
     let specs_dir = table_dir.join(SPECS_DIR);
     
     // Validate that the specs directory exists
     if !specs_dir.exists() || !specs_dir.is_dir() {
-        return Err(WorkloadLoadError::SpecsDirectoryNotFound(specs_dir));
+        return Err(format!("Specs directory not found: {}", specs_dir.display()));
     }
     
     let table_info_path = table_dir.join(TABLE_INFO_FILE);
     let table_info = TableInfo::from_json_path(&table_info_path)
-        .map_err(|e| WorkloadLoadError::TableInfoParseError(table_info_path.clone(), e))?;
+        .map_err(|e| format!("Failed to parse table_info.json {}: {}", table_info_path.display(), e))?;
     
     let spec_directories = find_spec_directories(&specs_dir)?;
     
@@ -145,9 +106,9 @@ fn load_specs_from_table(table_dir: &Path) -> Result<Vec<WorkloadSpecVariant>, W
     for spec_dir in spec_directories {
         match load_single_spec(&spec_dir, table_info.clone()) {
             Ok(spec) => all_specs.push(spec),
-            Err(WorkloadLoadError::ParseError(path, e)) => {
+            Err(e) if e.contains("unknown variant") => {
                 // Skip unsupported workload types gracefully
-                eprintln!("Warning: Skipping unsupported workload spec {}: {}", path.display(), e);
+                eprintln!("Warning: Skipping unsupported workload spec: {}", e);
                 continue;
             }
             Err(e) => return Err(e),
@@ -158,9 +119,9 @@ fn load_specs_from_table(table_dir: &Path) -> Result<Vec<WorkloadSpecVariant>, W
 }
 
 /// Find all specification directories within the specs directory
-fn find_spec_directories(specs_dir: &Path) -> Result<Vec<PathBuf>, WorkloadLoadError> {
+fn find_spec_directories(specs_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let entries = std::fs::read_dir(specs_dir)
-        .map_err(|e| WorkloadLoadError::CannotReadDirectory(specs_dir.to_path_buf(), e))?;
+        .map_err(|e| format!("Cannot read directory {}: {}", specs_dir.display(), e))?;
     
     let spec_dirs: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok())
@@ -169,7 +130,7 @@ fn find_spec_directories(specs_dir: &Path) -> Result<Vec<PathBuf>, WorkloadLoadE
         .collect();
     
     if spec_dirs.is_empty() {
-        return Err(WorkloadLoadError::NoSpecDirectories(specs_dir.to_path_buf()));
+        return Err(format!("No spec directories found in {}", specs_dir.display()));
     }
     
     Ok(spec_dirs)
@@ -179,25 +140,26 @@ fn find_spec_directories(specs_dir: &Path) -> Result<Vec<PathBuf>, WorkloadLoadE
 fn load_single_spec(
     spec_dir: &Path,
     table_info: TableInfo,
-) -> Result<WorkloadSpecVariant, WorkloadLoadError> {
+) -> Result<WorkloadSpecVariant, String> {
     let spec_file = spec_dir.join(SPEC_FILE);
     
     if !spec_file.exists() || !spec_file.is_file() {
-        return Err(WorkloadLoadError::SpecFileNotFound(spec_file));
+        return Err(format!("Spec file not found: {}", spec_file.display()));
     }
     
     let case_name = spec_dir
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| WorkloadLoadError::SpecFileNotFound(spec_dir.to_path_buf()))?
+        .ok_or_else(|| format!("Invalid spec directory name: {}", spec_dir.display()))?
         .to_string();
     
     let spec_type = WorkloadSpecVariant::from_json_path(&spec_file)
-        .map_err(|e| WorkloadLoadError::ParseError(spec_file.clone(), e))?;
+        .map_err(|e| format!("Failed to parse spec file {}: {}", spec_file.display(), e))?;
     
     Ok(WorkloadSpecVariant {
         table_info,
         case_name,
         spec_type,
+        operation_type: None,
     })
 }

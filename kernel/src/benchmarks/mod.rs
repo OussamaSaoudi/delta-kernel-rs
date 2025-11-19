@@ -32,5 +32,5 @@ pub use models::{
     WorkloadSpecType, WorkloadSpecVariant,
 };
 pub use runners::{create_runner, ReadMetadataRunner, SnapshotConstructionRunner, WorkloadRunner};
-pub use utils::{load_all_workloads, WorkloadLoadError};
+pub use utils::load_all_workloads;
 

@@ -25,8 +25,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use delta_kernel::benchmarks::{create_runner, load_all_workloads};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use delta_kernel::benchmarks::{
+    create_runner, load_all_workloads, ReadOperationType, WorkloadSpecType,
+};
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 
@@ -72,28 +74,38 @@ fn run_benchmark(
     let workload_name = spec.full_name();
     println!("Setting up benchmark: {}", workload_name);
     
-    let mut runner = match create_runner(spec, engine) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Failed to create runner for {}: {}", workload_name, e);
-            return;
-        }
+    let Ok(mut runner) = create_runner(spec, engine) else {
+        eprintln!("Failed to create runner for {}", workload_name);
+        return;
     };
     
+    // Verify setup works at least once before benchmarking
     if let Err(e) = runner.setup() {
         eprintln!("Failed to setup runner for {}: {}", workload_name, e);
         return;
     }
+    runner.cleanup().ok(); // Clean up after verification
     
     group.bench_function(BenchmarkId::from_parameter(&workload_name), |b| {
-        b.iter(|| {
-            runner.execute().expect("Benchmark execution failed");
+        b.iter_custom(|iters| {
+            let mut total_duration = std::time::Duration::ZERO;
+            
+            for _ in 0..iters {
+                // Setup (not timed)
+                runner.setup().expect("Setup failed during benchmark");
+                
+                // Execute (timed)
+                let start = std::time::Instant::now();
+                black_box(runner.execute().expect("Benchmark execution failed"));
+                total_duration += start.elapsed();
+                
+                // Cleanup (not timed)
+                runner.cleanup().expect("Cleanup failed during benchmark");
+            }
+            
+            total_duration
         });
     });
-    
-    if let Err(e) = runner.cleanup() {
-        eprintln!("Failed to cleanup runner for {}: {}", workload_name, e);
-    }
 }
 
 /// Main benchmark function that loads and runs all workloads
@@ -101,13 +113,10 @@ fn workload_benchmarks(c: &mut Criterion) {
     let specs_path = get_workload_specs_path();
     
     // Load all workload specifications
-    let specs = match load_all_workloads(&specs_path) {
-        Ok(specs) => specs,
-        Err(e) => {
-            eprintln!("Failed to load workload specifications from {:?}: {}", specs_path, e);
-            eprintln!("Make sure workload specs are set up in kernel/benches/workload_specs/");
-            return;
-        }
+    let Ok(specs) = load_all_workloads(&specs_path) else {
+        eprintln!("Failed to load workload specifications from {:?}", specs_path);
+        eprintln!("Make sure workload specs are set up in kernel/benches/workload_specs/");
+        return;
     };
 
     if specs.is_empty() {
@@ -126,20 +135,15 @@ fn workload_benchmarks(c: &mut Criterion) {
     for spec in specs {
         // For Read specs, create benchmarks for each operation type
         match &spec.spec_type {
-            delta_kernel::benchmarks::WorkloadSpecType::Read(read_spec) => {
+            WorkloadSpecType::Read(_) => {
                 // Currently only support read_metadata
-                for operation_type in [delta_kernel::benchmarks::ReadOperationType::ReadMetadata] {
-                    let spec_with_op = delta_kernel::benchmarks::WorkloadSpecVariant {
-                        table_info: spec.table_info.clone(),
-                        case_name: spec.case_name.clone(),
-                        spec_type: delta_kernel::benchmarks::WorkloadSpecType::Read(
-                            read_spec.clone().with_operation_type(operation_type)
-                        ),
-                    };
+                for operation_type in [ReadOperationType::ReadMetadata] {
+                    let mut spec_with_op = spec.clone();
+                    spec_with_op.operation_type = Some(operation_type);
                     run_benchmark(&mut group, spec_with_op, engine.clone());
                 }
             }
-            delta_kernel::benchmarks::WorkloadSpecType::SnapshotConstruction(_) => {
+            WorkloadSpecType::SnapshotConstruction(_) => {
                 run_benchmark(&mut group, spec, engine.clone());
             }
         }

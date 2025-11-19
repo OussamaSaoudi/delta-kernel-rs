@@ -65,16 +65,6 @@ impl TableInfo {
 pub struct ReadSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<u64>,
-    #[serde(skip)]
-    pub operation_type: Option<ReadOperationType>,
-}
-
-impl ReadSpec {
-    /// Create a copy of this spec with a specific operation type
-    pub fn with_operation_type(mut self, operation_type: ReadOperationType) -> Self {
-        self.operation_type = Some(operation_type);
-        self
-    }
 }
 
 /// Specification for snapshot construction workloads.
@@ -100,6 +90,8 @@ pub struct WorkloadSpecVariant {
     pub table_info: TableInfo,
     pub case_name: String,
     pub spec_type: WorkloadSpecType,
+    /// For Read specs, specifies which operation to perform (read_metadata, read_data, etc.)
+    pub operation_type: Option<ReadOperationType>,
 }
 
 impl WorkloadSpecVariant {
@@ -111,8 +103,8 @@ impl WorkloadSpecVariant {
     
     pub fn full_name(&self) -> String {
         let workload_type = match &self.spec_type {
-            WorkloadSpecType::Read(spec) => {
-                spec.operation_type.map(|op| op.as_str()).unwrap_or("read")
+            WorkloadSpecType::Read(_) => {
+                self.operation_type.map(|op| op.as_str()).unwrap_or("read")
             }
             WorkloadSpecType::SnapshotConstruction(_) => "snapshot_construction",
         };

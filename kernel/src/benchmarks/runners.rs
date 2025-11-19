@@ -86,8 +86,9 @@ impl WorkloadRunner for ReadMetadataRunner {
         let metadata_iter = scan.scan_metadata(self.engine.as_ref())?;
         
         // Consume the iterator to perform actual work
+        // Black box to prevent compiler from optimizing away the loop
         for result in metadata_iter {
-            let _ = result?;
+            std::hint::black_box(result?);
         }
         
         Ok(())
@@ -165,9 +166,9 @@ pub fn create_runner(
     use crate::benchmarks::models::{ReadOperationType, WorkloadSpecType};
     
     match &spec.spec_type {
-        WorkloadSpecType::Read(read_spec) => {
+        WorkloadSpecType::Read(_) => {
             // Check operation type
-            let operation_type = read_spec.operation_type
+            let operation_type = spec.operation_type
                 .ok_or("ReadSpec must have operation_type set")?;
             
             match operation_type {
