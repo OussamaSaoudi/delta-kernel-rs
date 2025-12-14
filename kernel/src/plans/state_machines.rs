@@ -517,7 +517,6 @@ impl LogReplayStateMachine {
             dedup_filter: FilterByKDF {
                 function_id: FilterKernelFunctionId::AddRemoveDedup,
                 state_ptr: dedup_state_ptr,
-                serialized_state: None,
             },
             project: SelectNode {
                 columns: vec![],
@@ -558,7 +557,6 @@ impl LogReplayStateMachine {
             dedup_filter: Some(FilterByKDF {
                 function_id: FilterKernelFunctionId::CheckpointDedup,
                 state_ptr: dedup_state_ptr,
-                serialized_state: None,
             }),
             project: SelectNode {
                 columns: vec![],
@@ -1178,7 +1176,6 @@ impl ScanStateMachine {
             node: FilterByKDF {
                 function_id: FilterKernelFunctionId::AddRemoveDedup,
                 state_ptr: self.state.dedup_state_ptr,
-                serialized_state: None,
             },
         };
 
@@ -1243,7 +1240,6 @@ impl ScanStateMachine {
             node: FilterByKDF {
                 function_id: FilterKernelFunctionId::CheckpointDedup,
                 state_ptr: checkpoint_dedup_state,
-                serialized_state: None,
             },
         };
 

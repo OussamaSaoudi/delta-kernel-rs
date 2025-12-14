@@ -50,7 +50,6 @@ fn create_commit_phase_bytes() -> Vec<u8> {
         dedup_filter: FilterByKDF {
             function_id: FilterKernelFunctionId::AddRemoveDedup,
             state_ptr,
-            serialized_state: None,
         },
         project: SelectNode {
             columns: vec![
@@ -102,7 +101,6 @@ fn create_declarative_plan_bytes() -> Vec<u8> {
         node: FilterByKDF {
             function_id: FilterKernelFunctionId::AddRemoveDedup,
             state_ptr,
-            serialized_state: None,
         },
     };
 

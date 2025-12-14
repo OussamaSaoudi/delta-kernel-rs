@@ -113,7 +113,6 @@ impl From<&FilterByKDF> for proto::FilterByKdf {
         proto::FilterByKdf {
             function_id: node.function_id.into(),
             state_ptr: node.state_ptr,
-            serialized_state: node.serialized_state.clone(),
         }
     }
 }

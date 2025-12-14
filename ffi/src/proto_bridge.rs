@@ -643,7 +643,6 @@ fn convert_proto_to_native_plan(
                 node: FilterByKDF {
                     function_id: FilterKernelFunctionId::try_from(filter_node.function_id)?,
                     state_ptr: filter_node.state_ptr,
-                    serialized_state: filter_node.serialized_state.clone(),
                 },
             })
         }
@@ -696,7 +695,6 @@ pub extern "C" fn create_test_log_replay_phase() -> ProtoBytes {
         dedup_filter: FilterByKDF {
             function_id: FilterKernelFunctionId::AddRemoveDedup,
             state_ptr,
-            serialized_state: None,
         },
         project: SelectNode {
             columns: vec![
@@ -748,7 +746,6 @@ pub extern "C" fn create_test_declarative_plan() -> ProtoBytes {
         node: FilterByKDF {
             function_id: FilterKernelFunctionId::AddRemoveDedup,
             state_ptr,
-            serialized_state: None,
         },
     };
 

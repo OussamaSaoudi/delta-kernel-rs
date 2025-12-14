@@ -92,9 +92,6 @@ pub struct FilterByKDF {
     /// For local execution, this is a raw pointer to the state.
     /// Engine passes this through without interpreting it.
     pub state_ptr: u64,
-    /// Optional serialized state for distributed execution.
-    /// Engine explicitly calls kdf_serialize() to populate this when distributing.
-    pub serialized_state: Option<Vec<u8>>,
 }
 
 /// Query parquet file schema (footer read only).

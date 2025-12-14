@@ -145,14 +145,11 @@ impl DeclarativePlanExecutor {
         let FilterByKDF {
             function_id,
             state_ptr,
-            serialized_state,
         } = node;
 
-        // Get actual state pointer - either use provided or deserialize
+        // Get actual state pointer - use provided or create fresh state
         let actual_state_ptr = if state_ptr != 0 {
             state_ptr
-        } else if let Some(bytes) = serialized_state {
-            super::function_registry::filter_kdf_deserialize(function_id, &bytes)?
         } else {
             // Create fresh state if none provided
             super::function_registry::filter_kdf_create_state(function_id)?
@@ -744,7 +741,6 @@ mod tests {
             node: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr: 0,
-                serialized_state: None,
             },
         };
 
@@ -997,7 +993,6 @@ mod tests {
             node: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr: 0,
-                serialized_state: None,
             },
         };
 
@@ -1031,7 +1026,6 @@ mod tests {
             node: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr: 0,
-                serialized_state: None,
             },
         };
 
@@ -1092,7 +1086,6 @@ mod tests {
             node: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr: 0,
-                serialized_state: None,
             },
         };
 

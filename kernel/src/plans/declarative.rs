@@ -105,7 +105,6 @@ impl DeclarativePlanNode {
             node: FilterByKDF {
                 function_id,
                 state_ptr: 0,
-                serialized_state: None,
             },
         }
     }
@@ -117,7 +116,6 @@ impl DeclarativePlanNode {
             node: FilterByKDF {
                 function_id,
                 state_ptr,
-                serialized_state: None,
             },
         }
     }

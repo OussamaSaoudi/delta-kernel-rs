@@ -40,8 +40,7 @@ message FileListingNode {
 // KDFs contain Delta-specific logic that engines must use via kernel FFI.
 message FilterByKDF {
   FilterKernelFunctionId function_id = 1;  // Filter KDF type
-  uint64 state_ptr = 2;                    // Concrete type determined by function_id
-  optional bytes serialized_state = 3;     // For distribution (opt-in)
+  uint64 state_ptr = 2;                    // Raw pointer to KDF state
 }
 
 // Query parquet file schema (footer read only)

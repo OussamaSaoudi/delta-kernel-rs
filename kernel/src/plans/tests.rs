@@ -35,13 +35,11 @@ mod proto_roundtrip_tests {
         let filter = FilterByKDF {
             function_id: FilterKernelFunctionId::AddRemoveDedup,
             state_ptr,
-            serialized_state: None,
         };
 
         let proto_filter: proto::FilterByKDF = (&filter).into();
         assert_eq!(proto_filter.function_id, proto::FilterKernelFunctionId::AddRemoveDedup as i32);
         assert_eq!(proto_filter.state_ptr, state_ptr);
-        assert!(proto_filter.serialized_state.is_none());
         
         // Clean up
         filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
@@ -64,7 +62,6 @@ mod proto_roundtrip_tests {
             node: FilterByKDF {
                 function_id: FilterKernelFunctionId::AddRemoveDedup,
                 state_ptr,
-                serialized_state: None,
             },
         };
 
@@ -110,7 +107,6 @@ mod proto_roundtrip_tests {
             dedup_filter: FilterByKDF {
                 function_id: FilterKernelFunctionId::AddRemoveDedup,
                 state_ptr,
-                serialized_state: None,
             },
             project: SelectNode {
                 columns: vec![],
@@ -145,7 +141,6 @@ mod proto_roundtrip_tests {
             dedup_filter: FilterByKDF {
                 function_id: FilterKernelFunctionId::AddRemoveDedup,
                 state_ptr,
-                serialized_state: None,
             },
             project: SelectNode {
                 columns: vec![],
@@ -194,7 +189,6 @@ mod proto_roundtrip_tests {
             dedup_filter: FilterByKDF {
                 function_id: FilterKernelFunctionId::AddRemoveDedup,
                 state_ptr,
-                serialized_state: None,
             },
             project: SelectNode {
                 columns: vec![],
@@ -288,7 +282,6 @@ mod function_registry_tests {
             dedup_filter: FilterByKDF {
                 function_id: FilterKernelFunctionId::AddRemoveDedup,
                 state_ptr,
-                serialized_state: None,
             },
             project: SelectNode {
                 columns: vec![],
@@ -622,7 +615,6 @@ mod function_registry_tests {
             dedup_filter: FilterByKDF {
                 function_id: FilterKernelFunctionId::AddRemoveDedup,
                 state_ptr,
-                serialized_state: None,
             },
             project: SelectNode {
                 columns: vec![],
@@ -676,7 +668,6 @@ mod declarative_phase_tests {
             dedup_filter: FilterByKDF {
                 function_id: FilterKernelFunctionId::AddRemoveDedup,
                 state_ptr,
-                serialized_state: None,
             },
             project: SelectNode {
                 columns: vec![],
@@ -768,7 +759,6 @@ mod declarative_phase_tests {
             dedup_filter: FilterByKDF {
                 function_id: FilterKernelFunctionId::AddRemoveDedup,
                 state_ptr,
-                serialized_state: None,
             },
             project: SelectNode {
                 columns: vec![],
