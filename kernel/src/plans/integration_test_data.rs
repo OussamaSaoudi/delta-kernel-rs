@@ -37,7 +37,7 @@ fn create_commit_phase_bytes() -> Vec<u8> {
     ]));
 
     // Create state for dedup filter
-    let state_ptr = kdf_create_state(KernelFunctionId::AddRemoveDedup)
+    let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup)
         .expect("Failed to create AddRemoveDedup state");
 
     let commit_plan = CommitPhasePlan {
@@ -48,7 +48,7 @@ fn create_commit_phase_bytes() -> Vec<u8> {
         },
         data_skipping: None,
         dedup_filter: FilterByKDF {
-            function_id: KernelFunctionId::AddRemoveDedup,
+            function_id: FilterKernelFunctionId::AddRemoveDedup,
             state_ptr,
             serialized_state: None,
         },
@@ -78,7 +78,7 @@ fn create_declarative_plan_bytes() -> Vec<u8> {
     ]));
 
     // Create state for dedup filter
-    let state_ptr = kdf_create_state(KernelFunctionId::AddRemoveDedup)
+    let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup)
         .expect("Failed to create AddRemoveDedup state");
 
     // Build: Filter -> ParseJson -> Scan
@@ -100,7 +100,7 @@ fn create_declarative_plan_bytes() -> Vec<u8> {
     let filter = DeclarativePlanNode::FilterByKDF {
         child: Box::new(parse_json),
         node: FilterByKDF {
-            function_id: KernelFunctionId::AddRemoveDedup,
+            function_id: FilterKernelFunctionId::AddRemoveDedup,
             state_ptr,
             serialized_state: None,
         },

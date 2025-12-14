@@ -39,16 +39,16 @@ message FileListingNode {
 // Filter using kernel-defined function (KDF) (e.g., AddRemoveDedup)
 // KDFs contain Delta-specific logic that engines must use via kernel FFI.
 message FilterByKDF {
-  KernelFunctionId function_id = 1;
-  uint64 state_ptr = 2;                 // Concrete type determined by function_id
-  optional bytes serialized_state = 3;  // For distribution (opt-in)
+  FilterKernelFunctionId function_id = 1;  // Filter KDF type
+  uint64 state_ptr = 2;                    // Concrete type determined by function_id
+  optional bytes serialized_state = 3;     // For distribution (opt-in)
 }
 
 // Query parquet file schema (footer read only)
 // This is a leaf node (no children)
 message SchemaQueryNode {
   string file_path = 1;
-  KernelFunctionId function_id = 2;
+  SchemaReaderFunctionId function_id = 2;  // Schema Reader KDF type
   uint64 state_ptr = 3;
 }
 

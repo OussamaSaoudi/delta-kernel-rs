@@ -7,35 +7,64 @@ option java_outer_classname = "FunctionRegistryProtos";
 import "schema.proto";
 
 // =============================================================================
-// Kernel-Defined Functions
+// Kernel-Defined Functions (KDFs)
+// =============================================================================
+//
+// KDFs are categorized by their input/output signatures:
+// - Filter KDFs: (state_ptr, engineData, selection) -> BooleanArray
+// - Schema Reader KDFs: (state_ptr, schema) -> ()
+
+// =============================================================================
+// Filter KDFs
 // =============================================================================
 
-// Identifiers for kernel-defined functions
-// These are filters/transforms implemented in kernel-rs
-enum KernelFunctionId {
-  KERNEL_FUNCTION_UNSPECIFIED = 0;
+// Identifiers for Filter kernel-defined functions
+// These filters are implemented in kernel-rs and produce selection vectors
+enum FilterKernelFunctionId {
+  FILTER_FUNCTION_UNSPECIFIED = 0;
   
   // Deduplication filters
   ADD_REMOVE_DEDUP = 1;      // Dedup add/remove actions during commit log replay
   CHECKPOINT_DEDUP = 2;       // Dedup for checkpoint file processing
   
-  // Future functions can be added here
+  // Future filter functions can be added here
 }
+
+// =============================================================================
+// Schema Reader KDFs
+// =============================================================================
+
+// Identifiers for Schema Reader kernel-defined functions
+// These receive and store schema information (local use only)
+enum SchemaReaderFunctionId {
+  SCHEMA_READER_FUNCTION_UNSPECIFIED = 0;
+  
+  // Schema storage
+  SCHEMA_STORE = 1;           // Stores a schema reference for later retrieval
+  
+  // Future schema reader functions can be added here
+}
+
+// =============================================================================
+// Function Metadata
+// =============================================================================
 
 // Metadata about a kernel-defined function
 message KernelFunctionMetadata {
-  KernelFunctionId id = 1;
-  string name = 2;
-  string description = 3;
-  Schema input_schema = 4;    // Expected input columns
-  Schema output_schema = 5;   // Output columns (for transforms)
-  bool is_filter = 6;         // True if function produces selection vector
-  bool is_transform = 7;      // True if function transforms data
-  bool requires_state = 8;    // True if function needs cross-batch state
+  oneof function_id {
+    FilterKernelFunctionId filter_id = 1;
+    SchemaReaderFunctionId schema_reader_id = 2;
+  }
+  string name = 3;
+  string description = 4;
+  Schema input_schema = 5;    // Expected input columns
+  Schema output_schema = 6;   // Output columns (for transforms)
+  bool is_filter = 7;         // True if function produces selection vector
+  bool is_transform = 8;      // True if function transforms data
+  bool requires_state = 9;    // True if function needs cross-batch state
 }
 
 // Registry of all available kernel functions
 message FunctionRegistry {
   repeated KernelFunctionMetadata functions = 1;
 }
-

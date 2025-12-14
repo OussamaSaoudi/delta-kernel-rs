@@ -59,7 +59,7 @@ use crate::{DeltaResult, Error};
 
 use super::composite::*;
 use super::declarative::DeclarativePlanNode;
-use super::nodes::{FileType, FilterByKDF, KernelFunctionId, ScanNode, SelectNode};
+use super::nodes::{FileType, FilterByKDF, FilterFilterKernelFunctionId, ScanNode, SelectNode};
 use super::AsQueryPlan;
 
 // =============================================================================
@@ -450,12 +450,12 @@ impl LogReplayStateMachine {
                 // Extract KDF state based on function_id
                 if node.state_ptr != 0 {
                     match node.function_id {
-                        KernelFunctionId::AddRemoveDedup => {
+                        FilterKernelFunctionId::AddRemoveDedup => {
                             // The dedup state (HashSet) is still owned by the state_ptr
                             // We can access it via the KDF registry if needed
                             // For now, the state persists in the pointer
                         }
-                        KernelFunctionId::CheckpointDedup => {
+                        FilterKernelFunctionId::CheckpointDedup => {
                             // Similar handling for checkpoint dedup
                         }
                     }
@@ -504,7 +504,7 @@ impl LogReplayStateMachine {
         let schema = Arc::new(crate::schema::StructType::new_unchecked(vec![]));
         
         // Create dedup state
-        let dedup_state_ptr = super::kdf_create_state(KernelFunctionId::AddRemoveDedup)
+        let dedup_state_ptr = super::filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup)
             .expect("Failed to create AddRemoveDedup state");
 
         CommitPhasePlan {
@@ -515,7 +515,7 @@ impl LogReplayStateMachine {
             },
             data_skipping: None,
             dedup_filter: FilterByKDF {
-                function_id: KernelFunctionId::AddRemoveDedup,
+                function_id: FilterKernelFunctionId::AddRemoveDedup,
                 state_ptr: dedup_state_ptr,
                 serialized_state: None,
             },
@@ -546,7 +546,7 @@ impl LogReplayStateMachine {
         let schema = Arc::new(crate::schema::StructType::new_unchecked(vec![]));
         
         // Create dedup state for checkpoint
-        let dedup_state_ptr = super::kdf_create_state(KernelFunctionId::CheckpointDedup)
+        let dedup_state_ptr = super::filter_kdf_create_state(FilterKernelFunctionId::CheckpointDedup)
             .expect("Failed to create CheckpointDedup state");
 
         CheckpointLeafPlan {
@@ -556,7 +556,7 @@ impl LogReplayStateMachine {
                 schema: schema.clone(),
             },
             dedup_filter: Some(FilterByKDF {
-                function_id: KernelFunctionId::CheckpointDedup,
+                function_id: FilterKernelFunctionId::CheckpointDedup,
                 state_ptr: dedup_state_ptr,
                 serialized_state: None,
             }),
@@ -944,7 +944,7 @@ impl ScanBuildState {
         let log_root = table_root.join("_delta_log/")?;
         
         // Create dedup state for AddRemoveDedup filter
-        let dedup_state_ptr = super::function_registry::kdf_create_state(KernelFunctionId::AddRemoveDedup)?;
+        let dedup_state_ptr = super::function_registry::filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup)?;
         
         Ok(Self {
             table_root,
@@ -1020,7 +1020,7 @@ impl ScanStateMachine {
         commit_files: Vec<FileMeta>,
         checkpoint_files: Vec<FileMeta>,
     ) -> DeltaResult<Self> {
-        let dedup_state_ptr = super::function_registry::kdf_create_state(KernelFunctionId::AddRemoveDedup)?;
+        let dedup_state_ptr = super::function_registry::filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup)?;
         
         Ok(Self {
             phase: ScanPhase::Commit,
@@ -1120,7 +1120,7 @@ impl ScanStateMachine {
     fn extract_kdf_state_recursive(&mut self, plan: &DeclarativePlanNode) -> DeltaResult<()> {
         match plan {
             DeclarativePlanNode::FilterByKDF { child, node } => {
-                if node.state_ptr != 0 && node.function_id == KernelFunctionId::AddRemoveDedup {
+                if node.state_ptr != 0 && node.function_id == FilterKernelFunctionId::AddRemoveDedup {
                     // Update our stored dedup state pointer
                     self.state.dedup_state_ptr = node.state_ptr;
                 }
@@ -1176,7 +1176,7 @@ impl ScanStateMachine {
         let filter = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
             node: FilterByKDF {
-                function_id: KernelFunctionId::AddRemoveDedup,
+                function_id: FilterKernelFunctionId::AddRemoveDedup,
                 state_ptr: self.state.dedup_state_ptr,
                 serialized_state: None,
             },
@@ -1227,8 +1227,8 @@ impl ScanStateMachine {
         ]));
 
         // Create dedup state for checkpoint
-        let checkpoint_dedup_state = super::function_registry::kdf_create_state(
-            KernelFunctionId::CheckpointDedup
+        let checkpoint_dedup_state = super::function_registry::filter_kdf_create_state(
+            FilterKernelFunctionId::CheckpointDedup
         )?;
 
         let scan = DeclarativePlanNode::Scan(ScanNode {
@@ -1241,7 +1241,7 @@ impl ScanStateMachine {
         let filter = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
             node: FilterByKDF {
-                function_id: KernelFunctionId::CheckpointDedup,
+                function_id: FilterKernelFunctionId::CheckpointDedup,
                 state_ptr: checkpoint_dedup_state,
                 serialized_state: None,
             },
@@ -1487,7 +1487,7 @@ impl LogReplayPhase {
     /// Extract KDF state from the executed plan.
     ///
     /// Walks the plan tree to find FilterByKDF with state_ptr and extracts it.
-    fn extract_kdf_state(&self, plan: &DeclarativePlanNode) -> DeltaResult<Option<(KernelFunctionId, u64)>> {
+    fn extract_kdf_state(&self, plan: &DeclarativePlanNode) -> DeltaResult<Option<(FilterKernelFunctionId, u64)>> {
         // Walk the plan tree to find FilterByKDF nodes with state
         match plan {
             DeclarativePlanNode::FilterByKDF { child: _, node } => {
@@ -1510,7 +1510,7 @@ impl LogReplayPhase {
     }
 
     /// Generate the next phase based on current state and extracted KDF state.
-    fn generate_next_phase(self, _updated_state: Option<(KernelFunctionId, u64)>) -> DeltaResult<Self> {
+    fn generate_next_phase(self, _updated_state: Option<(FilterKernelFunctionId, u64)>) -> DeltaResult<Self> {
         match self {
             Self::Commit(_) => {
                 // After commit phase, move to checkpoint manifest or leaf

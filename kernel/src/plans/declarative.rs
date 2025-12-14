@@ -99,7 +99,7 @@ impl DeclarativePlanNode {
     }
 
     /// Add a kernel-defined function (KDF) filter to this plan.
-    pub fn filter_by_kdf(self, function_id: KernelFunctionId) -> Self {
+    pub fn filter_by_kdf(self, function_id: FilterKernelFunctionId) -> Self {
         Self::FilterByKDF {
             child: Box::new(self),
             node: FilterByKDF {
@@ -111,7 +111,7 @@ impl DeclarativePlanNode {
     }
 
     /// Add a kernel-defined function (KDF) filter with state pointer.
-    pub fn filter_by_kdf_with_state(self, function_id: KernelFunctionId, state_ptr: u64) -> Self {
+    pub fn filter_by_kdf_with_state(self, function_id: FilterKernelFunctionId, state_ptr: u64) -> Self {
         Self::FilterByKDF {
             child: Box::new(self),
             node: FilterByKDF {

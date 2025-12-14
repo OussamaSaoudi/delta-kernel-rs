@@ -9,7 +9,7 @@
 
 use delta_kernel::plans::{
     AdvanceResult, AnyStateMachine, AsQueryPlan, DeclarativePlanNode, FileType, FilterByKDF,
-    KernelFunctionId, LogReplayPhase, LogReplayStateMachine, ScanNode, SelectNode,
+    FilterFilterKernelFunctionId, LogReplayPhase, LogReplayStateMachine, ScanNode, SelectNode,
     SnapshotBuildPhase, StateMachine,
 };
 use delta_kernel::proto_generated as proto;
@@ -414,8 +414,8 @@ use delta_kernel::plans::function_registry;
 /// New state_ptr for the created state. Returns 0 on error.
 #[no_mangle]
 pub unsafe extern "C" fn kdf_create(function_id: i32) -> u64 {
-    match KernelFunctionId::try_from(function_id)
-        .and_then(function_registry::kdf_create_state)
+    match FilterKernelFunctionId::try_from(function_id)
+        .and_then(function_registry::filter_kdf_create_state)
     {
         Ok(state_ptr) => state_ptr,
         Err(_) => 0,
@@ -425,8 +425,8 @@ pub unsafe extern "C" fn kdf_create(function_id: i32) -> u64 {
 /// Serialize KDF state for distribution.
 #[no_mangle]
 pub unsafe extern "C" fn kdf_serialize(function_id: i32, state_ptr: u64) -> ProtoBytes {
-    match KernelFunctionId::try_from(function_id)
-        .and_then(|fid| function_registry::kdf_serialize(fid, state_ptr))
+    match FilterKernelFunctionId::try_from(function_id)
+        .and_then(|fid| function_registry::filter_kdf_serialize(fid, state_ptr))
     {
         Ok(bytes) => ProtoBytes::from_vec(bytes),
         Err(_) => ProtoBytes::empty(),
@@ -447,8 +447,8 @@ pub unsafe extern "C" fn kdf_deserialize(
     }
 
     let bytes = unsafe { std::slice::from_raw_parts(bytes_ptr, bytes_len) };
-    match KernelFunctionId::try_from(function_id)
-        .and_then(|fid| function_registry::kdf_deserialize(fid, bytes))
+    match FilterKernelFunctionId::try_from(function_id)
+        .and_then(|fid| function_registry::filter_kdf_deserialize(fid, bytes))
     {
         Ok(state_ptr) => state_ptr,
         Err(_) => 0,
@@ -458,8 +458,8 @@ pub unsafe extern "C" fn kdf_deserialize(
 /// Free KDF state.
 #[no_mangle]
 pub unsafe extern "C" fn kdf_free(function_id: i32, state_ptr: u64) {
-    if let Ok(fid) = KernelFunctionId::try_from(function_id) {
-        function_registry::kdf_free(fid, state_ptr);
+    if let Ok(fid) = FilterKernelFunctionId::try_from(function_id) {
+        function_registry::filter_kdf_free(fid, state_ptr);
     }
 }
 
@@ -469,7 +469,7 @@ pub unsafe extern "C" fn kdf_free(function_id: i32, state_ptr: u64) {
 /// their memory addresses. Rust reads inputs and writes output via pointers.
 ///
 /// # Arguments
-/// - `function_id`: KernelFunctionId enum value
+/// - `function_id`: FilterKernelFunctionId enum value
 /// - `state_ptr`: Pointer to KDF state (from kdf_create or kdf_deserialize)
 /// - `input_batch_ptr`: Pointer to FFI_ArrowArray for input batch
 /// - `input_schema_ptr`: Pointer to FFI_ArrowSchema for input batch schema
@@ -545,7 +545,7 @@ fn kdf_apply_impl(
     use delta_kernel::arrow::ffi::{self, FFI_ArrowArray, FFI_ArrowSchema};
     use delta_kernel::engine::arrow_data::ArrowEngineData;
 
-    let function_id = KernelFunctionId::try_from(function_id)?;
+    let function_id = FilterKernelFunctionId::try_from(function_id)?;
 
     // Reinterpret pointers as Arrow FFI structs
     let input_batch_ptr = input_batch_ptr as *mut FFI_ArrowArray;
@@ -641,7 +641,7 @@ fn convert_proto_to_native_plan(
             Ok(DeclarativePlanNode::FilterByKDF {
                 child: Box::new(child_plan),
                 node: FilterByKDF {
-                    function_id: KernelFunctionId::try_from(filter_node.function_id)?,
+                    function_id: FilterKernelFunctionId::try_from(filter_node.function_id)?,
                     state_ptr: filter_node.state_ptr,
                     serialized_state: filter_node.serialized_state.clone(),
                 },
@@ -683,7 +683,7 @@ pub extern "C" fn create_test_log_replay_phase() -> ProtoBytes {
         StructField::new("size", DataType::LONG, true),
     ]));
 
-    let state_ptr = function_registry::kdf_create_state(KernelFunctionId::AddRemoveDedup)
+    let state_ptr = function_registry::filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup)
         .expect("Failed to create AddRemoveDedup state");
 
     let commit_plan = CommitPhasePlan {
@@ -694,7 +694,7 @@ pub extern "C" fn create_test_log_replay_phase() -> ProtoBytes {
         },
         data_skipping: None,
         dedup_filter: FilterByKDF {
-            function_id: KernelFunctionId::AddRemoveDedup,
+            function_id: FilterKernelFunctionId::AddRemoveDedup,
             state_ptr,
             serialized_state: None,
         },
@@ -725,7 +725,7 @@ pub extern "C" fn create_test_declarative_plan() -> ProtoBytes {
         StructField::new("parsed", DataType::STRING, true),
     ]));
 
-    let state_ptr = function_registry::kdf_create_state(KernelFunctionId::AddRemoveDedup)
+    let state_ptr = function_registry::filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup)
         .expect("Failed to create AddRemoveDedup state");
 
     let scan = DeclarativePlanNode::Scan(ScanNode {
@@ -746,7 +746,7 @@ pub extern "C" fn create_test_declarative_plan() -> ProtoBytes {
     let filter = DeclarativePlanNode::FilterByKDF {
         child: Box::new(parse_json),
         node: FilterByKDF {
-            function_id: KernelFunctionId::AddRemoveDedup,
+            function_id: FilterKernelFunctionId::AddRemoveDedup,
             state_ptr,
             serialized_state: None,
         },

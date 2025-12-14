@@ -39,26 +39,49 @@ impl TryFrom<i32> for FileType {
 }
 
 // =============================================================================
-// KernelFunctionId Conversion
+// FilterKernelFunctionId Conversion
 // =============================================================================
 
-impl From<KernelFunctionId> for i32 {
-    fn from(id: KernelFunctionId) -> i32 {
+impl From<FilterKernelFunctionId> for i32 {
+    fn from(id: FilterKernelFunctionId) -> i32 {
         match id {
-            KernelFunctionId::AddRemoveDedup => proto::KernelFunctionId::AddRemoveDedup as i32,
-            KernelFunctionId::CheckpointDedup => proto::KernelFunctionId::CheckpointDedup as i32,
+            FilterKernelFunctionId::AddRemoveDedup => proto::FilterKernelFunctionId::AddRemoveDedup as i32,
+            FilterKernelFunctionId::CheckpointDedup => proto::FilterKernelFunctionId::CheckpointDedup as i32,
         }
     }
 }
 
-impl TryFrom<i32> for KernelFunctionId {
+impl TryFrom<i32> for FilterKernelFunctionId {
     type Error = Error;
 
     fn try_from(value: i32) -> DeltaResult<Self> {
-        match proto::KernelFunctionId::try_from(value) {
-            Ok(proto::KernelFunctionId::AddRemoveDedup) => Ok(KernelFunctionId::AddRemoveDedup),
-            Ok(proto::KernelFunctionId::CheckpointDedup) => Ok(KernelFunctionId::CheckpointDedup),
-            _ => Err(Error::generic(format!("Unknown kernel function id: {}", value))),
+        match proto::FilterKernelFunctionId::try_from(value) {
+            Ok(proto::FilterKernelFunctionId::AddRemoveDedup) => Ok(FilterKernelFunctionId::AddRemoveDedup),
+            Ok(proto::FilterKernelFunctionId::CheckpointDedup) => Ok(FilterKernelFunctionId::CheckpointDedup),
+            _ => Err(Error::generic(format!("Unknown filter kernel function id: {}", value))),
+        }
+    }
+}
+
+// =============================================================================
+// SchemaReaderFunctionId Conversion
+// =============================================================================
+
+impl From<SchemaReaderFunctionId> for i32 {
+    fn from(id: SchemaReaderFunctionId) -> i32 {
+        match id {
+            SchemaReaderFunctionId::SchemaStore => proto::SchemaReaderFunctionId::SchemaStore as i32,
+        }
+    }
+}
+
+impl TryFrom<i32> for SchemaReaderFunctionId {
+    type Error = Error;
+
+    fn try_from(value: i32) -> DeltaResult<Self> {
+        match proto::SchemaReaderFunctionId::try_from(value) {
+            Ok(proto::SchemaReaderFunctionId::SchemaStore) => Ok(SchemaReaderFunctionId::SchemaStore),
+            _ => Err(Error::generic(format!("Unknown schema reader function id: {}", value))),
         }
     }
 }

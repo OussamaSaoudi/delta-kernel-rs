@@ -9,18 +9,37 @@ use crate::expressions::Expression;
 use crate::schema::SchemaRef;
 use crate::FileMeta;
 
-/// Identifier for kernel-defined functions.
+// =============================================================================
+// Kernel-Defined Function (KDF) Type System
+// =============================================================================
+//
+// KDFs are categorized by their input/output signatures:
+// - Filters: (state_ptr, engineData, selection) -> BooleanArray
+// - Schema Readers: (state_ptr, schema) -> ()
+// - (Future: Sinks/Consumers: (state_ptr, engineData) -> ())
+
+/// Filter KDFs: take engine data and return a boolean selection vector.
 ///
-/// These are filters/transforms implemented in kernel-rs that engines
-/// must use (they contain Delta-specific logic).
+/// These are filters implemented in kernel-rs that engines must use because they
+/// contain Delta-specific logic (e.g., deduplication, stats skipping).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum KernelFunctionId {
+pub enum FilterKernelFunctionId {
     /// Deduplicates add/remove file actions during commit log replay.
     /// Tracks seen file keys and filters out duplicates.
     AddRemoveDedup,
     /// Deduplicates file actions when reading checkpoint files.
     /// Uses tombstone set built from commit files.
     CheckpointDedup,
+}
+
+/// Schema Reader KDFs: receive and store schema information.
+///
+/// These are used to capture schema from parquet file footers or other sources.
+/// Simpler than Filter KDFs - local use only, no distribution/serialization needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SchemaReaderFunctionId {
+    /// Stores a schema reference for later retrieval.
+    SchemaStore,
 }
 
 // =============================================================================
@@ -67,8 +86,8 @@ pub struct FileListingNode {
 /// The function produces a selection vector; engines call the kernel FFI to apply it.
 #[derive(Debug, Clone)]
 pub struct FilterByKDF {
-    /// Which kernel function to apply
-    pub function_id: KernelFunctionId,
+    /// Which kernel filter function to apply
+    pub function_id: FilterKernelFunctionId,
     /// Pointer to the concrete state type (determined by function_id).
     /// For local execution, this is a raw pointer to the state.
     /// Engine passes this through without interpreting it.
@@ -85,9 +104,9 @@ pub struct FilterByKDF {
 pub struct SchemaQueryNode {
     /// Path to the parquet file to query
     pub file_path: String,
-
-    pub function_id: KernelFunctionId,
-
+    /// Which schema reader function to use for storing the result
+    pub function_id: SchemaReaderFunctionId,
+    /// Pointer to the schema reader state
     pub state_ptr: u64,
 }
 

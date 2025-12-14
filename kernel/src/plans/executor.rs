@@ -23,7 +23,7 @@ use crate::schema::DataType;
 use crate::{DeltaResult, Engine, EngineData, Error};
 
 use super::declarative::DeclarativePlanNode;
-use super::function_registry::kdf_apply;
+use super::function_registry::filter_kdf_apply;
 use super::nodes::*;
 
 /// Filtered data with selection vector.
@@ -152,10 +152,10 @@ impl DeclarativePlanExecutor {
         let actual_state_ptr = if state_ptr != 0 {
             state_ptr
         } else if let Some(bytes) = serialized_state {
-            super::function_registry::kdf_deserialize(function_id, &bytes)?
+            super::function_registry::filter_kdf_deserialize(function_id, &bytes)?
         } else {
             // Create fresh state if none provided
-            super::function_registry::kdf_create_state(function_id)?
+            super::function_registry::filter_kdf_create_state(function_id)?
         };
 
         let child_iter = self.execute(child)?;
@@ -169,8 +169,8 @@ impl DeclarativePlanExecutor {
             // Convert selection vector to BooleanArray
             let selection_array = BooleanArray::from(selection_vector);
 
-            // Apply the KDF
-            let new_selection = kdf_apply(
+            // Apply the Filter KDF
+            let new_selection = filter_kdf_apply(
                 function_id,
                 actual_state_ptr,
                 engine_data.as_ref(),
