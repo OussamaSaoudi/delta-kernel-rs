@@ -9,7 +9,6 @@ use crate::proto_generated as proto;
 use crate::schema::SchemaRef;
 use crate::{DeltaResult, Error};
 
-use super::kdf_state::{FilterKdfState, SchemaReaderState};
 use super::nodes::*;
 use super::declarative::DeclarativePlanNode;
 use super::composite::*;

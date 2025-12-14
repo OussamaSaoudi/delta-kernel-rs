@@ -19,10 +19,7 @@ use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, FilterKdfState
 // - Filters: Use typed state in FilterKdfState enum (see kdf_state.rs)
 // - Schema Readers: (state_ptr, schema) -> ()
 // - (Future: Sinks/Consumers: (state_ptr, engineData) -> ())
-//
-// Filter KDFs now use strongly typed state via the FilterKdfState enum.
-// The enum variant IS the function identity - no separate function_id needed.
-// See kdf_state.rs for the typed state implementation.
+
 
 /// Schema Reader KDFs: receive and store schema information.
 ///

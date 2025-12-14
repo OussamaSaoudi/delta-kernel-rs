@@ -94,6 +94,10 @@ pub mod expressions;
 mod log_compaction;
 mod log_path;
 pub mod metrics;
+#[cfg(feature = "arrow")]
+pub mod plans;
+#[cfg(feature = "arrow")]
+pub mod proto_generated;
 pub mod scan;
 pub mod schema;
 pub mod snapshot;

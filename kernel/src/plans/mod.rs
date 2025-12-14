@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! Plan and state machine types for Delta Kernel operations.
 //!
 //! This module provides a layered architecture with dual representations:
