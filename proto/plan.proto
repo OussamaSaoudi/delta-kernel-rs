@@ -1,0 +1,129 @@
+syntax = "proto3";
+package delta.kernel;
+
+option java_package = "kernel.proto";
+option java_outer_classname = "PlanProtos";
+
+import "schema.proto";
+import "function_registry.proto";
+
+// =============================================================================
+// SIMPLIFIED PLAN NODES (9 types)
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Leaf Nodes (no children)
+// -----------------------------------------------------------------------------
+
+// Read files from storage
+message ScanNode {
+  enum FileType {
+    FILE_TYPE_UNSPECIFIED = 0;
+    PARQUET = 1;
+    JSON = 2;
+  }
+  FileType file_type = 1;
+  repeated string files = 2;
+  Schema schema = 3;
+}
+
+// List files from storage path
+message FileListingNode {
+  string path = 1;  // Directory URL or file path to start after
+}
+
+// Extensibility point for custom operations
+message CustomNode {
+  string node_type = 1;
+  bytes payload = 2;
+}
+
+// -----------------------------------------------------------------------------
+// Unary Node Data (attached to child in tree structure)
+// -----------------------------------------------------------------------------
+
+// Filter using kernel-defined function (e.g., AddRemoveDedup)
+message FilterNode {
+  KernelFunctionId function_id = 1;
+  uint64 state_ptr = 2;                 // Concrete type determined by function_id
+  optional bytes serialized_state = 3;  // For distribution (opt-in)
+}
+
+// Query parquet file schema (footer read only)
+message SchemaQueryNode {
+  string file_path = 1;
+}
+
+// Filter using predicate expression
+message FilterByExpressionNode {
+  Expression predicate = 1;
+}
+
+// Project/transform columns
+message SelectNode {
+  repeated Expression columns = 1;
+  Schema output_schema = 2;
+}
+
+// Parse JSON column into structured data
+message ParseJsonNode {
+  string json_column = 1;
+  Schema target_schema = 2;
+  string output_column = 3;
+}
+
+// Extract first non-null value for columns
+message FirstNonNullNode {
+  repeated string columns = 1;
+}
+
+// =============================================================================
+// DECLARATIVE PLAN NODE (Tree Structure)
+// =============================================================================
+
+// Recursive tree structure for runtime interpretation
+message DeclarativePlanNode {
+  oneof node {
+    // Leaf nodes (no children)
+    ScanNode scan = 1;
+    FileListingNode file_listing = 2;
+    CustomNode custom = 3;
+    
+    // Unary nodes (one child)
+    FilterPlan filter = 10;
+    FilterByExpressionPlan filter_by_expression = 11;
+    SelectPlan select = 12;
+    ParseJsonPlan parse_json = 13;
+    FirstNonNullPlan first_non_null = 14;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Unary Plan Wrappers (child + node data)
+// -----------------------------------------------------------------------------
+
+message FilterPlan {
+  DeclarativePlanNode child = 1;
+  FilterNode node = 2;
+}
+
+message FilterByExpressionPlan {
+  DeclarativePlanNode child = 1;
+  FilterByExpressionNode node = 2;
+}
+
+message SelectPlan {
+  DeclarativePlanNode child = 1;
+  SelectNode node = 2;
+}
+
+message ParseJsonPlan {
+  DeclarativePlanNode child = 1;
+  ParseJsonNode node = 2;
+}
+
+message FirstNonNullPlan {
+  DeclarativePlanNode child = 1;
+  FirstNonNullNode node = 2;
+}
+
