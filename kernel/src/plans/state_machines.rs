@@ -59,7 +59,7 @@ use crate::{DeltaResult, Error};
 
 use super::composite::*;
 use super::declarative::DeclarativePlanNode;
-use super::nodes::{FileType, FilterNode, KernelFunctionId, ScanNode, SelectNode};
+use super::nodes::{FileType, FilterByKDF, KernelFunctionId, ScanNode, SelectNode};
 use super::AsQueryPlan;
 
 // =============================================================================
@@ -126,7 +126,7 @@ pub trait StateMachine {
 
     /// Advance with the result of plan execution.
     ///
-    /// The executed plan contains mutated KDF state (via state_ptr in FilterNode).
+    /// The executed plan contains mutated KDF state (via state_ptr in FilterByKDF).
     /// The state machine extracts this state and transitions to the next phase.
     ///
     /// # Returns
@@ -362,7 +362,7 @@ impl LogReplayStateMachine {
     /// Advance the state machine with the result of plan execution.
     ///
     /// The engine calls this after executing the plan returned by `get_plan()`.
-    /// The executed plan is passed back containing mutated KDF state (via state_ptr in FilterNode).
+    /// The executed plan is passed back containing mutated KDF state (via state_ptr in FilterByKDF).
     /// The kernel extracts the updated state and transitions to the next phase.
     ///
     /// # Arguments
@@ -437,7 +437,7 @@ impl LogReplayStateMachine {
 
     /// Extract KDF state from the executed plan and update internal state.
     ///
-    /// Walks the plan tree to find FilterNodes with KDF state and extracts
+    /// Walks the plan tree to find FilterByKDF nodes with KDF state and extracts
     /// the mutated state back into the state machine's internal state.
     fn extract_and_update_kdf_state(&mut self, plan: &DeclarativePlanNode) -> DeltaResult<()> {
         // Walk the plan tree to find Filter nodes with state
@@ -446,7 +446,7 @@ impl LogReplayStateMachine {
 
     fn extract_kdf_state_recursive(&mut self, plan: &DeclarativePlanNode) -> DeltaResult<()> {
         match plan {
-            DeclarativePlanNode::Filter { child, node } => {
+            DeclarativePlanNode::FilterByKDF { child, node } => {
                 // Extract KDF state based on function_id
                 if node.state_ptr != 0 {
                     match node.function_id {
@@ -474,9 +474,7 @@ impl LogReplayStateMachine {
                 self.extract_kdf_state_recursive(child)
             }
             // Leaf nodes have no KDF state
-            DeclarativePlanNode::Scan(_)
-            | DeclarativePlanNode::FileListing(_)
-            | DeclarativePlanNode::Custom(_) => Ok(()),
+            DeclarativePlanNode::Scan(_) | DeclarativePlanNode::FileListing(_) => Ok(()),
         }
     }
 
@@ -519,7 +517,7 @@ impl LogReplayStateMachine {
                 schema: schema.clone(),
             },
             data_skipping: None,
-            dedup_filter: FilterNode {
+            dedup_filter: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr: dedup_state_ptr,
                 serialized_state: None,
@@ -560,7 +558,7 @@ impl LogReplayStateMachine {
                 files: state.checkpoint_files.clone(),
                 schema: schema.clone(),
             },
-            dedup_filter: Some(FilterNode {
+            dedup_filter: Some(FilterByKDF {
                 function_id: KernelFunctionId::CheckpointDedup,
                 state_ptr: dedup_state_ptr,
                 serialized_state: None,
@@ -1124,7 +1122,7 @@ impl ScanStateMachine {
 
     fn extract_kdf_state_recursive(&mut self, plan: &DeclarativePlanNode) -> DeltaResult<()> {
         match plan {
-            DeclarativePlanNode::Filter { child, node } => {
+            DeclarativePlanNode::FilterByKDF { child, node } => {
                 if node.state_ptr != 0 && node.function_id == KernelFunctionId::AddRemoveDedup {
                     // Update our stored dedup state pointer
                     self.state.dedup_state_ptr = node.state_ptr;
@@ -1137,9 +1135,7 @@ impl ScanStateMachine {
             | DeclarativePlanNode::FirstNonNull { child, .. } => {
                 self.extract_kdf_state_recursive(child)
             }
-            DeclarativePlanNode::Scan(_)
-            | DeclarativePlanNode::FileListing(_)
-            | DeclarativePlanNode::Custom(_) => Ok(()),
+            DeclarativePlanNode::Scan(_) | DeclarativePlanNode::FileListing(_) => Ok(()),
         }
     }
 
@@ -1179,10 +1175,10 @@ impl ScanStateMachine {
             schema: schema.clone(),
         });
 
-        // Add dedup filter
-        let filter = DeclarativePlanNode::Filter {
+        // Add dedup KDF filter
+        let filter = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
-            node: FilterNode {
+            node: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr: self.state.dedup_state_ptr,
                 serialized_state: None,
@@ -1244,10 +1240,10 @@ impl ScanStateMachine {
             schema: schema.clone(),
         });
 
-        // Add checkpoint dedup filter
-        let filter = DeclarativePlanNode::Filter {
+        // Add checkpoint dedup KDF filter
+        let filter = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
-            node: FilterNode {
+            node: FilterByKDF {
                 function_id: KernelFunctionId::CheckpointDedup,
                 state_ptr: checkpoint_dedup_state,
                 serialized_state: None,
@@ -1473,7 +1469,7 @@ impl LogReplayPhase {
     /// Advance the state machine with the result of plan execution.
     ///
     /// Takes `DeltaResult<DeclarativePlanNode>` where the plan contains updated state
-    /// (e.g., dedup state in FilterNode.state_ptr). On success, extracts state from
+    /// (e.g., dedup state in FilterByKDF.state_ptr). On success, extracts state from
     /// the plan and generates the next phase. On error, propagates the error.
     ///
     /// # Arguments
@@ -1493,11 +1489,11 @@ impl LogReplayPhase {
 
     /// Extract KDF state from the executed plan.
     ///
-    /// Walks the plan tree to find FilterNode with state_ptr and extracts it.
+    /// Walks the plan tree to find FilterByKDF with state_ptr and extracts it.
     fn extract_kdf_state(&self, plan: &DeclarativePlanNode) -> DeltaResult<Option<(KernelFunctionId, u64)>> {
-        // Walk the plan tree to find Filter nodes with state
+        // Walk the plan tree to find FilterByKDF nodes with state
         match plan {
-            DeclarativePlanNode::Filter { child: _, node } => {
+            DeclarativePlanNode::FilterByKDF { child: _, node } => {
                 if node.state_ptr != 0 {
                     Ok(Some((node.function_id, node.state_ptr)))
                 } else {
@@ -1512,9 +1508,7 @@ impl LogReplayPhase {
                 self.extract_kdf_state(child)
             }
             // Leaf nodes have no KDF state
-            DeclarativePlanNode::Scan(_)
-            | DeclarativePlanNode::FileListing(_)
-            | DeclarativePlanNode::Custom(_) => Ok(None),
+            DeclarativePlanNode::Scan(_) | DeclarativePlanNode::FileListing(_) => Ok(None),
         }
     }
 

@@ -21,7 +21,7 @@ message DataSkippingPlan {
 message CommitPhasePlan {
   ScanNode scan = 1;                              // Scan commit JSON files
   optional DataSkippingPlan data_skipping = 2;   // Optional stats-based filtering
-  FilterNode dedup_filter = 3;                    // AddRemoveDedup filter
+  FilterByKDF dedup_filter = 3;                   // AddRemoveDedup KDF filter
   SelectNode project = 4;                         // Project to output schema
 }
 
@@ -34,7 +34,7 @@ message CheckpointManifestPlan {
 // Plan for reading checkpoint leaf files
 message CheckpointLeafPlan {
   ScanNode scan = 1;                      // Scan checkpoint parquet files
-  optional FilterNode dedup_filter = 2;   // Optional dedup for checkpoint
+  optional FilterByKDF dedup_filter = 2;  // Optional dedup KDF for checkpoint
   SelectNode project = 3;                 // Project to output schema
 }
 

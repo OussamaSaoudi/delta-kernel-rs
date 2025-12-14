@@ -32,13 +32,13 @@ mod proto_roundtrip_tests {
     #[test]
     fn test_filter_node_to_proto() {
         let state_ptr = kdf_create_state(KernelFunctionId::AddRemoveDedup).unwrap();
-        let filter = FilterNode {
+        let filter = FilterByKDF {
             function_id: KernelFunctionId::AddRemoveDedup,
             state_ptr,
             serialized_state: None,
         };
 
-        let proto_filter: proto::FilterNode = (&filter).into();
+        let proto_filter: proto::FilterByKDF = (&filter).into();
         assert_eq!(proto_filter.function_id, proto::KernelFunctionId::AddRemoveDedup as i32);
         assert_eq!(proto_filter.state_ptr, state_ptr);
         assert!(proto_filter.serialized_state.is_none());
@@ -59,9 +59,9 @@ mod proto_roundtrip_tests {
             schema: test_schema(),
         });
 
-        let plan = DeclarativePlanNode::Filter {
+        let plan = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
-            node: FilterNode {
+            node: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr,
                 serialized_state: None,
@@ -82,7 +82,7 @@ mod proto_roundtrip_tests {
         // Verify structure
         assert!(decoded.node.is_some());
         match decoded.node.unwrap() {
-            proto::declarative_plan_node::Node::Filter(filter_plan) => {
+            proto::declarative_plan_node::Node::FilterByKdf(filter_plan) => {
                 assert!(filter_plan.child.is_some());
                 assert!(filter_plan.node.is_some());
                 let filter_node = filter_plan.node.unwrap();
@@ -107,7 +107,7 @@ mod proto_roundtrip_tests {
                 schema: test_schema(),
             },
             data_skipping: None,
-            dedup_filter: FilterNode {
+            dedup_filter: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr,
                 serialized_state: None,
@@ -142,7 +142,7 @@ mod proto_roundtrip_tests {
                 schema: test_schema(),
             },
             data_skipping: None,
-            dedup_filter: FilterNode {
+            dedup_filter: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr,
                 serialized_state: None,
@@ -191,7 +191,7 @@ mod proto_roundtrip_tests {
                 schema: test_schema(),
             },
             data_skipping: None,
-            dedup_filter: FilterNode {
+            dedup_filter: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr,
                 serialized_state: None,
@@ -209,7 +209,7 @@ mod proto_roundtrip_tests {
         match tree {
             DeclarativePlanNode::Select { child, .. } => {
                 match *child {
-                    DeclarativePlanNode::Filter { child: inner, node } => {
+                    DeclarativePlanNode::FilterByKDF { child: inner, node } => {
                         assert_eq!(node.function_id, KernelFunctionId::AddRemoveDedup);
                         assert_eq!(node.state_ptr, state_ptr);
                         match *inner {
@@ -287,7 +287,7 @@ mod function_registry_tests {
                 schema: std::sync::Arc::new(crate::schema::StructType::new_unchecked(vec![])),
             },
             data_skipping: None,
-            dedup_filter: FilterNode {
+            dedup_filter: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr,
                 serialized_state: None,
@@ -621,7 +621,7 @@ mod function_registry_tests {
                 schema: std::sync::Arc::new(crate::schema::StructType::new_unchecked(vec![])),
             },
             data_skipping: None,
-            dedup_filter: FilterNode {
+            dedup_filter: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr,
                 serialized_state: None,
@@ -675,7 +675,7 @@ mod declarative_phase_tests {
                 schema: test_schema(),
             },
             data_skipping: None,
-            dedup_filter: FilterNode {
+            dedup_filter: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr,
                 serialized_state: None,
@@ -767,7 +767,7 @@ mod declarative_phase_tests {
                 schema: test_schema(),
             },
             data_skipping: None,
-            dedup_filter: FilterNode {
+            dedup_filter: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr,
                 serialized_state: None,

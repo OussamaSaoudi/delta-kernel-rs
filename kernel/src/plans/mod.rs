@@ -4,7 +4,7 @@
 //!
 //! ## Plans
 //!
-//! 1. **Individual Nodes** (`nodes.rs`) - Basic building blocks like `ScanNode`, `FilterNode`
+//! 1. **Individual Nodes** (`nodes.rs`) - Basic building blocks like `ScanNode`, `FilterByKDF`
 //! 2. **Composite Plans** (`composite.rs`) - Typed operation plans like `CommitPhasePlan`
 //! 3. **Declarative Plan** (`declarative.rs`) - Tree structure for runtime interpretation
 //! 4. **Proto Conversion** (`proto_convert.rs`) - Convert to/from protobuf types

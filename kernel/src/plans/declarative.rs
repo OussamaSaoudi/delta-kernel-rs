@@ -36,18 +36,15 @@ pub enum DeclarativePlanNode {
     
     /// List files from storage path
     FileListing(FileListingNode),
-    
-    /// Custom/extensible operation
-    Custom(CustomNode),
 
     // =========================================================================
     // Unary Nodes (one child)
     // =========================================================================
     
-    /// Filter using kernel-defined function
-    Filter {
+    /// Filter using kernel-defined function (KDF)
+    FilterByKDF {
         child: Box<DeclarativePlanNode>,
-        node: FilterNode,
+        node: FilterByKDF,
     },
     
     /// Filter using predicate expression
@@ -98,11 +95,11 @@ impl DeclarativePlanNode {
         })
     }
 
-    /// Add a kernel-defined filter to this plan.
-    pub fn filter(self, function_id: KernelFunctionId) -> Self {
-        Self::Filter {
+    /// Add a kernel-defined function (KDF) filter to this plan.
+    pub fn filter_by_kdf(self, function_id: KernelFunctionId) -> Self {
+        Self::FilterByKDF {
             child: Box::new(self),
-            node: FilterNode {
+            node: FilterByKDF {
                 function_id,
                 state_ptr: 0,
                 serialized_state: None,
@@ -110,11 +107,11 @@ impl DeclarativePlanNode {
         }
     }
 
-    /// Add a kernel-defined filter with state pointer.
-    pub fn filter_with_state(self, function_id: KernelFunctionId, state_ptr: u64) -> Self {
-        Self::Filter {
+    /// Add a kernel-defined function (KDF) filter with state pointer.
+    pub fn filter_by_kdf_with_state(self, function_id: KernelFunctionId, state_ptr: u64) -> Self {
+        Self::FilterByKDF {
             child: Box::new(self),
-            node: FilterNode {
+            node: FilterByKDF {
                 function_id,
                 state_ptr,
                 serialized_state: None,
@@ -178,9 +175,9 @@ impl DeclarativePlanNode {
     pub fn children(&self) -> Vec<&DeclarativePlanNode> {
         match self {
             // Leaf nodes
-            Self::Scan(_) | Self::FileListing(_) | Self::Custom(_) => vec![],
+            Self::Scan(_) | Self::FileListing(_) => vec![],
             // Unary nodes
-            Self::Filter { child, .. }
+            Self::FilterByKDF { child, .. }
             | Self::FilterByExpression { child, .. }
             | Self::Select { child, .. }
             | Self::ParseJson { child, .. }
@@ -190,10 +187,7 @@ impl DeclarativePlanNode {
 
     /// Check if this is a leaf node (no children).
     pub fn is_leaf(&self) -> bool {
-        matches!(
-            self,
-            Self::Scan(_) | Self::FileListing(_) | Self::Custom(_)
-        )
+        matches!(self, Self::Scan(_) | Self::FileListing(_))
     }
 }
 

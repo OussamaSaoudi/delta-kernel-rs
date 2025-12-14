@@ -8,7 +8,7 @@
 //! Actual data transfer (batches) still uses Arrow C Data Interface.
 
 use delta_kernel::plans::{
-    AdvanceResult, AnyStateMachine, AsQueryPlan, DeclarativePlanNode, FileType, FilterNode,
+    AdvanceResult, AnyStateMachine, AsQueryPlan, DeclarativePlanNode, FileType, FilterByKDF,
     KernelFunctionId, LogReplayPhase, LogReplayStateMachine, ScanNode, SelectNode,
     SnapshotBuildPhase, StateMachine,
 };
@@ -626,21 +626,21 @@ fn convert_proto_to_native_plan(
                 schema: empty_schema,
             }))
         }
-        Some(proto::declarative_plan_node::Node::Filter(filter_plan)) => {
+        Some(proto::declarative_plan_node::Node::FilterByKdf(filter_plan)) => {
             let child = filter_plan
                 .child
                 .as_ref()
-                .ok_or_else(|| delta_kernel::Error::generic("Filter missing child"))?;
+                .ok_or_else(|| delta_kernel::Error::generic("FilterByKDF missing child"))?;
             let child_plan = convert_proto_to_native_plan(child)?;
 
             let filter_node = filter_plan
                 .node
                 .as_ref()
-                .ok_or_else(|| delta_kernel::Error::generic("Filter missing node"))?;
+                .ok_or_else(|| delta_kernel::Error::generic("FilterByKDF missing node"))?;
 
-            Ok(DeclarativePlanNode::Filter {
+            Ok(DeclarativePlanNode::FilterByKDF {
                 child: Box::new(child_plan),
-                node: FilterNode {
+                node: FilterByKDF {
                     function_id: KernelFunctionId::try_from(filter_node.function_id)?,
                     state_ptr: filter_node.state_ptr,
                     serialized_state: filter_node.serialized_state.clone(),
@@ -693,7 +693,7 @@ pub extern "C" fn create_test_log_replay_phase() -> ProtoBytes {
             schema: schema.clone(),
         },
         data_skipping: None,
-        dedup_filter: FilterNode {
+        dedup_filter: FilterByKDF {
             function_id: KernelFunctionId::AddRemoveDedup,
             state_ptr,
             serialized_state: None,
@@ -743,9 +743,9 @@ pub extern "C" fn create_test_declarative_plan() -> ProtoBytes {
         },
     };
 
-    let filter = DeclarativePlanNode::Filter {
+    let filter = DeclarativePlanNode::FilterByKDF {
         child: Box::new(parse_json),
-        node: FilterNode {
+        node: FilterByKDF {
             function_id: KernelFunctionId::StatsSkipping,
             state_ptr,
             serialized_state: None,

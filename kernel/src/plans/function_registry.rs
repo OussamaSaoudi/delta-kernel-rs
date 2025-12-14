@@ -12,7 +12,7 @@
 //! - A `deserialize` function to reconstruct state from bytes on executors
 //! - A `free` function to clean up state when done
 //!
-//! The `state_ptr` in FilterNode is a raw pointer to the concrete state type,
+//! The `state_ptr` in `FilterByKDF` is a raw pointer to the concrete state type,
 //! which is determined by the `function_id`.
 
 use std::collections::HashMap;

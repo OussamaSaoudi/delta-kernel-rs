@@ -63,12 +63,13 @@ pub struct FileListingNode {
 // Unary Nodes (one child, not stored here - stored in tree wrapper)
 // =============================================================================
 
-/// Filter rows using a kernel-defined function.
+/// Filter rows using a kernel-defined function (KDF).
 ///
-/// The function is implemented in kernel-rs and produces a selection vector.
-/// Engines call the kernel FFI to apply the filter.
+/// KDFs are filters implemented in kernel-rs that engines must use because they
+/// contain Delta-specific logic (e.g., deduplication, stats skipping).
+/// The function produces a selection vector; engines call the kernel FFI to apply it.
 #[derive(Debug, Clone)]
-pub struct FilterNode {
+pub struct FilterByKDF {
     /// Which kernel function to apply
     pub function_id: KernelFunctionId,
     /// Pointer to the concrete state type (determined by function_id).
@@ -91,7 +92,7 @@ pub struct SchemaQueryNode {
 
 /// Filter rows by evaluating a predicate expression.
 ///
-/// Unlike `FilterNode`, this uses an arbitrary predicate expression
+/// Unlike `FilterByKDF`, this uses an arbitrary predicate expression
 /// that engines evaluate themselves.
 #[derive(Debug, Clone)]
 pub struct FilterByExpressionNode {

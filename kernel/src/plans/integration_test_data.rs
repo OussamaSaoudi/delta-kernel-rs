@@ -47,7 +47,7 @@ fn create_commit_phase_bytes() -> Vec<u8> {
             schema: schema.clone(),
         },
         data_skipping: None,
-        dedup_filter: FilterNode {
+        dedup_filter: FilterByKDF {
             function_id: KernelFunctionId::AddRemoveDedup,
             state_ptr,
             serialized_state: None,
@@ -97,9 +97,9 @@ fn create_declarative_plan_bytes() -> Vec<u8> {
         },
     };
 
-    let filter = DeclarativePlanNode::Filter {
+    let filter = DeclarativePlanNode::FilterByKDF {
         child: Box::new(parse_json),
-        node: FilterNode {
+        node: FilterByKDF {
             function_id: KernelFunctionId::StatsSkipping,
             state_ptr,
             serialized_state: None,

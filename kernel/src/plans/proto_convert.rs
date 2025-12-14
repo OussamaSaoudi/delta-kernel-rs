@@ -87,18 +87,9 @@ impl From<&FileListingNode> for proto::FileListingNode {
     }
 }
 
-impl From<&CustomNode> for proto::CustomNode {
-    fn from(node: &CustomNode) -> Self {
-        proto::CustomNode {
-            node_type: node.node_type.clone(),
-            payload: node.payload.clone(),
-        }
-    }
-}
-
-impl From<&FilterNode> for proto::FilterNode {
-    fn from(node: &FilterNode) -> Self {
-        proto::FilterNode {
+impl From<&FilterByKDF> for proto::FilterByKdf {
+    fn from(node: &FilterByKDF) -> Self {
+        proto::FilterByKdf {
             function_id: node.function_id.into(),
             state_ptr: node.state_ptr,
             serialized_state: node.serialized_state.clone(),
@@ -160,9 +151,8 @@ impl From<&DeclarativePlanNode> for proto::DeclarativePlanNode {
         let node_variant = match node {
             DeclarativePlanNode::Scan(n) => Node::Scan(n.into()),
             DeclarativePlanNode::FileListing(n) => Node::FileListing(n.into()),
-            DeclarativePlanNode::Custom(n) => Node::Custom(n.into()),
-            DeclarativePlanNode::Filter { child, node: n } => {
-                Node::Filter(Box::new(proto::FilterPlan {
+            DeclarativePlanNode::FilterByKDF { child, node: n } => {
+                Node::FilterByKdf(Box::new(proto::FilterByKdfPlan {
                     child: Some(Box::new(child.as_ref().into())),
                     node: Some(n.into()),
                 }))

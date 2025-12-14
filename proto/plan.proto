@@ -32,18 +32,13 @@ message FileListingNode {
   string path = 1;  // Directory URL or file path to start after
 }
 
-// Extensibility point for custom operations
-message CustomNode {
-  string node_type = 1;
-  bytes payload = 2;
-}
-
 // -----------------------------------------------------------------------------
 // Unary Node Data (attached to child in tree structure)
 // -----------------------------------------------------------------------------
 
-// Filter using kernel-defined function (e.g., AddRemoveDedup)
-message FilterNode {
+// Filter using kernel-defined function (KDF) (e.g., AddRemoveDedup)
+// KDFs contain Delta-specific logic that engines must use via kernel FFI.
+message FilterByKDF {
   KernelFunctionId function_id = 1;
   uint64 state_ptr = 2;                 // Concrete type determined by function_id
   optional bytes serialized_state = 3;  // For distribution (opt-in)
@@ -87,10 +82,9 @@ message DeclarativePlanNode {
     // Leaf nodes (no children)
     ScanNode scan = 1;
     FileListingNode file_listing = 2;
-    CustomNode custom = 3;
-    
+
     // Unary nodes (one child)
-    FilterPlan filter = 10;
+    FilterByKDFPlan filter_by_kdf = 10;
     FilterByExpressionPlan filter_by_expression = 11;
     SelectPlan select = 12;
     ParseJsonPlan parse_json = 13;
@@ -102,9 +96,9 @@ message DeclarativePlanNode {
 // Unary Plan Wrappers (child + node data)
 // -----------------------------------------------------------------------------
 
-message FilterPlan {
+message FilterByKDFPlan {
   DeclarativePlanNode child = 1;
-  FilterNode node = 2;
+  FilterByKDF node = 2;
 }
 
 message FilterByExpressionPlan {

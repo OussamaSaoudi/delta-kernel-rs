@@ -56,8 +56,7 @@ impl DeclarativePlanExecutor {
         match plan {
             DeclarativePlanNode::Scan(node) => self.execute_scan(node),
             DeclarativePlanNode::FileListing(node) => self.execute_file_listing(node),
-            DeclarativePlanNode::Custom(node) => self.execute_custom(node),
-            DeclarativePlanNode::Filter { child, node } => self.execute_filter(*child, node),
+            DeclarativePlanNode::FilterByKDF { child, node } => self.execute_filter_by_kdf(*child, node),
             DeclarativePlanNode::FilterByExpression { child, node } => {
                 self.execute_filter_by_expr(*child, node)
             }
@@ -121,18 +120,13 @@ impl DeclarativePlanExecutor {
         ))
     }
 
-    /// Execute a Custom node - not implemented.
-    fn execute_custom(&self, _node: CustomNode) -> DeltaResult<FilteredDataIter> {
-        Err(Error::generic("Custom nodes are not implemented"))
-    }
-
-    /// Execute a Filter node using a kernel-defined function (KDF).
-    fn execute_filter(
+    /// Execute a FilterByKDF node using a kernel-defined function (KDF).
+    fn execute_filter_by_kdf(
         &self,
         child: DeclarativePlanNode,
-        node: FilterNode,
+        node: FilterByKDF,
     ) -> DeltaResult<FilteredDataIter> {
-        let FilterNode {
+        let FilterByKDF {
             function_id,
             state_ptr,
             serialized_state,
@@ -729,9 +723,9 @@ mod tests {
             schema: create_parquet_schema(),
         });
 
-        let plan = DeclarativePlanNode::Filter {
+        let plan = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
-            node: FilterNode {
+            node: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr: 0,
                 serialized_state: None,
@@ -901,25 +895,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Custom Node Tests
-    // =========================================================================
-
-    #[test]
-    fn test_custom_node_error() {
-        let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
-
-        let plan = DeclarativePlanNode::Custom(CustomNode {
-            node_type: "test".to_string(),
-            payload: vec![],
-        });
-
-        let result = executor.execute(plan);
-        assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("not implemented"));
-    }
-
-    // =========================================================================
     // FileListing Node Tests
     // =========================================================================
 
@@ -1001,9 +976,9 @@ mod tests {
             schema: create_parquet_schema(),
         });
 
-        let filter = DeclarativePlanNode::Filter {
+        let filter = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
-            node: FilterNode {
+            node: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr: 0,
                 serialized_state: None,
@@ -1035,9 +1010,9 @@ mod tests {
             schema: create_parquet_schema(),
         });
 
-        let kdf_filter = DeclarativePlanNode::Filter {
+        let kdf_filter = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
-            node: FilterNode {
+            node: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr: 0,
                 serialized_state: None,
@@ -1096,9 +1071,9 @@ mod tests {
             },
         };
 
-        let filter2 = DeclarativePlanNode::Filter {
+        let filter2 = DeclarativePlanNode::FilterByKDF {
             child: Box::new(filter1),
-            node: FilterNode {
+            node: FilterByKDF {
                 function_id: KernelFunctionId::AddRemoveDedup,
                 state_ptr: 0,
                 serialized_state: None,
@@ -1127,29 +1102,6 @@ mod tests {
     // =========================================================================
     // Error Handling Tests
     // =========================================================================
-
-    #[test]
-    fn test_custom_in_pipeline_fails() {
-        use crate::expressions::Scalar;
-
-        let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
-
-        let custom = DeclarativePlanNode::Custom(CustomNode {
-            node_type: "test".to_string(),
-            payload: vec![],
-        });
-
-        let filter = DeclarativePlanNode::FilterByExpression {
-            child: Box::new(custom),
-            node: FilterByExpressionNode {
-                predicate: Arc::new(Expression::Literal(Scalar::Boolean(true))),
-            },
-        };
-
-        let result = executor.execute(filter);
-        assert!(result.is_err(), "Custom node in pipeline should fail");
-    }
 
     // =========================================================================
     // State Machine Integration Tests
@@ -1285,7 +1237,7 @@ mod tests {
         match plan {
             DeclarativePlanNode::Select { child, .. } => {
                 match child.as_ref() {
-                    DeclarativePlanNode::Filter { child: inner, node } => {
+                    DeclarativePlanNode::FilterByKDF { child: inner, node } => {
                         assert_eq!(node.function_id, KernelFunctionId::AddRemoveDedup);
                         match inner.as_ref() {
                             DeclarativePlanNode::Scan(scan) => {

@@ -34,8 +34,8 @@ pub struct CommitPhasePlan {
     pub scan: ScanNode,
     /// Optional data skipping optimization
     pub data_skipping: Option<DataSkippingPlan>,
-    /// Deduplication filter (AddRemoveDedup)
-    pub dedup_filter: FilterNode,
+    /// Deduplication filter (AddRemoveDedup KDF)
+    pub dedup_filter: FilterByKDF,
     /// Project to output schema
     pub project: SelectNode,
 }
@@ -58,8 +58,8 @@ pub struct CheckpointManifestPlan {
 pub struct CheckpointLeafPlan {
     /// Scan checkpoint parquet files
     pub scan: ScanNode,
-    /// Optional deduplication for checkpoint
-    pub dedup_filter: Option<FilterNode>,
+    /// Optional deduplication KDF for checkpoint
+    pub dedup_filter: Option<FilterByKDF>,
     /// Project to output schema
     pub project: SelectNode,
 }
@@ -108,8 +108,8 @@ impl AsQueryPlan for CommitPhasePlan {
             };
         }
 
-        // Add dedup filter
-        plan = DeclarativePlanNode::Filter {
+        // Add dedup KDF filter
+        plan = DeclarativePlanNode::FilterByKDF {
             child: Box::new(plan),
             node: self.dedup_filter.clone(),
         };
@@ -137,7 +137,7 @@ impl AsQueryPlan for CheckpointLeafPlan {
         let mut plan = DeclarativePlanNode::Scan(self.scan.clone());
 
         if let Some(dedup) = &self.dedup_filter {
-            plan = DeclarativePlanNode::Filter {
+            plan = DeclarativePlanNode::FilterByKDF {
                 child: Box::new(plan),
                 node: dedup.clone(),
             };
