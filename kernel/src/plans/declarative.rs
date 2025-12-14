@@ -36,6 +36,9 @@ pub enum DeclarativePlanNode {
     
     /// List files from storage path
     FileListing(FileListingNode),
+    
+    /// Query parquet file schema (footer read only)
+    SchemaQuery(SchemaQueryNode),
 
     // =========================================================================
     // Unary Nodes (one child)
@@ -175,7 +178,7 @@ impl DeclarativePlanNode {
     pub fn children(&self) -> Vec<&DeclarativePlanNode> {
         match self {
             // Leaf nodes
-            Self::Scan(_) | Self::FileListing(_) => vec![],
+            Self::Scan(_) | Self::FileListing(_) | Self::SchemaQuery(_) => vec![],
             // Unary nodes
             Self::FilterByKDF { child, .. }
             | Self::FilterByExpression { child, .. }
@@ -187,7 +190,7 @@ impl DeclarativePlanNode {
 
     /// Check if this is a leaf node (no children).
     pub fn is_leaf(&self) -> bool {
-        matches!(self, Self::Scan(_) | Self::FileListing(_))
+        matches!(self, Self::Scan(_) | Self::FileListing(_) | Self::SchemaQuery(_))
     }
 }
 

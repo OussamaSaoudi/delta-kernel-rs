@@ -474,7 +474,7 @@ impl LogReplayStateMachine {
                 self.extract_kdf_state_recursive(child)
             }
             // Leaf nodes have no KDF state
-            DeclarativePlanNode::Scan(_) | DeclarativePlanNode::FileListing(_) => Ok(()),
+            DeclarativePlanNode::Scan(_) | DeclarativePlanNode::FileListing(_) | DeclarativePlanNode::SchemaQuery(_) => Ok(()),
         }
     }
 
@@ -1135,7 +1135,7 @@ impl ScanStateMachine {
             | DeclarativePlanNode::FirstNonNull { child, .. } => {
                 self.extract_kdf_state_recursive(child)
             }
-            DeclarativePlanNode::Scan(_) | DeclarativePlanNode::FileListing(_) => Ok(()),
+            DeclarativePlanNode::Scan(_) | DeclarativePlanNode::FileListing(_) | DeclarativePlanNode::SchemaQuery(_) => Ok(()),
         }
     }
 
@@ -1508,7 +1508,7 @@ impl LogReplayPhase {
                 self.extract_kdf_state(child)
             }
             // Leaf nodes have no KDF state
-            DeclarativePlanNode::Scan(_) | DeclarativePlanNode::FileListing(_) => Ok(None),
+            DeclarativePlanNode::Scan(_) | DeclarativePlanNode::FileListing(_) | DeclarativePlanNode::SchemaQuery(_) => Ok(None),
         }
     }
 

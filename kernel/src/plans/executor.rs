@@ -56,6 +56,7 @@ impl DeclarativePlanExecutor {
         match plan {
             DeclarativePlanNode::Scan(node) => self.execute_scan(node),
             DeclarativePlanNode::FileListing(node) => self.execute_file_listing(node),
+            DeclarativePlanNode::SchemaQuery(node) => self.execute_schema_query(node),
             DeclarativePlanNode::FilterByKDF { child, node } => self.execute_filter_by_kdf(*child, node),
             DeclarativePlanNode::FilterByExpression { child, node } => {
                 self.execute_filter_by_expr(*child, node)
@@ -117,6 +118,21 @@ impl DeclarativePlanExecutor {
         // In a full implementation, this would convert FileMeta to a columnar format
         Err(Error::generic(
             "FileListing node not yet fully implemented - use Scan with explicit file list",
+        ))
+    }
+
+    /// Execute a SchemaQuery node - reads parquet file schema (footer only).
+    fn execute_schema_query(&self, node: SchemaQueryNode) -> DeltaResult<FilteredDataIter> {
+        let SchemaQueryNode {
+            file_path: _,
+            function_id: _,
+            state_ptr: _,
+        } = node;
+
+        // For now, return error - schema query not yet implemented
+        // In a full implementation, this would read the parquet footer and return schema info
+        Err(Error::generic(
+            "SchemaQuery node not yet fully implemented",
         ))
     }
 

@@ -101,6 +101,8 @@ impl From<&SchemaQueryNode> for proto::SchemaQueryNode {
     fn from(node: &SchemaQueryNode) -> Self {
         proto::SchemaQueryNode {
             file_path: node.file_path.clone(),
+            function_id: node.function_id.into(),
+            state_ptr: node.state_ptr,
         }
     }
 }
@@ -151,6 +153,7 @@ impl From<&DeclarativePlanNode> for proto::DeclarativePlanNode {
         let node_variant = match node {
             DeclarativePlanNode::Scan(n) => Node::Scan(n.into()),
             DeclarativePlanNode::FileListing(n) => Node::FileListing(n.into()),
+            DeclarativePlanNode::SchemaQuery(n) => Node::SchemaQuery(n.into()),
             DeclarativePlanNode::FilterByKDF { child, node: n } => {
                 Node::FilterByKdf(Box::new(proto::FilterByKdfPlan {
                     child: Some(Box::new(child.as_ref().into())),

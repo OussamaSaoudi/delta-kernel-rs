@@ -88,6 +88,10 @@ pub struct FilterByKDF {
 pub struct SchemaQueryNode {
     /// Path to the parquet file to query
     pub file_path: String,
+
+    pub function_id: KernelFunctionId,
+
+    pub state_ptr: u64,
 }
 
 /// Filter rows by evaluating a predicate expression.

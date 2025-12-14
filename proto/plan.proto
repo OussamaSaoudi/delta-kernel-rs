@@ -45,8 +45,11 @@ message FilterByKDF {
 }
 
 // Query parquet file schema (footer read only)
+// This is a leaf node (no children)
 message SchemaQueryNode {
   string file_path = 1;
+  KernelFunctionId function_id = 2;
+  uint64 state_ptr = 3;
 }
 
 // Filter using predicate expression
@@ -82,6 +85,7 @@ message DeclarativePlanNode {
     // Leaf nodes (no children)
     ScanNode scan = 1;
     FileListingNode file_listing = 2;
+    SchemaQueryNode schema_query = 3;
 
     // Unary nodes (one child)
     FilterByKDFPlan filter_by_kdf = 10;
