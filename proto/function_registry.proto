@@ -19,9 +19,6 @@ enum KernelFunctionId {
   ADD_REMOVE_DEDUP = 1;      // Dedup add/remove actions during commit log replay
   CHECKPOINT_DEDUP = 2;       // Dedup for checkpoint file processing
   
-  // Data skipping
-  STATS_SKIPPING = 10;        // Filter files based on min/max stats
-  
   // Future functions can be added here
 }
 

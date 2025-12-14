@@ -91,12 +91,6 @@ pub static FUNCTION_REGISTRY: LazyLock<HashMap<KernelFunctionId, KdfEntry>> = La
             deserialize: checkpoint_dedup_deserialize,
             free: checkpoint_dedup_free,
         }),
-        (KernelFunctionId::StatsSkipping, KdfEntry {
-            apply: stats_skipping_apply,
-            serialize: stats_skipping_serialize,
-            deserialize: stats_skipping_deserialize,
-            free: stats_skipping_free,
-        }),
     ])
 });
 
@@ -182,7 +176,6 @@ pub fn kdf_create_state(function_id: KernelFunctionId) -> DeltaResult<u64> {
     match function_id {
         KernelFunctionId::AddRemoveDedup => add_remove_dedup_create(),
         KernelFunctionId::CheckpointDedup => checkpoint_dedup_create(),
-        KernelFunctionId::StatsSkipping => stats_skipping_create(),
     }
 }
 

@@ -725,8 +725,8 @@ pub extern "C" fn create_test_declarative_plan() -> ProtoBytes {
         StructField::new("parsed", DataType::STRING, true),
     ]));
 
-    let state_ptr = function_registry::kdf_create_state(KernelFunctionId::StatsSkipping)
-        .expect("Failed to create StatsSkipping state");
+    let state_ptr = function_registry::kdf_create_state(KernelFunctionId::AddRemoveDedup)
+        .expect("Failed to create AddRemoveDedup state");
 
     let scan = DeclarativePlanNode::Scan(ScanNode {
         file_type: FileType::Parquet,
@@ -746,7 +746,7 @@ pub extern "C" fn create_test_declarative_plan() -> ProtoBytes {
     let filter = DeclarativePlanNode::FilterByKDF {
         child: Box::new(parse_json),
         node: FilterByKDF {
-            function_id: KernelFunctionId::StatsSkipping,
+            function_id: KernelFunctionId::AddRemoveDedup,
             state_ptr,
             serialized_state: None,
         },

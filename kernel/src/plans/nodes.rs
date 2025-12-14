@@ -21,9 +21,6 @@ pub enum KernelFunctionId {
     /// Deduplicates file actions when reading checkpoint files.
     /// Uses tombstone set built from commit files.
     CheckpointDedup,
-    /// Filters files based on min/max statistics.
-    /// Requires parsed stats JSON.
-    StatsSkipping,
 }
 
 // =============================================================================

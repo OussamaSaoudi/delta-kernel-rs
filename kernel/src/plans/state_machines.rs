@@ -458,9 +458,6 @@ impl LogReplayStateMachine {
                         KernelFunctionId::CheckpointDedup => {
                             // Similar handling for checkpoint dedup
                         }
-                        KernelFunctionId::StatsSkipping => {
-                            // Stats skipping state
-                        }
                     }
                 }
                 // Recurse into child

@@ -47,7 +47,6 @@ impl From<KernelFunctionId> for i32 {
         match id {
             KernelFunctionId::AddRemoveDedup => proto::KernelFunctionId::AddRemoveDedup as i32,
             KernelFunctionId::CheckpointDedup => proto::KernelFunctionId::CheckpointDedup as i32,
-            KernelFunctionId::StatsSkipping => proto::KernelFunctionId::StatsSkipping as i32,
         }
     }
 }
@@ -59,7 +58,6 @@ impl TryFrom<i32> for KernelFunctionId {
         match proto::KernelFunctionId::try_from(value) {
             Ok(proto::KernelFunctionId::AddRemoveDedup) => Ok(KernelFunctionId::AddRemoveDedup),
             Ok(proto::KernelFunctionId::CheckpointDedup) => Ok(KernelFunctionId::CheckpointDedup),
-            Ok(proto::KernelFunctionId::StatsSkipping) => Ok(KernelFunctionId::StatsSkipping),
             _ => Err(Error::generic(format!("Unknown kernel function id: {}", value))),
         }
     }

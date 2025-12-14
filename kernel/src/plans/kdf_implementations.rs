@@ -213,65 +213,6 @@ pub fn checkpoint_dedup_free(state_ptr: u64) {
     }
 }
 
-// =============================================================================
-// StatsSkipping - Filters files based on min/max statistics
-// =============================================================================
-
-/// State type for StatsSkipping
-/// This is a placeholder - real implementation would contain parsed predicate info
-#[derive(Default)]
-pub struct StatsSkippingState {
-    // TODO: Add fields for predicate information
-}
-
-/// Create initial state for StatsSkipping.
-pub fn stats_skipping_create() -> DeltaResult<u64> {
-    let state = Box::new(StatsSkippingState::default());
-    Ok(Box::into_raw(state) as u64)
-}
-
-/// Apply StatsSkipping filter to a batch.
-///
-/// Returns the mutated selection array with non-matching files filtered out.
-pub fn stats_skipping_apply(
-    state_ptr: u64,
-    batch: &dyn EngineData,
-    selection: BooleanArray,
-) -> DeltaResult<BooleanArray> {
-    let state = unsafe { &*(state_ptr as *const StatsSkippingState) };
-    
-    // TODO: Implement stats skipping logic
-    // Would compare file statistics against predicate
-    let _ = (state, batch);
-    
-    // Return selection unchanged for now (placeholder)
-    Ok(selection)
-}
-
-/// Serialize StatsSkipping state for distribution.
-pub fn stats_skipping_serialize(state_ptr: u64) -> DeltaResult<Vec<u8>> {
-    let _state = unsafe { &*(state_ptr as *const StatsSkippingState) };
-    
-    // TODO: Implement proper serialization
-    // For now, return empty bytes as placeholder
-    Ok(Vec::new())
-}
-
-/// Deserialize StatsSkipping state on executor.
-pub fn stats_skipping_deserialize(bytes: &[u8]) -> DeltaResult<u64> {
-    let _ = bytes;
-    
-    // TODO: Implement proper deserialization
-    stats_skipping_create()
-}
-
-/// Free StatsSkipping state.
-pub fn stats_skipping_free(state_ptr: u64) {
-    if state_ptr != 0 {
-        unsafe { drop(Box::from_raw(state_ptr as *mut StatsSkippingState)) };
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,13 +350,6 @@ mod tests {
         let state_ptr = checkpoint_dedup_create().unwrap();
         assert_ne!(state_ptr, 0);
         checkpoint_dedup_free(state_ptr);
-    }
-
-    #[test]
-    fn test_stats_skipping_create_and_free() {
-        let state_ptr = stats_skipping_create().unwrap();
-        assert_ne!(state_ptr, 0);
-        stats_skipping_free(state_ptr);
     }
 
     #[test]

@@ -77,9 +77,9 @@ fn create_declarative_plan_bytes() -> Vec<u8> {
         StructField::new("parsed", DataType::STRING, true),
     ]));
 
-    // Create state for stats skipping filter
-    let state_ptr = kdf_create_state(KernelFunctionId::StatsSkipping)
-        .expect("Failed to create StatsSkipping state");
+    // Create state for dedup filter
+    let state_ptr = kdf_create_state(KernelFunctionId::AddRemoveDedup)
+        .expect("Failed to create AddRemoveDedup state");
 
     // Build: Filter -> ParseJson -> Scan
     let scan = DeclarativePlanNode::Scan(ScanNode {
@@ -100,7 +100,7 @@ fn create_declarative_plan_bytes() -> Vec<u8> {
     let filter = DeclarativePlanNode::FilterByKDF {
         child: Box::new(parse_json),
         node: FilterByKDF {
-            function_id: KernelFunctionId::StatsSkipping,
+            function_id: KernelFunctionId::AddRemoveDedup,
             state_ptr,
             serialized_state: None,
         },

@@ -239,7 +239,6 @@ mod function_registry_tests {
         // Verify all function_ids resolve correctly
         assert!(FUNCTION_REGISTRY.get(&KernelFunctionId::AddRemoveDedup).is_some());
         assert!(FUNCTION_REGISTRY.get(&KernelFunctionId::CheckpointDedup).is_some());
-        assert!(FUNCTION_REGISTRY.get(&KernelFunctionId::StatsSkipping).is_some());
     }
 
     #[test]
@@ -248,7 +247,6 @@ mod function_registry_tests {
         for function_id in [
             KernelFunctionId::AddRemoveDedup,
             KernelFunctionId::CheckpointDedup,
-            KernelFunctionId::StatsSkipping,
         ] {
             let state_ptr = kdf_create_state(function_id).expect("Should create state");
             assert_ne!(state_ptr, 0, "State pointer should not be null");
