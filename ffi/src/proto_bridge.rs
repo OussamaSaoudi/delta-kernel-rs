@@ -9,7 +9,7 @@
 
 use delta_kernel::plans::{
     AdvanceResult, AnyStateMachine, AsQueryPlan, DeclarativePlanNode, FileType, FilterByKDF,
-    FilterFilterKernelFunctionId, LogReplayPhase, LogReplayStateMachine, ScanNode, SelectNode,
+    FilterKdfState, LogReplayPhase, LogReplayStateMachine, ScanNode, SelectNode,
     SnapshotBuildPhase, StateMachine,
 };
 use delta_kernel::proto_generated as proto;
@@ -404,73 +404,49 @@ pub unsafe extern "C" fn free_snapshot_build_phase(phase: Handle<SharedSnapshotB
 // =============================================================================
 // KDF (Kernel-Defined Function) FFI
 // =============================================================================
-
-use delta_kernel::plans::function_registry;
-
-/// Create initial KDF state.
-///
-/// # Returns
-///
-/// New state_ptr for the created state. Returns 0 on error.
-#[no_mangle]
-pub unsafe extern "C" fn kdf_create(function_id: i32) -> u64 {
-    match FilterKernelFunctionId::try_from(function_id)
-        .and_then(function_registry::filter_kdf_create_state)
-    {
-        Ok(state_ptr) => state_ptr,
-        Err(_) => 0,
-    }
-}
+//
+// State is always created in Rust (by state machines). Java holds only opaque u64 handles.
+// The state handle encodes both function identity and state - no separate function_id parameter.
 
 /// Serialize KDF state for distribution.
+///
+/// # Safety
+///
+/// - `state_ptr` must have been created by Rust via `FilterKdfState::into_raw()`
 #[no_mangle]
-pub unsafe extern "C" fn kdf_serialize(function_id: i32, state_ptr: u64) -> ProtoBytes {
-    match FilterKernelFunctionId::try_from(function_id)
-        .and_then(|fid| function_registry::filter_kdf_serialize(fid, state_ptr))
-    {
+pub unsafe extern "C" fn kdf_serialize(state_ptr: u64) -> ProtoBytes {
+    if state_ptr == 0 {
+        return ProtoBytes::empty();
+    }
+    
+    let state = FilterKdfState::borrow_from_raw(state_ptr);
+    match state.serialize() {
         Ok(bytes) => ProtoBytes::from_vec(bytes),
         Err(_) => ProtoBytes::empty(),
     }
 }
 
-/// Deserialize KDF state on executor.
-///
-/// Returns new state_ptr. Returns 0 on error.
-#[no_mangle]
-pub unsafe extern "C" fn kdf_deserialize(
-    function_id: i32,
-    bytes_ptr: *const u8,
-    bytes_len: usize,
-) -> u64 {
-    if bytes_ptr.is_null() || bytes_len == 0 {
-        return 0;
-    }
-
-    let bytes = unsafe { std::slice::from_raw_parts(bytes_ptr, bytes_len) };
-    match FilterKernelFunctionId::try_from(function_id)
-        .and_then(|fid| function_registry::filter_kdf_deserialize(fid, bytes))
-    {
-        Ok(state_ptr) => state_ptr,
-        Err(_) => 0,
-    }
-}
-
 /// Free KDF state.
+///
+/// # Safety
+///
+/// - `state_ptr` must have been created by Rust via `FilterKdfState::into_raw()`
+/// - Must not be called more than once for the same pointer
 #[no_mangle]
-pub unsafe extern "C" fn kdf_free(function_id: i32, state_ptr: u64) {
-    if let Ok(fid) = FilterKernelFunctionId::try_from(function_id) {
-        function_registry::filter_kdf_free(fid, state_ptr);
-    }
+pub unsafe extern "C" fn kdf_free(state_ptr: u64) {
+    FilterKdfState::free_raw(state_ptr);
 }
 
 /// Apply a KDF filter to a batch of data.
+///
+/// The state handle encodes both function identity and state - no separate function_id.
+/// State is always created in Rust; this function borrows it for the apply operation.
 ///
 /// Follows the Arrow C Data Interface pattern: Java allocates FFI structs and passes
 /// their memory addresses. Rust reads inputs and writes output via pointers.
 ///
 /// # Arguments
-/// - `function_id`: FilterKernelFunctionId enum value
-/// - `state_ptr`: Pointer to KDF state (from kdf_create or kdf_deserialize)
+/// - `state_ptr`: Opaque handle to typed Rust state (from state machine plan)
 /// - `input_batch_ptr`: Pointer to FFI_ArrowArray for input batch
 /// - `input_schema_ptr`: Pointer to FFI_ArrowSchema for input batch schema
 /// - `selection_array_ptr`: Pointer to FFI_ArrowArray for input selection
@@ -499,7 +475,7 @@ pub unsafe extern "C" fn kdf_free(function_id: i32, state_ptr: u64) {
 ///
 /// # Safety
 ///
-/// - `state_ptr` must be a valid pointer to state for the given function_id
+/// - `state_ptr` must have been created by Rust via `FilterKdfState::into_raw()`
 /// - All `*_ptr` arguments must be valid pointers to properly allocated Arrow C Data structs
 /// - Input structs must contain valid exported Arrow data with proper release callbacks
 /// - Output structs must be pre-allocated with sufficient space
@@ -507,7 +483,6 @@ pub unsafe extern "C" fn kdf_free(function_id: i32, state_ptr: u64) {
 #[cfg(feature = "default-engine-base")]
 #[no_mangle]
 pub unsafe extern "C" fn kdf_apply(
-    function_id: i32,
     state_ptr: u64,
     input_batch_ptr: usize,
     input_schema_ptr: usize,
@@ -518,7 +493,6 @@ pub unsafe extern "C" fn kdf_apply(
     allocate_error: crate::AllocateErrorFn,
 ) -> crate::ExternResult<()> {
     kdf_apply_impl(
-        function_id,
         state_ptr,
         input_batch_ptr,
         input_schema_ptr,
@@ -532,7 +506,6 @@ pub unsafe extern "C" fn kdf_apply(
 
 #[cfg(feature = "default-engine-base")]
 fn kdf_apply_impl(
-    function_id: i32,
     state_ptr: u64,
     input_batch_ptr: usize,
     input_schema_ptr: usize,
@@ -545,7 +518,12 @@ fn kdf_apply_impl(
     use delta_kernel::arrow::ffi::{self, FFI_ArrowArray, FFI_ArrowSchema};
     use delta_kernel::engine::arrow_data::ArrowEngineData;
 
-    let function_id = FilterKernelFunctionId::try_from(function_id)?;
+    if state_ptr == 0 {
+        return Err(delta_kernel::Error::generic("state_ptr must be non-zero"));
+    }
+
+    // Get typed state from raw pointer - ONE match here, then monomorphized execution
+    let state = unsafe { FilterKdfState::borrow_mut_from_raw(state_ptr) };
 
     // Reinterpret pointers as Arrow FFI structs
     let input_batch_ptr = input_batch_ptr as *mut FFI_ArrowArray;
@@ -556,7 +534,6 @@ fn kdf_apply_impl(
     let output_schema_ptr = output_schema_ptr as *mut FFI_ArrowSchema;
 
     // Take ownership of input batch AND schema (std::ptr::read moves the data out)
-    // We need to own the schema so its release callback gets called when dropped
     let input_batch = unsafe { std::ptr::read(input_batch_ptr) };
     let input_schema = unsafe { std::ptr::read(input_schema_ptr) };
 
@@ -577,19 +554,14 @@ fn kdf_apply_impl(
     // Drop the selection schema now that we're done with it
     drop(selection_schema);
 
-    // Call the KDF apply function
-    let result_array =
-        function_registry::kdf_apply(function_id, state_ptr, &engine_data, sel_array)?;
+    // Apply the filter - direct dispatch via enum, monomorphized execution
+    let result_array = state.apply(&engine_data, sel_array)?;
 
     // Export result to Arrow FFI structs and write to output pointers
     let result_data = result_array.into_data();
     let (out_array, out_schema) = ffi::to_ffi(&result_data)?;
 
-    // Write output to pre-allocated structs via pointers.
-    // std::ptr::write takes ownership of src (moves it), copying the bytes to dst.
-    // This prevents Drop from being called on the original values.
-    // The copied data at output_*_ptr will have valid release callbacks that
-    // Java's Arrow library will call when importing.
+    // Write output to pre-allocated structs via pointers
     unsafe {
         std::ptr::write(output_array_ptr, out_array);
         std::ptr::write(output_schema_ptr, out_schema);
@@ -607,6 +579,8 @@ fn kdf_apply_impl(
 // =============================================================================
 
 /// Convert protobuf plan to native Rust plan.
+///
+/// For FilterByKDF, the state_ptr must be non-zero since state is always created in Rust.
 fn convert_proto_to_native_plan(
     proto: &proto::DeclarativePlanNode,
 ) -> delta_kernel::DeltaResult<DeclarativePlanNode> {
@@ -638,12 +612,19 @@ fn convert_proto_to_native_plan(
                 .as_ref()
                 .ok_or_else(|| delta_kernel::Error::generic("FilterByKDF missing node"))?;
 
+            // state_ptr must be non-zero - state is always created in Rust
+            if filter_node.state_ptr == 0 {
+                return Err(delta_kernel::Error::generic(
+                    "FilterByKDF state_ptr must be non-zero - state is always created in Rust"
+                ));
+            }
+
+            // Reconstruct typed state from raw pointer
+            let state = unsafe { FilterKdfState::from_raw(filter_node.state_ptr) };
+
             Ok(DeclarativePlanNode::FilterByKDF {
                 child: Box::new(child_plan),
-                node: FilterByKDF {
-                    function_id: FilterKernelFunctionId::try_from(filter_node.function_id)?,
-                    state_ptr: filter_node.state_ptr,
-                },
+                node: FilterByKDF { state },
             })
         }
         Some(proto::declarative_plan_node::Node::Select(select_plan)) => {
@@ -682,9 +663,6 @@ pub extern "C" fn create_test_log_replay_phase() -> ProtoBytes {
         StructField::new("size", DataType::LONG, true),
     ]));
 
-    let state_ptr = function_registry::filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup)
-        .expect("Failed to create AddRemoveDedup state");
-
     let commit_plan = CommitPhasePlan {
         scan: ScanNode {
             file_type: FileType::Json,
@@ -692,10 +670,7 @@ pub extern "C" fn create_test_log_replay_phase() -> ProtoBytes {
             schema: schema.clone(),
         },
         data_skipping: None,
-        dedup_filter: FilterByKDF {
-            function_id: FilterKernelFunctionId::AddRemoveDedup,
-            state_ptr,
-        },
+        dedup_filter: FilterByKDF::add_remove_dedup(),
         project: SelectNode {
             columns: vec![
                 Arc::new(column_expr!("path")),
@@ -723,9 +698,6 @@ pub extern "C" fn create_test_declarative_plan() -> ProtoBytes {
         StructField::new("parsed", DataType::STRING, true),
     ]));
 
-    let state_ptr = function_registry::filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup)
-        .expect("Failed to create AddRemoveDedup state");
-
     let scan = DeclarativePlanNode::Scan(ScanNode {
         file_type: FileType::Parquet,
         files: vec![],
@@ -743,10 +715,7 @@ pub extern "C" fn create_test_declarative_plan() -> ProtoBytes {
 
     let filter = DeclarativePlanNode::FilterByKDF {
         child: Box::new(parse_json),
-        node: FilterByKDF {
-            function_id: FilterKernelFunctionId::AddRemoveDedup,
-            state_ptr,
-        },
+        node: FilterByKDF::add_remove_dedup(),
     };
 
     let proto_plan: proto::DeclarativePlanNode = (&filter).into();

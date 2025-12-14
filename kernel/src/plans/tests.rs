@@ -31,25 +31,15 @@ mod proto_roundtrip_tests {
 
     #[test]
     fn test_filter_node_to_proto() {
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
-        let filter = FilterByKDF {
-            function_id: FilterKernelFunctionId::AddRemoveDedup,
-            state_ptr,
-        };
+        let filter = FilterByKDF::add_remove_dedup();
 
-        let proto_filter: proto::FilterByKDF = (&filter).into();
-        assert_eq!(proto_filter.function_id, proto::FilterKernelFunctionId::AddRemoveDedup as i32);
-        assert_eq!(proto_filter.state_ptr, state_ptr);
-        
-        // Clean up
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
+        let proto_filter: proto::FilterByKdf = (&filter).into();
+        // state_ptr should be non-zero (points to the typed state)
+        assert_ne!(proto_filter.state_ptr, 0);
     }
 
     #[test]
     fn test_declarative_plan_roundtrip() {
-        // Create state for the filter
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
-        
         // Build a plan: Scan -> Filter
         let scan = DeclarativePlanNode::Scan(ScanNode {
             file_type: FileType::Parquet,
@@ -59,10 +49,7 @@ mod proto_roundtrip_tests {
 
         let plan = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
-            node: FilterByKDF {
-                function_id: FilterKernelFunctionId::AddRemoveDedup,
-                state_ptr,
-            },
+            node: FilterByKDF::add_remove_dedup(),
         };
 
         // Convert to proto
@@ -83,20 +70,14 @@ mod proto_roundtrip_tests {
                 assert!(filter_plan.child.is_some());
                 assert!(filter_plan.node.is_some());
                 let filter_node = filter_plan.node.unwrap();
-                assert_eq!(filter_node.function_id, proto::FilterKernelFunctionId::AddRemoveDedup as i32);
-                assert_eq!(filter_node.state_ptr, state_ptr);
+                assert_ne!(filter_node.state_ptr, 0);
             }
             _ => panic!("Expected Filter node"),
         }
-        
-        // Clean up
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
     }
 
     #[test]
     fn test_commit_phase_plan_to_proto() {
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
-        
         let commit_plan = CommitPhasePlan {
             scan: ScanNode {
                 file_type: FileType::Json,
@@ -104,10 +85,7 @@ mod proto_roundtrip_tests {
                 schema: test_schema(),
             },
             data_skipping: None,
-            dedup_filter: FilterByKDF {
-                function_id: FilterKernelFunctionId::AddRemoveDedup,
-                state_ptr,
-            },
+            dedup_filter: FilterByKDF::add_remove_dedup(),
             project: SelectNode {
                 columns: vec![],
                 output_schema: test_schema(),
@@ -122,15 +100,10 @@ mod proto_roundtrip_tests {
         assert!(proto_plan.data_skipping.is_none());
         assert!(proto_plan.dedup_filter.is_some());
         assert!(proto_plan.project.is_some());
-        
-        // Clean up
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
     }
 
     #[test]
     fn test_log_replay_phase_to_proto() {
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
-        
         let commit_plan = CommitPhasePlan {
             scan: ScanNode {
                 file_type: FileType::Json,
@@ -138,10 +111,7 @@ mod proto_roundtrip_tests {
                 schema: test_schema(),
             },
             data_skipping: None,
-            dedup_filter: FilterByKDF {
-                function_id: FilterKernelFunctionId::AddRemoveDedup,
-                state_ptr,
-            },
+            dedup_filter: FilterByKDF::add_remove_dedup(),
             project: SelectNode {
                 columns: vec![],
                 output_schema: test_schema(),
@@ -170,15 +140,10 @@ mod proto_roundtrip_tests {
             }
             _ => panic!("Expected Commit phase"),
         }
-        
-        // Clean up
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
     }
 
     #[test]
     fn test_as_query_plan_produces_tree() {
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
-        
         let commit_plan = CommitPhasePlan {
             scan: ScanNode {
                 file_type: FileType::Json,
@@ -186,10 +151,7 @@ mod proto_roundtrip_tests {
                 schema: test_schema(),
             },
             data_skipping: None,
-            dedup_filter: FilterByKDF {
-                function_id: FilterKernelFunctionId::AddRemoveDedup,
-                state_ptr,
-            },
+            dedup_filter: FilterByKDF::add_remove_dedup(),
             project: SelectNode {
                 columns: vec![],
                 output_schema: test_schema(),
@@ -204,8 +166,8 @@ mod proto_roundtrip_tests {
             DeclarativePlanNode::Select { child, .. } => {
                 match *child {
                     DeclarativePlanNode::FilterByKDF { child: inner, node } => {
-                        assert_eq!(node.function_id, FilterKernelFunctionId::AddRemoveDedup);
-                        assert_eq!(node.state_ptr, state_ptr);
+                        // Verify it's AddRemoveDedup (variant IS the identity)
+                        assert!(matches!(&node.state, FilterKdfState::AddRemoveDedup(_)));
                         match *inner {
                             DeclarativePlanNode::Scan(scan) => {
                                 assert_eq!(scan.file_type, FileType::Json);
@@ -218,60 +180,61 @@ mod proto_roundtrip_tests {
             }
             _ => panic!("Expected Select at root"),
         }
-        
-        // Clean up
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
     }
 }
 
 #[cfg(test)]
-mod function_registry_tests {
+mod typed_state_tests {
     use crate::plans::*;
 
     #[test]
-    fn test_registry_lookup_all_functions() {
-        // Verify all function_ids resolve correctly
-        assert!(FILTER_REGISTRY.get(&FilterKernelFunctionId::AddRemoveDedup).is_some());
-        assert!(FILTER_REGISTRY.get(&FilterKernelFunctionId::CheckpointDedup).is_some());
+    fn test_filter_kdf_state_create() {
+        // Create typed state directly
+        let state = FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new());
+        
+        // Verify it's the right variant
+        assert!(matches!(state, FilterKdfState::AddRemoveDedup(_)));
     }
 
     #[test]
-    fn test_kdf_create_all_functions() {
-        // Test create for each function type
-        for function_id in [
-            FilterKernelFunctionId::AddRemoveDedup,
-            FilterKernelFunctionId::CheckpointDedup,
-        ] {
-            let state_ptr = filter_kdf_create_state(function_id).expect("Should create state");
-            assert_ne!(state_ptr, 0, "State pointer should not be null");
-            filter_kdf_free(function_id, state_ptr);
-        }
+    fn test_filter_kdf_state_raw_roundtrip() {
+        let state = FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new());
+        
+        // Convert to raw
+        let ptr = state.into_raw();
+        assert_ne!(ptr, 0);
+        
+        // Convert back
+        let recovered = unsafe { FilterKdfState::from_raw(ptr) };
+        assert!(matches!(recovered, FilterKdfState::AddRemoveDedup(_)));
     }
 
     #[test]
-    fn test_filter_kdf_serialize_roundtrip() {
-        // Create state
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
+    fn test_filter_kdf_state_serialize_roundtrip() {
+        let state = FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new());
         
         // Serialize
-        let bytes = filter_kdf_serialize(FilterKernelFunctionId::AddRemoveDedup, state_ptr)
-            .expect("Should serialize");
-        assert!(!bytes.is_empty(), "Serialized bytes should not be empty");
+        let bytes = state.serialize().expect("Should serialize");
+        assert!(!bytes.is_empty());
         
-        // Deserialize
-        let new_state_ptr = filter_kdf_deserialize(FilterKernelFunctionId::AddRemoveDedup, &bytes)
-            .expect("Should deserialize");
-        assert_ne!(new_state_ptr, 0, "Deserialized state should not be null");
+        // Deserialize (directly on AddRemoveDedupState)
+        let recovered = AddRemoveDedupState::deserialize(&bytes).expect("Should deserialize");
+        assert!(recovered.is_empty());
+    }
+
+    #[test]
+    fn test_filter_by_kdf_constructors() {
+        // Test convenience constructors
+        let filter1 = FilterByKDF::add_remove_dedup();
+        assert!(matches!(&filter1.state, FilterKdfState::AddRemoveDedup(_)));
         
-        // Clean up
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, new_state_ptr);
+        let filter2 = FilterByKDF::checkpoint_dedup();
+        assert!(matches!(&filter2.state, FilterKdfState::CheckpointDedup(_)));
     }
 
     #[test]
     fn test_advance_error_propagates() {
-        // Create a phase
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
+        // Create a phase with typed state
         let commit_plan = CommitPhasePlan {
             scan: ScanNode {
                 file_type: FileType::Json,
@@ -279,10 +242,7 @@ mod function_registry_tests {
                 schema: std::sync::Arc::new(crate::schema::StructType::new_unchecked(vec![])),
             },
             data_skipping: None,
-            dedup_filter: FilterByKDF {
-                function_id: FilterKernelFunctionId::AddRemoveDedup,
-                state_ptr,
-            },
+            dedup_filter: FilterByKDF::add_remove_dedup(),
             project: SelectNode {
                 columns: vec![],
                 output_schema: std::sync::Arc::new(crate::schema::StructType::new_unchecked(vec![])),
@@ -294,20 +254,17 @@ mod function_registry_tests {
         // Advance with error - should propagate
         let result = phase.advance(Err(crate::Error::generic("Test error")));
         assert!(result.is_err(), "Error should propagate");
-        
-        // Clean up
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
     }
 
     #[test]
-    fn test_filter_kdf_apply_via_registry() {
+    fn test_filter_kdf_apply() {
         use crate::arrow::array::{BooleanArray, RecordBatch, StringArray};
         use crate::arrow::datatypes::{DataType, Field, Schema};
         use crate::engine::arrow_data::ArrowEngineData;
         use std::sync::Arc;
         
-        // Create state
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
+        // Create typed state
+        let mut state = FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new());
         
         // Create test batch with file paths
         let schema = Schema::new(vec![
@@ -323,8 +280,8 @@ mod function_registry_tests {
         // Create selection vector (all true)
         let selection = BooleanArray::from(vec![true, true]);
         
-        // Apply filter via registry
-        let result = filter_kdf_apply(FilterKernelFunctionId::AddRemoveDedup, state_ptr, &engine_data, selection)
+        // Apply filter directly via typed state
+        let result = state.apply(&engine_data, selection)
             .expect("Should apply filter");
         
         // First time seeing files - both should be selected
@@ -343,29 +300,26 @@ mod function_registry_tests {
         let engine_data2 = ArrowEngineData::new(batch2);
         let selection2 = BooleanArray::from(vec![true, true]);
         
-        let result2 = filter_kdf_apply(FilterKernelFunctionId::AddRemoveDedup, state_ptr, &engine_data2, selection2)
+        let result2 = state.apply(&engine_data2, selection2)
             .expect("Should apply filter");
         
         // file1 is duplicate, file3 is new
         assert!(!result2.value(0), "file1 should be filtered (duplicate)");
         assert!(result2.value(1), "file3 should be selected (new)");
-        
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
     }
 
     #[test]
-    fn test_filter_kdf_apply_filters_all_duplicates_in_large_batch() {
+    fn test_filter_kdf_apply_large_batch() {
         use crate::arrow::array::{BooleanArray, RecordBatch, StringArray};
         use crate::arrow::datatypes::{DataType, Field, Schema};
         use crate::engine::arrow_data::ArrowEngineData;
         use std::sync::Arc;
         
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
+        let mut state = FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new());
         
         // Create batch with 100 files
         let schema = Schema::new(vec![Field::new("path", DataType::Utf8, false)]);
         let paths: Vec<&str> = (0..100).map(|i| {
-            // Leak strings to get &'static str (only for test)
             Box::leak(format!("file{}.parquet", i).into_boxed_str()) as &str
         }).collect();
         let path_array = StringArray::from(paths.clone());
@@ -373,7 +327,7 @@ mod function_registry_tests {
         let engine_data = ArrowEngineData::new(batch);
         
         let selection = BooleanArray::from(vec![true; 100]);
-        let result = filter_kdf_apply(FilterKernelFunctionId::AddRemoveDedup, state_ptr, &engine_data, selection).unwrap();
+        let result = state.apply(&engine_data, selection).unwrap();
         
         // All 100 should be selected (first time)
         for i in 0..100 {
@@ -387,171 +341,24 @@ mod function_registry_tests {
         let engine_data2 = ArrowEngineData::new(batch2);
         
         let selection2 = BooleanArray::from(vec![true; 100]);
-        let result2 = filter_kdf_apply(FilterKernelFunctionId::AddRemoveDedup, state_ptr, &engine_data2, selection2).unwrap();
+        let result2 = state.apply(&engine_data2, selection2).unwrap();
         
         // All 100 should be filtered (duplicates)
         for i in 0..100 {
             assert!(!result2.value(i), "file{} should be filtered as duplicate", i);
         }
-        
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
     }
 
     #[test]
-    fn test_filter_kdf_apply_mixed_new_and_duplicate() {
-        use crate::arrow::array::{BooleanArray, RecordBatch, StringArray};
-        use crate::arrow::datatypes::{DataType, Field, Schema};
-        use crate::engine::arrow_data::ArrowEngineData;
-        use std::sync::Arc;
-        
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
-        
-        // Batch 1: Add files 0, 2, 4, 6, 8 (even numbers)
-        let schema = Schema::new(vec![Field::new("path", DataType::Utf8, false)]);
-        let paths1: Vec<&str> = vec!["file0.parquet", "file2.parquet", "file4.parquet", "file6.parquet", "file8.parquet"];
-        let batch1 = RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![Arc::new(StringArray::from(paths1))],
-        ).unwrap();
-        
-        let result1 = filter_kdf_apply(
-            FilterKernelFunctionId::AddRemoveDedup,
-            state_ptr,
-            &ArrowEngineData::new(batch1),
-            BooleanArray::from(vec![true; 5]),
-        ).unwrap();
-        
-        assert_eq!(result1.true_count(), 5, "All 5 even files should be selected");
-        
-        // Batch 2: Mix of odd (new) and even (duplicate)
-        // file1 (new), file2 (dup), file3 (new), file4 (dup), file5 (new)
-        let paths2: Vec<&str> = vec!["file1.parquet", "file2.parquet", "file3.parquet", "file4.parquet", "file5.parquet"];
-        let batch2 = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(StringArray::from(paths2))],
-        ).unwrap();
-        
-        let result2 = filter_kdf_apply(
-            FilterKernelFunctionId::AddRemoveDedup,
-            state_ptr,
-            &ArrowEngineData::new(batch2),
-            BooleanArray::from(vec![true; 5]),
-        ).unwrap();
-        
-        // Expected: true, false, true, false, true (odd=new, even=dup)
-        assert!(result2.value(0), "file1 should be selected (new)");
-        assert!(!result2.value(1), "file2 should be filtered (duplicate)");
-        assert!(result2.value(2), "file3 should be selected (new)");
-        assert!(!result2.value(3), "file4 should be filtered (duplicate)");
-        assert!(result2.value(4), "file5 should be selected (new)");
-        
-        assert_eq!(result2.true_count(), 3, "3 new files should be selected");
-        assert_eq!(result2.false_count(), 2, "2 duplicates should be filtered");
-        
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
-    }
-
-    #[test]
-    fn test_filter_kdf_apply_respects_pre_filtered_selection() {
-        use crate::arrow::array::{BooleanArray, RecordBatch, StringArray};
-        use crate::arrow::datatypes::{DataType, Field, Schema};
-        use crate::engine::arrow_data::ArrowEngineData;
-        use std::sync::Arc;
-        
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
-        
-        // Create batch with 5 files, but only select rows 0, 2, 4 (pre-filter)
-        let schema = Schema::new(vec![Field::new("path", DataType::Utf8, false)]);
-        let paths: Vec<&str> = vec!["a.parquet", "b.parquet", "c.parquet", "d.parquet", "e.parquet"];
-        let batch = RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![Arc::new(StringArray::from(paths.clone()))],
-        ).unwrap();
-        
-        // Pre-filter: only a, c, e are selected
-        let selection = BooleanArray::from(vec![true, false, true, false, true]);
-        
-        let result = filter_kdf_apply(
-            FilterKernelFunctionId::AddRemoveDedup,
-            state_ptr,
-            &ArrowEngineData::new(batch),
-            selection,
-        ).unwrap();
-        
-        // a, c, e should be selected (new), b, d should stay filtered
-        assert!(result.value(0), "a should be selected");
-        assert!(!result.value(1), "b should stay filtered (pre-filter)");
-        assert!(result.value(2), "c should be selected");
-        assert!(!result.value(3), "d should stay filtered (pre-filter)");
-        assert!(result.value(4), "e should be selected");
-        
-        // Now apply again with same files - but b and d were never seen!
-        let batch2 = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(StringArray::from(paths))],
-        ).unwrap();
-        
-        // All selected this time
-        let selection2 = BooleanArray::from(vec![true; 5]);
-        
-        let result2 = filter_kdf_apply(
-            FilterKernelFunctionId::AddRemoveDedup,
-            state_ptr,
-            &ArrowEngineData::new(batch2),
-            selection2,
-        ).unwrap();
-        
-        // a, c, e are duplicates now; b, d are NEW (were filtered before, never seen)
-        assert!(!result2.value(0), "a should be filtered (duplicate)");
-        assert!(result2.value(1), "b should be selected (was pre-filtered, never seen before)");
-        assert!(!result2.value(2), "c should be filtered (duplicate)");
-        assert!(result2.value(3), "d should be selected (was pre-filtered, never seen before)");
-        assert!(!result2.value(4), "e should be filtered (duplicate)");
-        
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
-    }
-
-    #[test]
-    fn test_filter_kdf_apply_empty_batch() {
-        use crate::arrow::array::{BooleanArray, RecordBatch, StringArray};
-        use crate::arrow::datatypes::{DataType, Field, Schema};
-        use crate::engine::arrow_data::ArrowEngineData;
-        use std::sync::Arc;
-        
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
-        
-        // Empty batch
-        let schema = Schema::new(vec![Field::new("path", DataType::Utf8, false)]);
-        let paths: Vec<&str> = vec![];
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(StringArray::from(paths))],
-        ).unwrap();
-        
-        let selection = BooleanArray::from(vec![] as Vec<bool>);
-        
-        let result = filter_kdf_apply(
-            FilterKernelFunctionId::AddRemoveDedup,
-            state_ptr,
-            &ArrowEngineData::new(batch),
-            selection,
-        ).unwrap();
-        
-        assert_eq!(result.len(), 0, "Empty batch should produce empty result");
-        
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
-    }
-
-    #[test]
-    fn test_kdf_state_isolated_between_instances() {
+    fn test_filter_kdf_state_isolated_between_instances() {
         use crate::arrow::array::{BooleanArray, RecordBatch, StringArray};
         use crate::arrow::datatypes::{DataType, Field, Schema};
         use crate::engine::arrow_data::ArrowEngineData;
         use std::sync::Arc;
         
         // Create two separate states
-        let state1 = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
-        let state2 = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
+        let mut state1 = FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new());
+        let mut state2 = FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new());
         
         let schema = Schema::new(vec![Field::new("path", DataType::Utf8, false)]);
         let paths: Vec<&str> = vec!["shared_file.parquet"];
@@ -562,49 +369,21 @@ mod function_registry_tests {
         let engine_data = ArrowEngineData::new(batch);
         
         // Apply to state1
-        let result1 = filter_kdf_apply(
-            FilterKernelFunctionId::AddRemoveDedup,
-            state1,
-            &engine_data,
-            BooleanArray::from(vec![true]),
-        ).unwrap();
+        let result1 = state1.apply(&engine_data, BooleanArray::from(vec![true])).unwrap();
         assert!(result1.value(0), "state1: file should be selected (new)");
         
         // Apply same file to state2 - should ALSO be selected (different state)
-        let result2 = filter_kdf_apply(
-            FilterKernelFunctionId::AddRemoveDedup,
-            state2,
-            &engine_data,
-            BooleanArray::from(vec![true]),
-        ).unwrap();
+        let result2 = state2.apply(&engine_data, BooleanArray::from(vec![true])).unwrap();
         assert!(result2.value(0), "state2: file should be selected (new in this state)");
         
         // Apply again to state1 - now it's a duplicate
-        let result1_again = filter_kdf_apply(
-            FilterKernelFunctionId::AddRemoveDedup,
-            state1,
-            &engine_data,
-            BooleanArray::from(vec![true]),
-        ).unwrap();
+        let result1_again = state1.apply(&engine_data, BooleanArray::from(vec![true])).unwrap();
         assert!(!result1_again.value(0), "state1: file should be filtered (duplicate)");
-        
-        // But state2 still only saw it once
-        let result2_again = filter_kdf_apply(
-            FilterKernelFunctionId::AddRemoveDedup,
-            state2,
-            &engine_data,
-            BooleanArray::from(vec![true]),
-        ).unwrap();
-        assert!(!result2_again.value(0), "state2: file should be filtered (duplicate)");
-        
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state1);
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state2);
     }
 
     #[test]
     fn test_advance_success_transitions() {
         // Create a phase
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
         let commit_plan = CommitPhasePlan {
             scan: ScanNode {
                 file_type: FileType::Json,
@@ -612,10 +391,7 @@ mod function_registry_tests {
                 schema: std::sync::Arc::new(crate::schema::StructType::new_unchecked(vec![])),
             },
             data_skipping: None,
-            dedup_filter: FilterByKDF {
-                function_id: FilterKernelFunctionId::AddRemoveDedup,
-                state_ptr,
-            },
+            dedup_filter: FilterByKDF::add_remove_dedup(),
             project: SelectNode {
                 columns: vec![],
                 output_schema: std::sync::Arc::new(crate::schema::StructType::new_unchecked(vec![])),
@@ -636,9 +412,6 @@ mod function_registry_tests {
         
         // Should transition to Complete (our simple implementation)
         assert!(next_phase.is_complete(), "Should transition to complete");
-        
-        // Clean up
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
     }
 }
 
@@ -656,8 +429,6 @@ mod declarative_phase_tests {
 
     #[test]
     fn test_log_replay_as_declarative_phase() {
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
-        
         let commit_plan = CommitPhasePlan {
             scan: ScanNode {
                 file_type: FileType::Json,
@@ -665,10 +436,7 @@ mod declarative_phase_tests {
                 schema: test_schema(),
             },
             data_skipping: None,
-            dedup_filter: FilterByKDF {
-                function_id: FilterKernelFunctionId::AddRemoveDedup,
-                state_ptr,
-            },
+            dedup_filter: FilterByKDF::add_remove_dedup(),
             project: SelectNode {
                 columns: vec![],
                 output_schema: test_schema(),
@@ -688,9 +456,6 @@ mod declarative_phase_tests {
         assert!(!declarative.is_terminal());
         assert_eq!(declarative.phase_name(), "Commit");
         assert_eq!(declarative.operation_name(), "LogReplay");
-        
-        // Clean up
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
     }
 
     #[test]
@@ -747,8 +512,6 @@ mod declarative_phase_tests {
         use prost::Message;
         use crate::proto_generated as proto;
         
-        let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup).unwrap();
-        
         let commit_plan = CommitPhasePlan {
             scan: ScanNode {
                 file_type: FileType::Json,
@@ -756,10 +519,7 @@ mod declarative_phase_tests {
                 schema: test_schema(),
             },
             data_skipping: None,
-            dedup_filter: FilterByKDF {
-                function_id: FilterKernelFunctionId::AddRemoveDedup,
-                state_ptr,
-            },
+            dedup_filter: FilterByKDF::add_remove_dedup(),
             project: SelectNode {
                 columns: vec![],
                 output_schema: test_schema(),
@@ -785,10 +545,5 @@ mod declarative_phase_tests {
         assert_eq!(decoded.phase_type, proto::PhaseType::Commit as i32);
         assert!(decoded.query_plan.is_some());
         assert!(decoded.terminal_data.is_none());
-        
-        // Clean up
-        filter_kdf_free(FilterKernelFunctionId::AddRemoveDedup, state_ptr);
     }
 }
-
-

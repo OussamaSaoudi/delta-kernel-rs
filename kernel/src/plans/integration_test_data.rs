@@ -36,10 +36,6 @@ fn create_commit_phase_bytes() -> Vec<u8> {
         StructField::new("size", DataType::LONG, true),
     ]));
 
-    // Create state for dedup filter
-    let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup)
-        .expect("Failed to create AddRemoveDedup state");
-
     let commit_plan = CommitPhasePlan {
         scan: ScanNode {
             file_type: FileType::Json,
@@ -47,10 +43,7 @@ fn create_commit_phase_bytes() -> Vec<u8> {
             schema: schema.clone(),
         },
         data_skipping: None,
-        dedup_filter: FilterByKDF {
-            function_id: FilterKernelFunctionId::AddRemoveDedup,
-            state_ptr,
-        },
+        dedup_filter: FilterByKDF::add_remove_dedup(),
         project: SelectNode {
             columns: vec![
                 Arc::new(column_expr!("path")),
@@ -76,10 +69,6 @@ fn create_declarative_plan_bytes() -> Vec<u8> {
         StructField::new("parsed", DataType::STRING, true),
     ]));
 
-    // Create state for dedup filter
-    let state_ptr = filter_kdf_create_state(FilterKernelFunctionId::AddRemoveDedup)
-        .expect("Failed to create AddRemoveDedup state");
-
     // Build: Filter -> ParseJson -> Scan
     let scan = DeclarativePlanNode::Scan(ScanNode {
         file_type: FileType::Parquet,
@@ -98,10 +87,7 @@ fn create_declarative_plan_bytes() -> Vec<u8> {
 
     let filter = DeclarativePlanNode::FilterByKDF {
         child: Box::new(parse_json),
-        node: FilterByKDF {
-            function_id: FilterKernelFunctionId::AddRemoveDedup,
-            state_ptr,
-        },
+        node: FilterByKDF::add_remove_dedup(),
     };
 
     let proto_plan: proto::DeclarativePlanNode = (&filter).into();
@@ -137,4 +123,3 @@ mod tests {
         assert!(output_dir.join("log_replay_complete.bin").exists());
     }
 }
-

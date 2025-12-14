@@ -28,6 +28,7 @@ pub mod proto_convert;
 pub mod state_machines;
 pub mod function_registry;
 pub mod kdf_implementations;
+pub mod kdf_state;
 pub mod executor;
 
 #[cfg(test)]
@@ -40,6 +41,7 @@ pub use composite::*;
 pub use declarative::*;
 pub use state_machines::*;
 pub use function_registry::*;
+pub use kdf_state::*;
 pub use executor::*;
 
 /// Trait for converting typed plans to tree representation.

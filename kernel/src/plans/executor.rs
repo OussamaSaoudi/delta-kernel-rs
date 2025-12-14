@@ -23,7 +23,7 @@ use crate::schema::DataType;
 use crate::{DeltaResult, Engine, EngineData, Error};
 
 use super::declarative::DeclarativePlanNode;
-use super::function_registry::filter_kdf_apply;
+use super::kdf_state::FilterKdfState;
 use super::nodes::*;
 
 /// Filtered data with selection vector.
@@ -125,8 +125,7 @@ impl DeclarativePlanExecutor {
     fn execute_schema_query(&self, node: SchemaQueryNode) -> DeltaResult<FilteredDataIter> {
         let SchemaQueryNode {
             file_path: _,
-            function_id: _,
-            state_ptr: _,
+            state: _,
         } = node;
 
         // For now, return error - schema query not yet implemented
@@ -142,18 +141,8 @@ impl DeclarativePlanExecutor {
         child: DeclarativePlanNode,
         node: FilterByKDF,
     ) -> DeltaResult<FilteredDataIter> {
-        let FilterByKDF {
-            function_id,
-            state_ptr,
-        } = node;
-
-        // Get actual state pointer - use provided or create fresh state
-        let actual_state_ptr = if state_ptr != 0 {
-            state_ptr
-        } else {
-            // Create fresh state if none provided
-            super::function_registry::filter_kdf_create_state(function_id)?
-        };
+        // State is typed - clone for use in the iterator closure
+        let mut state = node.state;
 
         let child_iter = self.execute(child)?;
 
@@ -166,13 +155,8 @@ impl DeclarativePlanExecutor {
             // Convert selection vector to BooleanArray
             let selection_array = BooleanArray::from(selection_vector);
 
-            // Apply the Filter KDF
-            let new_selection = filter_kdf_apply(
-                function_id,
-                actual_state_ptr,
-                engine_data.as_ref(),
-                selection_array,
-            )?;
+            // Apply the Filter KDF - direct dispatch via enum, monomorphized execution
+            let new_selection = state.apply(engine_data.as_ref(), selection_array)?;
 
             // Convert back to Vec<bool>
             let new_selection_vec: Vec<bool> = (0..new_selection.len())
@@ -738,10 +722,7 @@ mod tests {
 
         let plan = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
-            node: FilterByKDF {
-                function_id: KernelFunctionId::AddRemoveDedup,
-                state_ptr: 0,
-            },
+            node: FilterByKDF::add_remove_dedup(),
         };
 
         let result = executor.execute(plan).expect("KDF filter should succeed");
@@ -990,10 +971,7 @@ mod tests {
 
         let filter = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
-            node: FilterByKDF {
-                function_id: KernelFunctionId::AddRemoveDedup,
-                state_ptr: 0,
-            },
+            node: FilterByKDF::add_remove_dedup(),
         };
 
         let result = executor.execute(filter).expect("Pipeline should succeed");
@@ -1023,10 +1001,7 @@ mod tests {
 
         let kdf_filter = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
-            node: FilterByKDF {
-                function_id: KernelFunctionId::AddRemoveDedup,
-                state_ptr: 0,
-            },
+            node: FilterByKDF::add_remove_dedup(),
         };
 
         let expr_filter = DeclarativePlanNode::FilterByExpression {
@@ -1083,10 +1058,7 @@ mod tests {
 
         let filter2 = DeclarativePlanNode::FilterByKDF {
             child: Box::new(filter1),
-            node: FilterByKDF {
-                function_id: KernelFunctionId::AddRemoveDedup,
-                state_ptr: 0,
-            },
+            node: FilterByKDF::add_remove_dedup(),
         };
 
         let filter3 = DeclarativePlanNode::FilterByExpression {
@@ -1247,7 +1219,8 @@ mod tests {
             DeclarativePlanNode::Select { child, .. } => {
                 match child.as_ref() {
                     DeclarativePlanNode::FilterByKDF { child: inner, node } => {
-                        assert_eq!(node.function_id, KernelFunctionId::AddRemoveDedup);
+                        // Verify it's an AddRemoveDedup filter (state variant IS the identity)
+                        assert!(matches!(&node.state, FilterKdfState::AddRemoveDedup(_)));
                         match inner.as_ref() {
                             DeclarativePlanNode::Scan(scan) => {
                                 assert_eq!(scan.file_type, super::FileType::Json);

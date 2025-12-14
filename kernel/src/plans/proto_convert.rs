@@ -9,6 +9,7 @@ use crate::proto_generated as proto;
 use crate::schema::SchemaRef;
 use crate::{DeltaResult, Error};
 
+use super::kdf_state::{FilterKdfState, SchemaReaderState};
 use super::nodes::*;
 use super::declarative::DeclarativePlanNode;
 use super::composite::*;
@@ -39,33 +40,12 @@ impl TryFrom<i32> for FileType {
 }
 
 // =============================================================================
-// FilterKernelFunctionId Conversion
-// =============================================================================
-
-impl From<FilterKernelFunctionId> for i32 {
-    fn from(id: FilterKernelFunctionId) -> i32 {
-        match id {
-            FilterKernelFunctionId::AddRemoveDedup => proto::FilterKernelFunctionId::AddRemoveDedup as i32,
-            FilterKernelFunctionId::CheckpointDedup => proto::FilterKernelFunctionId::CheckpointDedup as i32,
-        }
-    }
-}
-
-impl TryFrom<i32> for FilterKernelFunctionId {
-    type Error = Error;
-
-    fn try_from(value: i32) -> DeltaResult<Self> {
-        match proto::FilterKernelFunctionId::try_from(value) {
-            Ok(proto::FilterKernelFunctionId::AddRemoveDedup) => Ok(FilterKernelFunctionId::AddRemoveDedup),
-            Ok(proto::FilterKernelFunctionId::CheckpointDedup) => Ok(FilterKernelFunctionId::CheckpointDedup),
-            _ => Err(Error::generic(format!("Unknown filter kernel function id: {}", value))),
-        }
-    }
-}
-
-// =============================================================================
 // SchemaReaderFunctionId Conversion
 // =============================================================================
+//
+// Note: FilterKernelFunctionId has been removed. Filter KDFs now use typed state
+// via the FilterKdfState enum. The enum variant IS the function identity.
+// See kdf_state.rs for the implementation.
 
 impl From<SchemaReaderFunctionId> for i32 {
     fn from(id: SchemaReaderFunctionId) -> i32 {
@@ -110,19 +90,20 @@ impl From<&FileListingNode> for proto::FileListingNode {
 
 impl From<&FilterByKDF> for proto::FilterByKdf {
     fn from(node: &FilterByKDF) -> Self {
+        // Convert typed state to raw pointer for FFI
+        // Clone the state since we're taking ownership for the raw pointer
         proto::FilterByKdf {
-            function_id: node.function_id.into(),
-            state_ptr: node.state_ptr,
+            state_ptr: node.state.clone().into_raw(),
         }
     }
 }
 
 impl From<&SchemaQueryNode> for proto::SchemaQueryNode {
     fn from(node: &SchemaQueryNode) -> Self {
+        // Convert typed state to raw pointer for FFI
         proto::SchemaQueryNode {
             file_path: node.file_path.clone(),
-            function_id: node.function_id.into(),
-            state_ptr: node.state_ptr,
+            state_ptr: node.state.clone().into_raw(),
         }
     }
 }

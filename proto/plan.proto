@@ -5,7 +5,6 @@ option java_package = "kernel.proto";
 option java_outer_classname = "PlanProtos";
 
 import "schema.proto";
-import "function_registry.proto";
 
 // =============================================================================
 // SIMPLIFIED PLAN NODES (9 types)
@@ -39,16 +38,14 @@ message FileListingNode {
 // Filter using kernel-defined function (KDF) (e.g., AddRemoveDedup)
 // KDFs contain Delta-specific logic that engines must use via kernel FFI.
 message FilterByKDF {
-  FilterKernelFunctionId function_id = 1;  // Filter KDF type
-  uint64 state_ptr = 2;                    // Raw pointer to KDF state
+  uint64 state_ptr = 1;  // Opaque handle to typed Rust state
 }
 
 // Query parquet file schema (footer read only)
 // This is a leaf node (no children)
 message SchemaQueryNode {
   string file_path = 1;
-  SchemaReaderFunctionId function_id = 2;  // Schema Reader KDF type
-  uint64 state_ptr = 3;
+  uint64 state_ptr = 2;  // Opaque handle to typed Rust state
 }
 
 // Filter using predicate expression

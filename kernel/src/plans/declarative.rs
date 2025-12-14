@@ -98,25 +98,27 @@ impl DeclarativePlanNode {
         })
     }
 
-    /// Add a kernel-defined function (KDF) filter to this plan.
-    pub fn filter_by_kdf(self, function_id: FilterKernelFunctionId) -> Self {
+    /// Add a kernel-defined function (KDF) filter with AddRemoveDedup state.
+    pub fn filter_by_add_remove_dedup(self) -> Self {
         Self::FilterByKDF {
             child: Box::new(self),
-            node: FilterByKDF {
-                function_id,
-                state_ptr: 0,
-            },
+            node: FilterByKDF::add_remove_dedup(),
         }
     }
 
-    /// Add a kernel-defined function (KDF) filter with state pointer.
-    pub fn filter_by_kdf_with_state(self, function_id: FilterKernelFunctionId, state_ptr: u64) -> Self {
+    /// Add a kernel-defined function (KDF) filter with CheckpointDedup state.
+    pub fn filter_by_checkpoint_dedup(self) -> Self {
         Self::FilterByKDF {
             child: Box::new(self),
-            node: FilterByKDF {
-                function_id,
-                state_ptr,
-            },
+            node: FilterByKDF::checkpoint_dedup(),
+        }
+    }
+
+    /// Add a kernel-defined function (KDF) filter with existing typed state.
+    pub fn filter_by_kdf_with_state(self, state: super::kdf_state::FilterKdfState) -> Self {
+        Self::FilterByKDF {
+            child: Box::new(self),
+            node: FilterByKDF::with_state(state),
         }
     }
 
