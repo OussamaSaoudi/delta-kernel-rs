@@ -132,3 +132,56 @@ pub struct FirstNonNullNode {
     /// Column names to extract first non-null for
     pub columns: Vec<String>,
 }
+
+// WRITE EXTENSION:
+//
+// Need to introduce the following notions:
+// * Sink nodes. These can sink to the following:
+//     - Context with name.
+//     - File
+//     - Result (should be streamed to the user)
+//     - KDF: A KDF that returns nothing
+//     - Void?: throws away the result
+//
+// * Source nodes: These have two types, and two sources
+//    Sources:
+//        - User: user provided data. ex: Data files written
+//        - Context with name. Contains two types:
+//            Types:
+//                - Consume: consumes the data from the context
+//                - Read
+//
+//
+//  * Union: unions tuples from two streams
+//
+//
+// FULLY EXTERNALIZED READS EXTENSION:
+// Suboperator dialect:
+//
+// CreateMap: creates a map with key and value type
+//
+// Lookup:
+//   Args:
+//     - Map type
+//     - Lookup key names [ColumnName]
+//   Result:
+//     - List of type ref
+//
+// ScanList:
+//   Args:
+//     - List type
+//   Result: tuple stream
+//
+//
+// Gather:
+//   Args:
+//     - Column name, where column type is Ref
+//   Result:
+//     - Value at ref. For Map<K,V> this has type V
+//
+// Scatter:
+//   Args:
+//     - Column name, where column is a ref
+//     - Value: new value
+//   Result: None
+//
