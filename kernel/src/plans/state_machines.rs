@@ -59,7 +59,7 @@ use crate::{DeltaResult, Error};
 
 use super::composite::*;
 use super::declarative::DeclarativePlanNode;
-use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState};
+use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState};
 use super::nodes::{ConsumeByKDF, FileListingNode, FileType, FilterByKDF, FirstNonNullNode, ScanNode, SelectNode};
 use super::AsQueryPlan;
 
@@ -556,7 +556,7 @@ impl LogReplayStateMachine {
                 files: state.checkpoint_files.clone(),
                 schema: schema.clone(),
             },
-            dedup_filter: Some(FilterByKDF::checkpoint_dedup()),
+            dedup_filter: FilterByKDF::checkpoint_dedup(),
             project: SelectNode {
                 columns: vec![],
                 output_schema: schema,
@@ -789,17 +789,33 @@ impl SnapshotStateMachine {
         &mut self,
         result: DeltaResult<DeclarativePlanNode>,
     ) -> DeltaResult<AdvanceResult<Snapshot>> {
-        // Propagate execution errors
-        let executed_plan = result?;
-
         match &self.phase {
             SnapshotPhase::CheckpointHint(_) => {
+                // For CheckpointHint phase, FileNotFound is OK - the file is optional
+                match result {
+                    Ok(executed_plan) => {
+                        // Extract checkpoint hint state from the executed plan
+                        self.extract_consumer_kdf_state(&executed_plan)?;
+                    }
+                    Err(Error::FileNotFound(_)) => {
+                        // _last_checkpoint file not found is OK - continue without hint
+                        // checkpoint_hint_version remains None
+                    }
+                    Err(e) => {
+                        // Other errors should be propagated
+                        return Err(e);
+                    }
+                }
+                
                 // Move to ListFiles phase with its plan
                 let list_files_plan = Self::create_list_files_plan(&self.state)?;
                 self.phase = SnapshotPhase::ListFiles(list_files_plan);
                 Ok(AdvanceResult::Continue)
             }
             SnapshotPhase::ListFiles(_) => {
+                // Propagate execution errors for this phase
+                let executed_plan = result?;
+                
                 // Extract consumer KDF state from the executed plan
                 self.extract_consumer_kdf_state(&executed_plan)?;
                 
@@ -809,6 +825,8 @@ impl SnapshotStateMachine {
                 Ok(AdvanceResult::Continue)
             }
             SnapshotPhase::LoadMetadata(_) => {
+                // Propagate execution errors for this phase
+                let _executed_plan = result?;
                 // Complete - build the full Snapshot
                 self.phase = SnapshotPhase::Complete;
 
@@ -884,19 +902,22 @@ impl SnapshotStateMachine {
                 files: vec![file_meta],
                 schema: checkpoint_schema,
             },
+            hint_reader: ConsumeByKDF::checkpoint_hint_reader(),
         })
     }
 
     fn create_list_files_plan(state: &SnapshotBuildState) -> DeltaResult<FileListingPhasePlan> {
         // List files in the _delta_log directory with LogSegmentBuilder consumer
+        // Pass the checkpoint hint version from the previous phase to optimize file listing
         Ok(FileListingPhasePlan {
             listing: FileListingNode {
                 path: state.log_root.clone(),
             },
-            log_segment_builder: Some(ConsumeByKDF::log_segment_builder(
+            log_segment_builder: ConsumeByKDF::log_segment_builder(
                 state.log_root.clone(),
                 state.version.map(|v| v as u64),
-            )),
+                state.checkpoint_hint_version.map(|v| v as u64),
+            ),
         })
     }
 
@@ -940,7 +961,7 @@ impl SnapshotStateMachine {
     fn extract_consumer_kdf_state(&mut self, plan: &DeclarativePlanNode) -> DeltaResult<()> {
         match plan {
             DeclarativePlanNode::ConsumeByKDF { child: _, node } => {
-                // Extract LogSegmentBuilder state
+                // Extract state based on consumer type
                 match &node.state {
                     ConsumerKdfState::LogSegmentBuilder(builder_state) => {
                         // Check for errors first
@@ -960,6 +981,17 @@ impl SnapshotStateMachine {
                             self.state.final_version = Some(commit.version as i64);
                         } else if let Some(checkpoint) = builder_state.checkpoint_parts.first() {
                             self.state.final_version = Some(checkpoint.version as i64);
+                        }
+                    }
+                    ConsumerKdfState::CheckpointHintReader(hint_state) => {
+                        // Check for errors first
+                        if let Some(ref error) = hint_state.error {
+                            return Err(Error::generic(error.clone()));
+                        }
+
+                        // Extract checkpoint hint version if present
+                        if let Some(version) = hint_state.version {
+                            self.state.checkpoint_hint_version = Some(version as i64);
                         }
                     }
                 }

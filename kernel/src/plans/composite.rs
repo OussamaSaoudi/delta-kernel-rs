@@ -53,29 +53,28 @@ pub struct CheckpointManifestPlan {
 
 /// Plan for reading checkpoint leaf/sidecar files.
 ///
-/// Structure: Scan → [Dedup] → Project
+/// Structure: Scan → Dedup → Project
 #[derive(Debug, Clone)]
 pub struct CheckpointLeafPlan {
     /// Scan checkpoint parquet files
     pub scan: ScanNode,
-    /// Optional deduplication KDF for checkpoint
-    pub dedup_filter: Option<FilterByKDF>,
+    /// Deduplication KDF for checkpoint
+    pub dedup_filter: FilterByKDF,
     /// Project to output schema
     pub project: SelectNode,
 }
 
 /// Plan for listing log files.
 ///
-/// Structure: FileListing → [ConsumeByKDF (LogSegmentBuilder)]
+/// Structure: FileListing → ConsumeByKDF (LogSegmentBuilder)
 ///
-/// The optional consumer KDF processes file listing results to build a LogSegment.
-/// When present, the plan becomes: FileListing → ConsumeByKDF
+/// The consumer KDF processes file listing results to build a LogSegment.
 #[derive(Debug, Clone)]
 pub struct FileListingPhasePlan {
     /// List files from _delta_log
     pub listing: FileListingNode,
-    /// Optional consumer KDF to build LogSegment from listing results
-    pub log_segment_builder: Option<ConsumeByKDF>,
+    /// Consumer KDF to build LogSegment from listing results
+    pub log_segment_builder: ConsumeByKDF,
 }
 
 /// Plan for loading table metadata.
@@ -91,11 +90,15 @@ pub struct MetadataLoadPlan {
 
 /// Plan for reading checkpoint hint file (_last_checkpoint).
 ///
-/// Structure: Scan (JSON)
+/// Structure: Scan (JSON) → ConsumeByKDF (CheckpointHintReader)
+///
+/// The consumer KDF processes scan results to extract the checkpoint hint.
 #[derive(Debug, Clone)]
 pub struct CheckpointHintPlan {
     /// Scan the _last_checkpoint JSON file
     pub scan: ScanNode,
+    /// Consumer KDF to extract checkpoint hint from scan results
+    pub hint_reader: ConsumeByKDF,
 }
 
 // =============================================================================
@@ -144,17 +147,13 @@ impl AsQueryPlan for CheckpointManifestPlan {
 
 impl AsQueryPlan for CheckpointLeafPlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
-        let mut plan = DeclarativePlanNode::Scan(self.scan.clone());
-
-        if let Some(dedup) = &self.dedup_filter {
-            plan = DeclarativePlanNode::FilterByKDF {
-                child: Box::new(plan),
-                node: dedup.clone(),
-            };
-        }
-
+        let scan = DeclarativePlanNode::Scan(self.scan.clone());
+        let dedup = DeclarativePlanNode::FilterByKDF {
+            child: Box::new(scan),
+            node: self.dedup_filter.clone(),
+        };
         DeclarativePlanNode::Select {
-            child: Box::new(plan),
+            child: Box::new(dedup),
             node: self.project.clone(),
         }
     }
@@ -162,17 +161,11 @@ impl AsQueryPlan for CheckpointLeafPlan {
 
 impl AsQueryPlan for FileListingPhasePlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
-        let mut plan = DeclarativePlanNode::FileListing(self.listing.clone());
-
-        // Add consumer KDF if present
-        if let Some(consumer) = &self.log_segment_builder {
-            plan = DeclarativePlanNode::ConsumeByKDF {
-                child: Box::new(plan),
-                node: consumer.clone(),
-            };
+        let listing = DeclarativePlanNode::FileListing(self.listing.clone());
+        DeclarativePlanNode::ConsumeByKDF {
+            child: Box::new(listing),
+            node: self.log_segment_builder.clone(),
         }
-
-        plan
     }
 }
 
@@ -188,7 +181,11 @@ impl AsQueryPlan for MetadataLoadPlan {
 
 impl AsQueryPlan for CheckpointHintPlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
-        DeclarativePlanNode::Scan(self.scan.clone())
+        let scan = DeclarativePlanNode::Scan(self.scan.clone());
+        DeclarativePlanNode::ConsumeByKDF {
+            child: Box::new(scan),
+            node: self.hint_reader.clone(),
+        }
     }
 }
 

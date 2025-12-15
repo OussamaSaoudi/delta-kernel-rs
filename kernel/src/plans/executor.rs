@@ -1340,14 +1340,19 @@ mod tests {
         let plan = sm.get_plan();
         assert!(plan.is_ok(), "Should be able to get plan");
 
-        // The first phase should produce a Scan plan for _last_checkpoint
+        // The first phase should produce a ConsumeByKDF -> Scan plan for _last_checkpoint
         let plan = plan.unwrap();
         match plan {
-            DeclarativePlanNode::Scan(scan) => {
-                assert_eq!(scan.file_type, super::FileType::Json);
-                assert!(!scan.files.is_empty());
+            DeclarativePlanNode::ConsumeByKDF { child, node: _ } => {
+                match child.as_ref() {
+                    DeclarativePlanNode::Scan(scan) => {
+                        assert_eq!(scan.file_type, super::FileType::Json);
+                        assert!(!scan.files.is_empty());
+                    }
+                    _ => panic!("Expected Scan as child of ConsumeByKDF"),
+                }
             }
-            _ => panic!("Expected Scan plan for CheckpointHint phase"),
+            _ => panic!("Expected ConsumeByKDF plan for CheckpointHint phase"),
         }
     }
 
@@ -1453,8 +1458,9 @@ mod tests {
         assert_eq!(sm.phase_name(), "CheckpointHint");
 
         // Get plan and simulate advance (with error since we're not actually executing)
+        // CheckpointHint phase now returns ConsumeByKDF wrapping a Scan
         let plan = sm.get_plan().unwrap();
-        assert!(matches!(plan, DeclarativePlanNode::Scan(_)));
+        assert!(matches!(plan, DeclarativePlanNode::ConsumeByKDF { .. }));
 
         // Advance to ListFiles
         let result = sm.advance(Ok(plan));
@@ -1518,6 +1524,80 @@ mod tests {
         let result = sm.advance(Ok(plan));
         assert!(matches!(result, Ok(AdvanceResult::Done(_))));
         assert!(sm.is_terminal());
+    }
+
+    #[test]
+    fn test_snapshot_state_machine_checkpoint_hint_file_not_found() {
+        use crate::plans::state_machines::{AdvanceResult, SnapshotStateMachine};
+        use crate::Error;
+
+        let table_url = url::Url::parse("file:///tmp/test_table/").unwrap();
+        let mut sm = SnapshotStateMachine::new(table_url).unwrap();
+
+        // Initial phase should be CheckpointHint
+        assert_eq!(sm.phase_name(), "CheckpointHint");
+
+        // Simulate _last_checkpoint file not found - engine returns FileNotFound error
+        let file_not_found_error = Error::file_not_found("_last_checkpoint");
+        let result = sm.advance(Err(file_not_found_error));
+
+        // Should succeed and move to ListFiles phase (file not found is OK for checkpoint hint)
+        assert!(result.is_ok(), "FileNotFound should be handled gracefully");
+        assert!(matches!(result.unwrap(), AdvanceResult::Continue));
+        assert_eq!(sm.phase_name(), "ListFiles");
+
+        // The state machine should continue normally - get the ListFiles plan
+        let list_plan = sm.get_plan();
+        assert!(list_plan.is_ok(), "Should be able to get ListFiles plan");
+    }
+
+    #[test]
+    fn test_snapshot_state_machine_checkpoint_hint_other_error_propagated() {
+        use crate::plans::state_machines::SnapshotStateMachine;
+        use crate::Error;
+
+        let table_url = url::Url::parse("file:///tmp/test_table/").unwrap();
+        let mut sm = SnapshotStateMachine::new(table_url).unwrap();
+
+        // Initial phase should be CheckpointHint
+        assert_eq!(sm.phase_name(), "CheckpointHint");
+
+        // Simulate a different error (e.g., permission denied, network error)
+        let other_error = Error::generic("Permission denied");
+        let result = sm.advance(Err(other_error));
+
+        // Non-FileNotFound errors should be propagated
+        assert!(result.is_err(), "Non-FileNotFound errors should be propagated");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Permission denied"),
+            "Error message should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_state_machine_list_files_error_propagated() {
+        use crate::plans::state_machines::{AdvanceResult, SnapshotStateMachine};
+        use crate::Error;
+
+        let table_url = url::Url::parse("file:///tmp/test_table/").unwrap();
+        let mut sm = SnapshotStateMachine::new(table_url).unwrap();
+
+        // Move past CheckpointHint phase
+        let plan = sm.get_plan().unwrap();
+        let result = sm.advance(Ok(plan));
+        assert!(matches!(result, Ok(AdvanceResult::Continue)));
+        assert_eq!(sm.phase_name(), "ListFiles");
+
+        // Get ListFiles plan
+        let plan = sm.get_plan().unwrap();
+
+        // Simulate error during ListFiles phase
+        let error = Error::generic("Storage error");
+        let result = sm.advance(Err(error));
+
+        // Errors in ListFiles phase should be propagated (not handled gracefully like CheckpointHint)
+        assert!(result.is_err(), "ListFiles errors should be propagated");
     }
 
     // FIXME: Re-enable once Scan::begin() is implemented

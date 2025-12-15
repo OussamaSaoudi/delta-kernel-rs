@@ -34,15 +34,15 @@ message CheckpointManifestPlan {
 // Plan for reading checkpoint leaf files
 message CheckpointLeafPlan {
   ScanNode scan = 1;                      // Scan checkpoint parquet files
-  optional FilterByKDF dedup_filter = 2;  // Optional dedup KDF for checkpoint
+  FilterByKDF dedup_filter = 2;           // Dedup KDF for checkpoint
   SelectNode project = 3;                 // Project to output schema
 }
 
 // Plan for listing log files
-// Optionally includes a consumer KDF to build LogSegment from listing results
+// Includes a consumer KDF to build LogSegment from listing results
 message FileListingPhasePlan {
-  FileListingNode listing = 1;                        // List files from _delta_log
-  optional ConsumeByKDF log_segment_builder = 2;      // Optional consumer to build LogSegment
+  FileListingNode listing = 1;            // List files from _delta_log
+  ConsumeByKDF log_segment_builder = 2;   // Consumer to build LogSegment
 }
 
 // Plan for loading table metadata
@@ -52,8 +52,10 @@ message MetadataLoadPlan {
 }
 
 // Plan for reading checkpoint hint file (_last_checkpoint)
+// Includes a consumer KDF to extract checkpoint hint from scan results
 message CheckpointHintPlan {
   ScanNode scan = 1;                      // Scan _last_checkpoint JSON file
+  ConsumeByKDF hint_reader = 2;           // Consumer to extract checkpoint hint
 }
 
 // =============================================================================

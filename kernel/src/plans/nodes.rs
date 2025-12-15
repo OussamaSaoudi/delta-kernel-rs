@@ -11,7 +11,7 @@ use crate::FileMeta;
 
 use crate::Version;
 
-use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState, SchemaReaderState, SchemaStoreState};
+use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState, SchemaReaderState, SchemaStoreState};
 
 // =============================================================================
 // Kernel-Defined Function (KDF) Type System
@@ -122,12 +122,32 @@ impl ConsumeByKDF {
     ///
     /// This consumer builds a LogSegment from file listing results by accumulating
     /// commit files, checkpoint parts, and compaction files.
-    pub fn log_segment_builder(log_root: url::Url, end_version: Option<Version>) -> Self {
+    ///
+    /// # Arguments
+    /// * `log_root` - The log directory root URL
+    /// * `end_version` - Optional end version to stop at
+    /// * `checkpoint_hint_version` - Optional checkpoint hint version from `_last_checkpoint`
+    pub fn log_segment_builder(
+        log_root: url::Url,
+        end_version: Option<Version>,
+        checkpoint_hint_version: Option<Version>,
+    ) -> Self {
         Self {
             state: ConsumerKdfState::LogSegmentBuilder(LogSegmentBuilderState::new(
                 log_root,
                 end_version,
+                checkpoint_hint_version,
             )),
+        }
+    }
+
+    /// Create a new CheckpointHintReader consumer.
+    ///
+    /// This consumer extracts checkpoint hint information from the scan results
+    /// of the `_last_checkpoint` file.
+    pub fn checkpoint_hint_reader() -> Self {
+        Self {
+            state: ConsumerKdfState::CheckpointHintReader(CheckpointHintReaderState::new()),
         }
     }
 

@@ -136,14 +136,30 @@ impl DeclarativePlanNode {
     /// Add a consumer KDF with LogSegmentBuilder state.
     ///
     /// The consumer will accumulate file listing results into a LogSegment.
+    ///
+    /// # Arguments
+    /// * `log_root` - The log directory root URL
+    /// * `end_version` - Optional end version to stop at
+    /// * `checkpoint_hint_version` - Optional checkpoint hint version from `_last_checkpoint`
     pub fn consume_by_log_segment_builder(
         self,
         log_root: url::Url,
         end_version: Option<crate::Version>,
+        checkpoint_hint_version: Option<crate::Version>,
     ) -> Self {
         Self::ConsumeByKDF {
             child: Box::new(self),
-            node: ConsumeByKDF::log_segment_builder(log_root, end_version),
+            node: ConsumeByKDF::log_segment_builder(log_root, end_version, checkpoint_hint_version),
+        }
+    }
+
+    /// Add a consumer KDF with CheckpointHintReader state.
+    ///
+    /// The consumer will extract checkpoint hint information from scan results.
+    pub fn consume_by_checkpoint_hint_reader(self) -> Self {
+        Self::ConsumeByKDF {
+            child: Box::new(self),
+            node: ConsumeByKDF::checkpoint_hint_reader(),
         }
     }
 

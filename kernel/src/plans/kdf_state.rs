@@ -486,6 +486,9 @@ pub struct LogSegmentBuilderState {
     pub log_root: Url,
     /// Optional end version to stop at
     pub end_version: Option<Version>,
+    /// Checkpoint hint version from `_last_checkpoint` file
+    /// When set, the builder knows where to expect a valid checkpoint
+    pub checkpoint_hint_version: Option<Version>,
     /// Sorted commit files in the log segment (ascending)
     pub ascending_commit_files: Vec<ParsedLogPath>,
     /// Sorted compaction files in the log segment (ascending)
@@ -506,10 +509,20 @@ pub struct LogSegmentBuilderState {
 
 impl LogSegmentBuilderState {
     /// Create new state for building a LogSegment.
-    pub fn new(log_root: Url, end_version: Option<Version>) -> Self {
+    ///
+    /// # Arguments
+    /// * `log_root` - The log directory root URL
+    /// * `end_version` - Optional end version to stop at
+    /// * `checkpoint_hint_version` - Optional checkpoint hint version from `_last_checkpoint`
+    pub fn new(
+        log_root: Url,
+        end_version: Option<Version>,
+        checkpoint_hint_version: Option<Version>,
+    ) -> Self {
         Self {
             log_root,
             end_version,
+            checkpoint_hint_version,
             ascending_commit_files: Vec::new(),
             ascending_compaction_files: Vec::new(),
             checkpoint_parts: Vec::new(),
@@ -770,6 +783,170 @@ impl LogSegmentBuilderState {
 }
 
 // =============================================================================
+// CheckpointHintReaderState - Extracts checkpoint hint from _last_checkpoint
+// =============================================================================
+
+/// State for CheckpointHintReader consumer KDF - extracts checkpoint hint from scan results.
+///
+/// This is a **Consumer KDF** that processes the scan results of the `_last_checkpoint`
+/// file and extracts the checkpoint hint information (version, size, parts, etc.).
+///
+/// # Usage Pattern
+///
+/// 1. Create state
+/// 2. Feed scanned rows from `_last_checkpoint` file through `apply()`
+/// 3. `apply()` returns `Ok(true)` to continue, `Ok(false)` after extracting hint
+/// 4. After completion, extract the hint via `take_hint()`
+#[derive(Debug, Clone, Default)]
+pub struct CheckpointHintReaderState {
+    /// The extracted checkpoint version
+    pub version: Option<Version>,
+    /// The number of actions stored in the checkpoint
+    pub size: Option<i64>,
+    /// The number of fragments if the checkpoint was written in multiple parts
+    pub parts: Option<i32>,
+    /// The number of bytes of the checkpoint
+    pub size_in_bytes: Option<i64>,
+    /// The number of AddFile actions in the checkpoint
+    pub num_of_add_files: Option<i64>,
+    /// Whether we've processed the hint (only expect one row)
+    processed: bool,
+    /// Stored error to surface during advance()
+    pub error: Option<String>,
+}
+
+impl CheckpointHintReaderState {
+    /// Create new state for reading checkpoint hint.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Apply consumer to a batch of checkpoint hint data.
+    ///
+    /// Returns:
+    /// - `Ok(true)` = Continue (keep feeding data)
+    /// - `Ok(false)` = Break (stop iteration, we have the hint)
+    ///
+    /// The batch is expected to contain columns from the `_last_checkpoint` JSON:
+    /// - `version`: Long - checkpoint version
+    /// - `size`: Long - number of actions
+    /// - `parts`: Integer - number of parts (optional)
+    /// - `sizeInBytes`: Long - size in bytes (optional)
+    /// - `numOfAddFiles`: Long - number of add files (optional)
+    #[inline]
+    pub fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<bool> {
+        use crate::arrow::array::{Array, Int32Array, Int64Array};
+        use crate::engine::arrow_data::ArrowEngineData;
+        use crate::AsAny;
+
+        // If we already processed a hint, stop
+        if self.processed {
+            return Ok(false);
+        }
+
+        // If we have an error, stop processing
+        if self.error.is_some() {
+            return Ok(false);
+        }
+
+        // Try to get the batch as ArrowEngineData
+        let arrow_data = batch
+            .any_ref()
+            .downcast_ref::<ArrowEngineData>()
+            .ok_or_else(|| Error::generic("Expected ArrowEngineData for CheckpointHintReader"))?;
+
+        let record_batch = arrow_data.record_batch();
+        let num_rows = record_batch.num_rows();
+
+        if num_rows == 0 {
+            return Ok(true); // Continue with empty batch
+        }
+
+        // We only expect one row in the _last_checkpoint file
+        // Extract version (required)
+        if let Some(version_col) = record_batch.column_by_name("version") {
+            if let Some(version_array) = version_col.as_any().downcast_ref::<Int64Array>() {
+                if !version_array.is_null(0) {
+                    self.version = Some(version_array.value(0) as Version);
+                }
+            }
+        }
+
+        // Extract size (optional but commonly present)
+        if let Some(size_col) = record_batch.column_by_name("size") {
+            if let Some(size_array) = size_col.as_any().downcast_ref::<Int64Array>() {
+                if !size_array.is_null(0) {
+                    self.size = Some(size_array.value(0));
+                }
+            }
+        }
+
+        // Extract parts (optional)
+        if let Some(parts_col) = record_batch.column_by_name("parts") {
+            if let Some(parts_array) = parts_col.as_any().downcast_ref::<Int32Array>() {
+                if !parts_array.is_null(0) {
+                    self.parts = Some(parts_array.value(0));
+                }
+            }
+        }
+
+        // Extract sizeInBytes (optional)
+        if let Some(size_in_bytes_col) = record_batch.column_by_name("sizeInBytes") {
+            if let Some(size_in_bytes_array) = size_in_bytes_col.as_any().downcast_ref::<Int64Array>()
+            {
+                if !size_in_bytes_array.is_null(0) {
+                    self.size_in_bytes = Some(size_in_bytes_array.value(0));
+                }
+            }
+        }
+
+        // Extract numOfAddFiles (optional)
+        if let Some(num_add_col) = record_batch.column_by_name("numOfAddFiles") {
+            if let Some(num_add_array) = num_add_col.as_any().downcast_ref::<Int64Array>() {
+                if !num_add_array.is_null(0) {
+                    self.num_of_add_files = Some(num_add_array.value(0));
+                }
+            }
+        }
+
+        self.processed = true;
+        
+        // Return false to indicate we're done (Break)
+        Ok(false)
+    }
+
+    /// Finalize the state after iteration completes.
+    pub fn finalize(&mut self) {
+        // Nothing special needed for finalization
+    }
+
+    /// Check if a hint was successfully extracted.
+    pub fn has_hint(&self) -> bool {
+        self.version.is_some()
+    }
+
+    /// Check if an error occurred during processing.
+    pub fn has_error(&self) -> bool {
+        self.error.is_some()
+    }
+
+    /// Take the error, if any.
+    pub fn take_error(&mut self) -> Option<String> {
+        self.error.take()
+    }
+
+    /// Get the extracted version, if any.
+    pub fn get_version(&self) -> Option<Version> {
+        self.version
+    }
+
+    /// Get the extracted parts count, if any.
+    pub fn get_parts(&self) -> Option<i32> {
+        self.parts
+    }
+}
+
+// =============================================================================
 // ConsumerKdfState - Wrapper enum for consumer KDFs
 // =============================================================================
 
@@ -785,6 +962,8 @@ impl LogSegmentBuilderState {
 pub enum ConsumerKdfState {
     /// Builds a LogSegment from file listing results
     LogSegmentBuilder(LogSegmentBuilderState),
+    /// Extracts checkpoint hint from _last_checkpoint scan
+    CheckpointHintReader(CheckpointHintReaderState),
 }
 
 impl ConsumerKdfState {
@@ -797,6 +976,7 @@ impl ConsumerKdfState {
     pub fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<bool> {
         match self {
             Self::LogSegmentBuilder(state) => state.apply(batch),
+            Self::CheckpointHintReader(state) => state.apply(batch),
         }
     }
 
@@ -804,6 +984,7 @@ impl ConsumerKdfState {
     pub fn finalize(&mut self) {
         match self {
             Self::LogSegmentBuilder(state) => state.finalize(),
+            Self::CheckpointHintReader(state) => state.finalize(),
         }
     }
 
@@ -811,6 +992,7 @@ impl ConsumerKdfState {
     pub fn has_error(&self) -> bool {
         match self {
             Self::LogSegmentBuilder(state) => state.has_error(),
+            Self::CheckpointHintReader(state) => state.has_error(),
         }
     }
 
@@ -818,6 +1000,9 @@ impl ConsumerKdfState {
     pub fn take_error(&mut self) -> Option<Error> {
         match self {
             Self::LogSegmentBuilder(state) => {
+                state.take_error().map(Error::generic)
+            }
+            Self::CheckpointHintReader(state) => {
                 state.take_error().map(Error::generic)
             }
         }
@@ -1344,7 +1529,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_state_new() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let state = LogSegmentBuilderState::new(log_root.clone(), None);
+        let state = LogSegmentBuilderState::new(log_root.clone(), None, None);
 
         assert_eq!(state.log_root, log_root);
         assert!(state.end_version.is_none());
@@ -1356,7 +1541,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_state_with_end_version() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let state = LogSegmentBuilderState::new(log_root.clone(), Some(10));
+        let state = LogSegmentBuilderState::new(log_root.clone(), Some(10), None);
 
         assert_eq!(state.log_root, log_root);
         assert_eq!(state.end_version, Some(10));
@@ -1365,7 +1550,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_empty_batch() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         let batch = create_file_listing_batch(&[]);
 
@@ -1382,7 +1567,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_commit_files() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         // Version 0, 1, 2 commit files
         let batch = create_file_listing_batch(&[
@@ -1410,7 +1595,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_multiple_batches() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         // First batch
         let batch1 = create_file_listing_batch(&[
@@ -1439,7 +1624,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_single_part_checkpoint() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         let batch = create_file_listing_batch(&[
             ("00000000000000000000.json", 1000, 100),
@@ -1468,7 +1653,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_multipart_checkpoint_complete() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         // Multi-part checkpoint with 3 parts - all present
         let batch = create_file_listing_batch(&[
@@ -1495,7 +1680,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_multipart_checkpoint_incomplete() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         // Multi-part checkpoint with 3 parts - only 2 present (incomplete)
         let batch = create_file_listing_batch(&[
@@ -1520,7 +1705,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_checkpoint_clears_earlier_commits() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         let batch = create_file_listing_batch(&[
             ("00000000000000000000.json", 1000, 100),
@@ -1551,7 +1736,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_later_checkpoint_replaces_earlier() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         let batch = create_file_listing_batch(&[
             ("00000000000000000000.json", 1000, 100),
@@ -1582,7 +1767,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_crc_files() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         let batch = create_file_listing_batch(&[
             ("00000000000000000000.json", 1000, 100),
@@ -1606,7 +1791,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_compaction_files() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         let batch = create_file_listing_batch(&[
             ("00000000000000000000.json", 1000, 100),
@@ -1626,7 +1811,7 @@ mod tests {
     fn test_log_segment_builder_compaction_respects_end_version() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
         // End version is 3, compaction goes to 5
-        let mut state = LogSegmentBuilderState::new(log_root, Some(3));
+        let mut state = LogSegmentBuilderState::new(log_root, Some(3), None);
 
         let batch = create_file_listing_batch(&[
             ("00000000000000000000.json", 1000, 100),
@@ -1651,7 +1836,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_end_version_stops_processing() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, Some(2));
+        let mut state = LogSegmentBuilderState::new(log_root, Some(2), None);
 
         let batch = create_file_listing_batch(&[
             ("00000000000000000000.json", 1000, 100),
@@ -1676,7 +1861,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_end_version_with_checkpoint() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, Some(5));
+        let mut state = LogSegmentBuilderState::new(log_root, Some(5), None);
 
         let batch = create_file_listing_batch(&[
             ("00000000000000000000.json", 1000, 100),
@@ -1709,7 +1894,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_unknown_files_ignored() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         let batch = create_file_listing_batch(&[
             ("00000000000000000000.json", 1000, 100),
@@ -1733,7 +1918,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_error_handling() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         // Manually set an error
         state.error = Some("Test error".to_string());
@@ -1761,6 +1946,7 @@ mod tests {
         let mut state = ConsumerKdfState::LogSegmentBuilder(LogSegmentBuilderState::new(
             log_root.clone(),
             None,
+            None,
         ));
 
         let batch = create_file_listing_batch(&[("00000000000000000001.json", 1000, 100)]);
@@ -1777,7 +1963,7 @@ mod tests {
     fn test_consumer_kdf_state_raw_pointer_roundtrip() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
         let state =
-            ConsumerKdfState::LogSegmentBuilder(LogSegmentBuilderState::new(log_root, None));
+            ConsumerKdfState::LogSegmentBuilder(LogSegmentBuilderState::new(log_root, None, None));
 
         let ptr = state.into_raw();
         assert_ne!(ptr, 0);
@@ -1793,6 +1979,9 @@ mod tests {
             ConsumerKdfState::LogSegmentBuilder(s) => {
                 assert!(!s.has_error());
             }
+            ConsumerKdfState::CheckpointHintReader(s) => {
+                assert!(!s.has_error());
+            }
         }
     }
 
@@ -1803,7 +1992,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_checkpoint_at_version_zero() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         let batch = create_file_listing_batch(&[
             ("00000000000000000000.checkpoint.parquet", 5000, 100),
@@ -1826,7 +2015,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_only_checkpoint_no_commits_after() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         let batch = create_file_listing_batch(&[
             ("00000000000000000000.json", 1000, 100),
@@ -1853,7 +2042,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_no_checkpoint() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         let batch = create_file_listing_batch(&[
             ("00000000000000000000.json", 1000, 100),
@@ -1877,7 +2066,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_uuid_checkpoint() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None);
+        let mut state = LogSegmentBuilderState::new(log_root, None, None);
 
         // UUID checkpoint format
         let batch = create_file_listing_batch(&[
@@ -1897,5 +2086,295 @@ mod tests {
         // Commits after checkpoint
         assert_eq!(state.ascending_commit_files.len(), 1);
         assert_eq!(state.ascending_commit_files[0].version, 3);
+    }
+
+    // =========================================================================
+    // CheckpointHintReaderState Tests
+    // =========================================================================
+
+    /// Helper function to create a checkpoint hint batch
+    fn create_checkpoint_hint_batch(
+        version: Option<i64>,
+        size: Option<i64>,
+        parts: Option<i32>,
+        size_in_bytes: Option<i64>,
+        num_of_add_files: Option<i64>,
+    ) -> ArrowEngineData {
+        use crate::arrow::array::{Int32Array, Int64Array, RecordBatch};
+        use crate::arrow::datatypes::{DataType, Field, Schema};
+
+        let schema = Schema::new(vec![
+            Field::new("version", DataType::Int64, true),
+            Field::new("size", DataType::Int64, true),
+            Field::new("parts", DataType::Int32, true),
+            Field::new("sizeInBytes", DataType::Int64, true),
+            Field::new("numOfAddFiles", DataType::Int64, true),
+        ]);
+
+        let version_array: Int64Array = vec![version].into();
+        let size_array: Int64Array = vec![size].into();
+        let parts_array: Int32Array = vec![parts].into();
+        let size_in_bytes_array: Int64Array = vec![size_in_bytes].into();
+        let num_of_add_files_array: Int64Array = vec![num_of_add_files].into();
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(version_array),
+                Arc::new(size_array),
+                Arc::new(parts_array),
+                Arc::new(size_in_bytes_array),
+                Arc::new(num_of_add_files_array),
+            ],
+        )
+        .unwrap();
+
+        ArrowEngineData::new(batch)
+    }
+
+    /// Helper function to create an empty checkpoint hint batch (simulates file not found)
+    fn create_empty_checkpoint_hint_batch() -> ArrowEngineData {
+        use crate::arrow::array::{Int32Array, Int64Array, RecordBatch};
+        use crate::arrow::datatypes::{DataType, Field, Schema};
+
+        let schema = Schema::new(vec![
+            Field::new("version", DataType::Int64, true),
+            Field::new("size", DataType::Int64, true),
+            Field::new("parts", DataType::Int32, true),
+            Field::new("sizeInBytes", DataType::Int64, true),
+            Field::new("numOfAddFiles", DataType::Int64, true),
+        ]);
+
+        // Empty arrays
+        let version_array = Int64Array::from(Vec::<Option<i64>>::new());
+        let size_array = Int64Array::from(Vec::<Option<i64>>::new());
+        let parts_array = Int32Array::from(Vec::<Option<i32>>::new());
+        let size_in_bytes_array = Int64Array::from(Vec::<Option<i64>>::new());
+        let num_of_add_files_array = Int64Array::from(Vec::<Option<i64>>::new());
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(version_array),
+                Arc::new(size_array),
+                Arc::new(parts_array),
+                Arc::new(size_in_bytes_array),
+                Arc::new(num_of_add_files_array),
+            ],
+        )
+        .unwrap();
+
+        ArrowEngineData::new(batch)
+    }
+
+    #[test]
+    fn test_checkpoint_hint_reader_file_not_found_empty_batch() {
+        // Simulates when _last_checkpoint file is not found - scanner returns empty batch
+        let mut state = CheckpointHintReaderState::new();
+
+        let batch = create_empty_checkpoint_hint_batch();
+        
+        // Empty batch should return Ok(true) to continue (maybe more batches coming)
+        let result = state.apply(&batch);
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // true = continue
+        
+        // No hint should be extracted
+        assert!(!state.has_hint());
+        assert!(state.version.is_none());
+        assert!(!state.has_error());
+    }
+
+    #[test]
+    fn test_checkpoint_hint_reader_file_not_found_no_batches() {
+        // Simulates when _last_checkpoint file is not found - no batches at all
+        let state = CheckpointHintReaderState::new();
+
+        // Never called apply - state should be clean
+        assert!(!state.has_hint());
+        assert!(state.version.is_none());
+        assert!(!state.has_error());
+        assert!(state.get_version().is_none());
+    }
+
+    #[test]
+    fn test_checkpoint_hint_reader_valid_hint() {
+        let mut state = CheckpointHintReaderState::new();
+
+        let batch = create_checkpoint_hint_batch(
+            Some(42),   // version
+            Some(1000), // size
+            Some(3),    // parts
+            Some(5000), // sizeInBytes
+            Some(500),  // numOfAddFiles
+        );
+
+        let result = state.apply(&batch);
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // false = break, we got the hint
+
+        // All fields should be extracted
+        assert!(state.has_hint());
+        assert_eq!(state.version, Some(42));
+        assert_eq!(state.size, Some(1000));
+        assert_eq!(state.parts, Some(3));
+        assert_eq!(state.size_in_bytes, Some(5000));
+        assert_eq!(state.num_of_add_files, Some(500));
+        assert!(!state.has_error());
+    }
+
+    #[test]
+    fn test_checkpoint_hint_reader_minimal_hint() {
+        // Only version is present (minimal valid hint)
+        let mut state = CheckpointHintReaderState::new();
+
+        let batch = create_checkpoint_hint_batch(
+            Some(10), // version
+            None,     // size
+            None,     // parts
+            None,     // sizeInBytes
+            None,     // numOfAddFiles
+        );
+
+        let result = state.apply(&batch);
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // false = break
+
+        assert!(state.has_hint());
+        assert_eq!(state.version, Some(10));
+        assert!(state.size.is_none());
+        assert!(state.parts.is_none());
+    }
+
+    #[test]
+    fn test_checkpoint_hint_reader_null_version() {
+        // Version is null - this is invalid, no hint should be extracted
+        let mut state = CheckpointHintReaderState::new();
+
+        let batch = create_checkpoint_hint_batch(
+            None,       // version is null
+            Some(1000), // size
+            Some(3),    // parts
+            None,
+            None,
+        );
+
+        let result = state.apply(&batch);
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // false = processed but no valid version
+
+        // No valid hint (version is required)
+        assert!(!state.has_hint());
+        assert!(state.version.is_none());
+    }
+
+    #[test]
+    fn test_checkpoint_hint_reader_multiple_empty_batches() {
+        // Multiple empty batches followed by valid data
+        let mut state = CheckpointHintReaderState::new();
+
+        // First empty batch
+        let empty_batch = create_empty_checkpoint_hint_batch();
+        let result = state.apply(&empty_batch);
+        assert!(result.unwrap()); // true = continue
+
+        // Second empty batch
+        let result = state.apply(&empty_batch);
+        assert!(result.unwrap()); // true = continue
+
+        // No hint yet
+        assert!(!state.has_hint());
+
+        // Valid batch
+        let valid_batch = create_checkpoint_hint_batch(Some(100), Some(500), None, None, None);
+        let result = state.apply(&valid_batch);
+        assert!(!result.unwrap()); // false = got hint
+
+        // Now we have the hint
+        assert!(state.has_hint());
+        assert_eq!(state.version, Some(100));
+    }
+
+    #[test]
+    fn test_checkpoint_hint_reader_only_processes_first_row() {
+        // If somehow we get multiple rows, only the first should be processed
+        let mut state = CheckpointHintReaderState::new();
+
+        // Create batch with version 42
+        let batch = create_checkpoint_hint_batch(Some(42), None, None, None, None);
+        let result = state.apply(&batch);
+        assert!(!result.unwrap()); // false = got hint
+
+        // Try to apply another batch - should be ignored
+        let batch2 = create_checkpoint_hint_batch(Some(99), None, None, None, None);
+        let result = state.apply(&batch2);
+        assert!(!result.unwrap()); // false = already processed
+
+        // Original version should be retained
+        assert_eq!(state.version, Some(42));
+    }
+
+    #[test]
+    fn test_checkpoint_hint_reader_finalize() {
+        let mut state = CheckpointHintReaderState::new();
+
+        let batch = create_checkpoint_hint_batch(Some(50), Some(100), None, None, None);
+        state.apply(&batch).unwrap();
+        
+        // Finalize should not change anything
+        state.finalize();
+
+        assert!(state.has_hint());
+        assert_eq!(state.version, Some(50));
+    }
+
+    #[test]
+    fn test_checkpoint_hint_reader_get_accessors() {
+        let mut state = CheckpointHintReaderState::new();
+
+        // Before applying
+        assert!(state.get_version().is_none());
+        assert!(state.get_parts().is_none());
+
+        // Apply valid batch
+        let batch = create_checkpoint_hint_batch(Some(25), None, Some(5), None, None);
+        state.apply(&batch).unwrap();
+
+        // After applying
+        assert_eq!(state.get_version(), Some(25));
+        assert_eq!(state.get_parts(), Some(5));
+    }
+
+    #[test]
+    fn test_checkpoint_hint_consumer_kdf_state_empty_batch() {
+        // Test through the ConsumerKdfState wrapper
+        let mut state = ConsumerKdfState::CheckpointHintReader(CheckpointHintReaderState::new());
+
+        let batch = create_empty_checkpoint_hint_batch();
+        let result = state.apply(&batch);
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // true = continue
+
+        assert!(!state.has_error());
+    }
+
+    #[test]
+    fn test_checkpoint_hint_consumer_kdf_state_valid_batch() {
+        let mut state = ConsumerKdfState::CheckpointHintReader(CheckpointHintReaderState::new());
+
+        let batch = create_checkpoint_hint_batch(Some(77), Some(200), Some(2), None, None);
+        let result = state.apply(&batch);
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // false = got hint
+
+        state.finalize();
+        assert!(!state.has_error());
+
+        // Verify hint was extracted
+        if let ConsumerKdfState::CheckpointHintReader(inner) = state {
+            assert!(inner.has_hint());
+            assert_eq!(inner.version, Some(77));
+            assert_eq!(inner.parts, Some(2));
+        }
     }
 }

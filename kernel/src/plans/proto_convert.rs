@@ -239,7 +239,7 @@ impl From<&CheckpointLeafPlan> for proto::CheckpointLeafPlan {
     fn from(plan: &CheckpointLeafPlan) -> Self {
         proto::CheckpointLeafPlan {
             scan: Some((&plan.scan).into()),
-            dedup_filter: plan.dedup_filter.as_ref().map(|f| f.into()),
+            dedup_filter: Some((&plan.dedup_filter).into()),
             project: Some((&plan.project).into()),
         }
     }
@@ -249,6 +249,7 @@ impl From<&CheckpointHintPlan> for proto::CheckpointHintPlan {
     fn from(plan: &CheckpointHintPlan) -> Self {
         proto::CheckpointHintPlan {
             scan: Some((&plan.scan).into()),
+            hint_reader: Some((&plan.hint_reader).into()),
         }
     }
 }
@@ -257,7 +258,7 @@ impl From<&FileListingPhasePlan> for proto::FileListingPhasePlan {
     fn from(plan: &FileListingPhasePlan) -> Self {
         proto::FileListingPhasePlan {
             listing: Some((&plan.listing).into()),
-            log_segment_builder: plan.log_segment_builder.as_ref().map(|c| c.into()),
+            log_segment_builder: Some((&plan.log_segment_builder).into()),
         }
     }
 }
