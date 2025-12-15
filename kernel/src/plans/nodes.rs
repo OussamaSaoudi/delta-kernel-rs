@@ -11,7 +11,7 @@ use crate::FileMeta;
 
 use crate::Version;
 
-use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState, SchemaReaderState, SchemaStoreState};
+use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState, MetadataProtocolReaderState, SchemaReaderState, SchemaStoreState};
 
 // =============================================================================
 // Kernel-Defined Function (KDF) Type System
@@ -148,6 +148,17 @@ impl ConsumeByKDF {
     pub fn checkpoint_hint_reader() -> Self {
         Self {
             state: ConsumerKdfState::CheckpointHintReader(CheckpointHintReaderState::new()),
+        }
+    }
+
+    /// Create a new MetadataProtocolReader consumer.
+    ///
+    /// This consumer extracts the first non-null metadata and protocol actions
+    /// from the scan results of log files (JSON commits or Parquet checkpoints).
+    /// Used during snapshot construction to get table configuration.
+    pub fn metadata_protocol_reader() -> Self {
+        Self {
+            state: ConsumerKdfState::MetadataProtocolReader(MetadataProtocolReaderState::new()),
         }
     }
 

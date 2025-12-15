@@ -77,15 +77,18 @@ pub struct FileListingPhasePlan {
     pub log_segment_builder: ConsumeByKDF,
 }
 
-/// Plan for loading table metadata.
+/// Plan for loading table metadata (protocol and metadata actions).
 ///
-/// Structure: Scan → FirstNonNull
+/// Structure: Scan → ConsumeByKDF (MetadataProtocolReader)
+///
+/// The consumer KDF processes scan results to extract the first non-null
+/// protocol and metadata actions needed for snapshot construction.
 #[derive(Debug, Clone)]
 pub struct MetadataLoadPlan {
-    /// Scan protocol/metadata files
+    /// Scan protocol/metadata files (JSON commits or Parquet checkpoints)
     pub scan: ScanNode,
-    /// Extract first non-null protocol/metadata
-    pub extract: FirstNonNullNode,
+    /// Consumer KDF to extract protocol and metadata from scan results
+    pub metadata_reader: ConsumeByKDF,
 }
 
 /// Plan for reading checkpoint hint file (_last_checkpoint).
@@ -172,9 +175,9 @@ impl AsQueryPlan for FileListingPhasePlan {
 impl AsQueryPlan for MetadataLoadPlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
         let scan = DeclarativePlanNode::Scan(self.scan.clone());
-        DeclarativePlanNode::FirstNonNull {
+        DeclarativePlanNode::ConsumeByKDF {
             child: Box::new(scan),
-            node: self.extract.clone(),
+            node: self.metadata_reader.clone(),
         }
     }
 }

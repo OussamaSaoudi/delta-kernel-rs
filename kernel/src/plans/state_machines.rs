@@ -59,7 +59,7 @@ use crate::{DeltaResult, Error};
 
 use super::composite::*;
 use super::declarative::DeclarativePlanNode;
-use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState};
+use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState, MetadataProtocolReaderState};
 use super::nodes::{ConsumeByKDF, FileListingNode, FileType, FilterByKDF, FirstNonNullNode, ScanNode, SelectNode};
 use super::AsQueryPlan;
 
@@ -826,7 +826,23 @@ impl SnapshotStateMachine {
             }
             SnapshotPhase::LoadMetadata(_) => {
                 // Propagate execution errors for this phase
-                let _executed_plan = result?;
+                let executed_plan = result?;
+                
+                // Extract protocol and metadata from the executed plan's consumer KDF state
+                self.extract_consumer_kdf_state(&executed_plan)?;
+                
+                // Fail if protocol or metadata were not found - this is required for snapshot construction
+                let protocol = self
+                    .state
+                    .protocol
+                    .take()
+                    .ok_or_else(|| Error::MissingProtocol)?;
+                let metadata = self
+                    .state
+                    .metadata
+                    .take()
+                    .ok_or_else(|| Error::MissingMetadata)?;
+                
                 // Complete - build the full Snapshot
                 self.phase = SnapshotPhase::Complete;
 
@@ -844,18 +860,6 @@ impl SnapshotStateMachine {
                 let end_version = self.state.final_version.map(|v| v as u64);
                 let log_segment =
                     LogSegment::try_new(listed_files, self.state.log_root.clone(), end_version)?;
-
-                // Build TableConfiguration from protocol/metadata
-                let metadata = self
-                    .state
-                    .metadata
-                    .take()
-                    .ok_or_else(|| Error::MissingMetadata)?;
-                let protocol = self
-                    .state
-                    .protocol
-                    .take()
-                    .ok_or_else(|| Error::MissingProtocol)?;
 
                 let table_configuration = TableConfiguration::try_new(
                     metadata,
@@ -922,35 +926,69 @@ impl SnapshotStateMachine {
     }
 
     fn create_load_metadata_plan(state: &SnapshotBuildState) -> DeltaResult<MetadataLoadPlan> {
-        use crate::schema::{DataType, StructField, StructType};
+        use crate::schema::{ArrayType, DataType, MapType, StructField, StructType};
 
-        // Schema for reading protocol/metadata from log files
+        // Comprehensive schema for reading protocol/metadata from log files
         let schema = Arc::new(StructType::new_unchecked(vec![
             StructField::nullable(
                 "protocol",
                 DataType::struct_type_unchecked(vec![
                     StructField::not_null("minReaderVersion", DataType::INTEGER),
                     StructField::not_null("minWriterVersion", DataType::INTEGER),
+                    StructField::nullable("readerFeatures", ArrayType::new(DataType::STRING, true)),
+                    StructField::nullable("writerFeatures", ArrayType::new(DataType::STRING, true)),
                 ]),
             ),
             StructField::nullable(
                 "metaData",
                 DataType::struct_type_unchecked(vec![
                     StructField::not_null("id", DataType::STRING),
+                    StructField::nullable("name", DataType::STRING),
+                    StructField::nullable("description", DataType::STRING),
                     StructField::nullable("schemaString", DataType::STRING),
+                    StructField::nullable("createdTime", DataType::LONG),
+                    StructField::nullable("partitionColumns", ArrayType::new(DataType::STRING, true)),
+                    StructField::nullable(
+                        "format",
+                        DataType::struct_type_unchecked(vec![
+                            StructField::nullable("provider", DataType::STRING),
+                            StructField::nullable("options", MapType::new(DataType::STRING, DataType::STRING, true)),
+                        ]),
+                    ),
+                    StructField::nullable("configuration", MapType::new(DataType::STRING, DataType::STRING, true)),
                 ]),
             ),
         ]));
 
+        // Build list of files to scan from checkpoint_parts and commit_files
+        let mut files = Vec::new();
+        
+        // Add checkpoint files first (they contain complete P&M)
+        for checkpoint in &state.checkpoint_parts {
+            // ParsedLogPath<FileMeta>.location is already a FileMeta
+            files.push(checkpoint.location.clone());
+        }
+        
+        // Add commit files (in reverse order - newest first to find P&M faster)
+        for commit in state.ascending_commit_files.iter().rev() {
+            // ParsedLogPath<FileMeta>.location is already a FileMeta
+            files.push(commit.location.clone());
+        }
+
+        // Determine file type based on what we're scanning
+        let file_type = if !state.checkpoint_parts.is_empty() {
+            FileType::Parquet
+        } else {
+            FileType::Json
+        };
+
         Ok(MetadataLoadPlan {
             scan: ScanNode {
-                file_type: FileType::Json,
-                files: vec![], // Would be populated with actual log files from state
+                file_type,
+                files,
                 schema,
             },
-            extract: FirstNonNullNode {
-                columns: vec!["protocol".to_string(), "metaData".to_string()],
-            },
+            metadata_reader: ConsumeByKDF::metadata_protocol_reader(),
         })
     }
 
@@ -992,6 +1030,22 @@ impl SnapshotStateMachine {
                         // Extract checkpoint hint version if present
                         if let Some(version) = hint_state.version {
                             self.state.checkpoint_hint_version = Some(version as i64);
+                        }
+                    }
+                    ConsumerKdfState::MetadataProtocolReader(mp_state) => {
+                        // Check for errors first
+                        if let Some(ref error) = mp_state.error {
+                            return Err(Error::generic(error.clone()));
+                        }
+
+                        // Extract protocol if present (already a complete Protocol or None)
+                        if let Some(protocol) = mp_state.protocol.clone() {
+                            self.state.protocol = Some(protocol);
+                        }
+
+                        // Extract metadata if present (already a complete Metadata or None)
+                        if let Some(metadata) = mp_state.metadata.clone() {
+                            self.state.metadata = Some(metadata);
                         }
                     }
                 }

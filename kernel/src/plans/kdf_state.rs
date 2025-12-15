@@ -947,6 +947,151 @@ impl CheckpointHintReaderState {
 }
 
 // =============================================================================
+// MetadataProtocolReaderState - Extracts metadata and protocol from log files
+// =============================================================================
+
+use crate::actions::{Metadata, Protocol};
+
+/// State for MetadataProtocolReader consumer KDF - extracts metadata and protocol actions.
+///
+/// This is a **Consumer KDF** that processes the scan results of log files (JSON commits
+/// or Parquet checkpoints) and extracts the first non-null metadata and protocol actions
+/// needed for snapshot construction.
+///
+/// This follows the same pattern as `MetadataVisitor` and `ProtocolVisitor` - we use the
+/// existing `Metadata::try_new_from_data` and `Protocol::try_new_from_data` methods which
+/// guarantee atomic extraction (either we get a complete action or nothing).
+///
+/// # Usage Pattern
+///
+/// 1. Create state
+/// 2. Feed scanned rows from log files through `apply()`
+/// 3. `apply()` returns `Ok(true)` to continue, `Ok(false)` after extracting both actions
+/// 4. After completion, extract the metadata and protocol via `take_*` accessors
+#[derive(Debug, Clone, Default)]
+pub struct MetadataProtocolReaderState {
+    /// The extracted protocol action (complete or None)
+    pub protocol: Option<Protocol>,
+    /// The extracted metadata action (complete or None)
+    pub metadata: Option<Metadata>,
+    /// Stored error to surface during advance()
+    pub error: Option<String>,
+}
+
+impl MetadataProtocolReaderState {
+    /// Create new state for reading metadata and protocol.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Apply consumer to a batch of log file data.
+    ///
+    /// Returns:
+    /// - `Ok(true)` = Continue (keep feeding data, still looking for protocol/metadata)
+    /// - `Ok(false)` = Break (found both protocol and metadata, or error)
+    ///
+    /// Uses the existing `Protocol::try_new_from_data` and `Metadata::try_new_from_data`
+    /// visitor methods which guarantee atomic extraction - we get a complete action or nothing.
+    #[inline]
+    pub fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<bool> {
+        // If we already have both, stop
+        if self.protocol.is_some() && self.metadata.is_some() {
+            return Ok(false);
+        }
+
+        // If we have an error, stop processing
+        if self.error.is_some() {
+            return Ok(false);
+        }
+
+        // Try to extract protocol if not found yet
+        if self.protocol.is_none() {
+            match Protocol::try_new_from_data(batch) {
+                Ok(Some(protocol)) => {
+                    self.protocol = Some(protocol);
+                }
+                Ok(None) => {
+                    // No protocol in this batch, continue
+                }
+                Err(e) => {
+                    self.error = Some(format!("Failed to extract protocol: {}", e));
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Try to extract metadata if not found yet
+        if self.metadata.is_none() {
+            match Metadata::try_new_from_data(batch) {
+                Ok(Some(metadata)) => {
+                    self.metadata = Some(metadata);
+                }
+                Ok(None) => {
+                    // No metadata in this batch, continue
+                }
+                Err(e) => {
+                    self.error = Some(format!("Failed to extract metadata: {}", e));
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Return false (Break) if we found both, otherwise continue
+        Ok(!(self.protocol.is_some() && self.metadata.is_some()))
+    }
+
+    /// Finalize the state after iteration completes.
+    pub fn finalize(&mut self) {
+        // Nothing special needed for finalization
+    }
+
+    /// Check if both protocol and metadata were successfully extracted.
+    pub fn is_complete(&self) -> bool {
+        self.protocol.is_some() && self.metadata.is_some()
+    }
+
+    /// Check if protocol was found.
+    pub fn has_protocol(&self) -> bool {
+        self.protocol.is_some()
+    }
+
+    /// Check if metadata was found.
+    pub fn has_metadata(&self) -> bool {
+        self.metadata.is_some()
+    }
+
+    /// Check if an error occurred during processing.
+    pub fn has_error(&self) -> bool {
+        self.error.is_some()
+    }
+
+    /// Take the error, if any.
+    pub fn take_error(&mut self) -> Option<String> {
+        self.error.take()
+    }
+
+    /// Take the extracted protocol, if any.
+    pub fn take_protocol(&mut self) -> Option<Protocol> {
+        self.protocol.take()
+    }
+
+    /// Take the extracted metadata, if any.
+    pub fn take_metadata(&mut self) -> Option<Metadata> {
+        self.metadata.take()
+    }
+
+    /// Get a reference to the extracted protocol, if any.
+    pub fn get_protocol(&self) -> Option<&Protocol> {
+        self.protocol.as_ref()
+    }
+
+    /// Get a reference to the extracted metadata, if any.
+    pub fn get_metadata(&self) -> Option<&Metadata> {
+        self.metadata.as_ref()
+    }
+}
+
+// =============================================================================
 // ConsumerKdfState - Wrapper enum for consumer KDFs
 // =============================================================================
 
@@ -964,6 +1109,8 @@ pub enum ConsumerKdfState {
     LogSegmentBuilder(LogSegmentBuilderState),
     /// Extracts checkpoint hint from _last_checkpoint scan
     CheckpointHintReader(CheckpointHintReaderState),
+    /// Extracts metadata and protocol from log files
+    MetadataProtocolReader(MetadataProtocolReaderState),
 }
 
 impl ConsumerKdfState {
@@ -977,6 +1124,7 @@ impl ConsumerKdfState {
         match self {
             Self::LogSegmentBuilder(state) => state.apply(batch),
             Self::CheckpointHintReader(state) => state.apply(batch),
+            Self::MetadataProtocolReader(state) => state.apply(batch),
         }
     }
 
@@ -985,6 +1133,7 @@ impl ConsumerKdfState {
         match self {
             Self::LogSegmentBuilder(state) => state.finalize(),
             Self::CheckpointHintReader(state) => state.finalize(),
+            Self::MetadataProtocolReader(state) => state.finalize(),
         }
     }
 
@@ -993,6 +1142,7 @@ impl ConsumerKdfState {
         match self {
             Self::LogSegmentBuilder(state) => state.has_error(),
             Self::CheckpointHintReader(state) => state.has_error(),
+            Self::MetadataProtocolReader(state) => state.has_error(),
         }
     }
 
@@ -1003,6 +1153,9 @@ impl ConsumerKdfState {
                 state.take_error().map(Error::generic)
             }
             Self::CheckpointHintReader(state) => {
+                state.take_error().map(Error::generic)
+            }
+            Self::MetadataProtocolReader(state) => {
                 state.take_error().map(Error::generic)
             }
         }
@@ -1982,6 +2135,9 @@ mod tests {
             ConsumerKdfState::CheckpointHintReader(s) => {
                 assert!(!s.has_error());
             }
+            ConsumerKdfState::MetadataProtocolReader(s) => {
+                assert!(!s.has_error());
+            }
         }
     }
 
@@ -2375,6 +2531,247 @@ mod tests {
             assert!(inner.has_hint());
             assert_eq!(inner.version, Some(77));
             assert_eq!(inner.parts, Some(2));
+        }
+    }
+
+    // =========================================================================
+    // MetadataProtocolReaderState Tests
+    // =========================================================================
+
+    /// Helper to create a batch with protocol and/or metadata actions
+    fn create_protocol_metadata_batch(
+        include_protocol: bool,
+        include_metadata: bool,
+    ) -> Box<dyn crate::EngineData> {
+        use crate::arrow::array::StringArray;
+        use crate::utils::test_utils::parse_json_batch;
+
+        let mut json_strings = Vec::new();
+
+        if include_protocol {
+            json_strings.push(
+                r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#
+            );
+        }
+
+        if include_metadata {
+            json_strings.push(
+                r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{"delta.enableDeletionVectors":"true"},"createdTime":1677811175819}}"#
+            );
+        }
+
+        // Add a filler action if we have no protocol/metadata to avoid empty batch
+        if json_strings.is_empty() {
+            json_strings.push(
+                r#"{"commitInfo":{"timestamp":1677811178585,"operation":"WRITE"}}"#
+            );
+        }
+
+        let string_array: StringArray = json_strings.into();
+        parse_json_batch(string_array)
+    }
+
+    #[test]
+    fn test_metadata_protocol_reader_new() {
+        let state = MetadataProtocolReaderState::new();
+        assert!(state.protocol.is_none());
+        assert!(state.metadata.is_none());
+        assert!(!state.is_complete());
+        assert!(!state.has_protocol());
+        assert!(!state.has_metadata());
+        assert!(!state.has_error());
+    }
+
+    #[test]
+    fn test_metadata_protocol_reader_extracts_both() {
+        let mut state = MetadataProtocolReaderState::new();
+
+        // Batch with both protocol and metadata
+        let batch = create_protocol_metadata_batch(true, true);
+        let result = state.apply(batch.as_ref());
+
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // false = Break, we found both
+
+        assert!(state.is_complete());
+        assert!(state.has_protocol());
+        assert!(state.has_metadata());
+        assert!(!state.has_error());
+
+        // Verify protocol was extracted correctly
+        let protocol = state.get_protocol().unwrap();
+        assert_eq!(protocol.min_reader_version(), 3);
+        assert_eq!(protocol.min_writer_version(), 7);
+
+        // Verify metadata was extracted correctly
+        let metadata = state.get_metadata().unwrap();
+        assert_eq!(metadata.id(), "testId");
+    }
+
+    #[test]
+    fn test_metadata_protocol_reader_protocol_only() {
+        let mut state = MetadataProtocolReaderState::new();
+
+        // Batch with only protocol
+        let batch = create_protocol_metadata_batch(true, false);
+        let result = state.apply(batch.as_ref());
+
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // true = Continue, still need metadata
+
+        assert!(!state.is_complete());
+        assert!(state.has_protocol());
+        assert!(!state.has_metadata());
+    }
+
+    #[test]
+    fn test_metadata_protocol_reader_metadata_only() {
+        let mut state = MetadataProtocolReaderState::new();
+
+        // Batch with only metadata
+        let batch = create_protocol_metadata_batch(false, true);
+        let result = state.apply(batch.as_ref());
+
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // true = Continue, still need protocol
+
+        assert!(!state.is_complete());
+        assert!(!state.has_protocol());
+        assert!(state.has_metadata());
+    }
+
+    #[test]
+    fn test_metadata_protocol_reader_empty_batch() {
+        let mut state = MetadataProtocolReaderState::new();
+
+        // Batch with neither protocol nor metadata (just commitInfo)
+        let batch = create_protocol_metadata_batch(false, false);
+        let result = state.apply(batch.as_ref());
+
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // true = Continue, need both
+
+        assert!(!state.is_complete());
+        assert!(!state.has_protocol());
+        assert!(!state.has_metadata());
+    }
+
+    #[test]
+    fn test_metadata_protocol_reader_multiple_batches() {
+        let mut state = MetadataProtocolReaderState::new();
+
+        // First batch: only protocol
+        let batch1 = create_protocol_metadata_batch(true, false);
+        let result = state.apply(batch1.as_ref());
+        assert!(result.unwrap()); // true = Continue
+
+        assert!(state.has_protocol());
+        assert!(!state.has_metadata());
+
+        // Second batch: only metadata
+        let batch2 = create_protocol_metadata_batch(false, true);
+        let result = state.apply(batch2.as_ref());
+        assert!(!result.unwrap()); // false = Break, now have both
+
+        assert!(state.is_complete());
+        assert!(state.has_protocol());
+        assert!(state.has_metadata());
+    }
+
+    #[test]
+    fn test_metadata_protocol_reader_stops_after_complete() {
+        let mut state = MetadataProtocolReaderState::new();
+
+        // First batch: both protocol and metadata
+        let batch = create_protocol_metadata_batch(true, true);
+        let result = state.apply(batch.as_ref());
+        assert!(!result.unwrap()); // false = Break
+
+        // Get the extracted values
+        let protocol_version = state.get_protocol().unwrap().min_reader_version();
+        let metadata_id = state.get_metadata().unwrap().id().to_string();
+
+        // Try to apply another batch - should be ignored
+        let batch2 = create_protocol_metadata_batch(true, true);
+        let result = state.apply(batch2.as_ref());
+        assert!(!result.unwrap()); // false = already complete
+
+        // Values should be unchanged
+        assert_eq!(state.get_protocol().unwrap().min_reader_version(), protocol_version);
+        assert_eq!(state.get_metadata().unwrap().id(), metadata_id);
+    }
+
+    #[test]
+    fn test_metadata_protocol_reader_take_methods() {
+        let mut state = MetadataProtocolReaderState::new();
+
+        // Extract both
+        let batch = create_protocol_metadata_batch(true, true);
+        state.apply(batch.as_ref()).unwrap();
+
+        assert!(state.is_complete());
+
+        // Take protocol
+        let protocol = state.take_protocol();
+        assert!(protocol.is_some());
+        assert!(state.protocol.is_none()); // Now None after take
+        assert!(!state.has_protocol());
+
+        // Take metadata
+        let metadata = state.take_metadata();
+        assert!(metadata.is_some());
+        assert!(state.metadata.is_none()); // Now None after take
+        assert!(!state.has_metadata());
+
+        // Second take returns None
+        assert!(state.take_protocol().is_none());
+        assert!(state.take_metadata().is_none());
+    }
+
+    #[test]
+    fn test_metadata_protocol_reader_consumer_kdf_state() {
+        // Test through the ConsumerKdfState wrapper
+        let mut state = ConsumerKdfState::MetadataProtocolReader(MetadataProtocolReaderState::new());
+
+        // Batch with both
+        let batch = create_protocol_metadata_batch(true, true);
+        let result = state.apply(batch.as_ref());
+
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // false = Break
+
+        state.finalize();
+        assert!(!state.has_error());
+
+        // Verify extraction
+        if let ConsumerKdfState::MetadataProtocolReader(inner) = state {
+            assert!(inner.is_complete());
+            assert!(inner.has_protocol());
+            assert!(inner.has_metadata());
+        } else {
+            panic!("Expected MetadataProtocolReader variant");
+        }
+    }
+
+    #[test]
+    fn test_metadata_protocol_reader_consumer_kdf_state_partial() {
+        // Test partial extraction through wrapper
+        let mut state = ConsumerKdfState::MetadataProtocolReader(MetadataProtocolReaderState::new());
+
+        // Batch with only protocol
+        let batch = create_protocol_metadata_batch(true, false);
+        let result = state.apply(batch.as_ref());
+
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // true = Continue
+
+        // Verify partial state
+        if let ConsumerKdfState::MetadataProtocolReader(inner) = &state {
+            assert!(!inner.is_complete());
+            assert!(inner.has_protocol());
+            assert!(!inner.has_metadata());
+        } else {
+            panic!("Expected MetadataProtocolReader variant");
         }
     }
 }

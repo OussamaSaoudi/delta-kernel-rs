@@ -1481,11 +1481,11 @@ mod tests {
         assert!(matches!(result, Ok(AdvanceResult::Continue)));
         assert_eq!(sm.phase_name(), "LoadMetadata");
 
-        // Get final plan - LoadMetadata returns FirstNonNull wrapping a Scan
+        // Get final plan - LoadMetadata returns ConsumeByKDF (MetadataProtocolReader) wrapping a Scan
         let plan = sm.get_plan().unwrap();
         assert!(
-            matches!(plan, DeclarativePlanNode::FirstNonNull { .. }),
-            "Expected FirstNonNull, got {:?}",
+            matches!(plan, DeclarativePlanNode::ConsumeByKDF { .. }),
+            "Expected ConsumeByKDF, got {:?}",
             plan
         );
 

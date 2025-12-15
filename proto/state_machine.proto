@@ -45,10 +45,11 @@ message FileListingPhasePlan {
   ConsumeByKDF log_segment_builder = 2;   // Consumer to build LogSegment
 }
 
-// Plan for loading table metadata
+// Plan for loading table metadata (protocol and metadata actions)
+// Uses a consumer KDF to extract first non-null protocol/metadata
 message MetadataLoadPlan {
   ScanNode scan = 1;                      // Scan protocol/metadata files
-  FirstNonNullNode extract = 2;           // Extract first non-null values
+  ConsumeByKDF metadata_reader = 2;       // Consumer to extract protocol/metadata
 }
 
 // Plan for reading checkpoint hint file (_last_checkpoint)

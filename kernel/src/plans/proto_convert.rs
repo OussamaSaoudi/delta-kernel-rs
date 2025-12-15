@@ -267,7 +267,7 @@ impl From<&MetadataLoadPlan> for proto::MetadataLoadPlan {
     fn from(plan: &MetadataLoadPlan) -> Self {
         proto::MetadataLoadPlan {
             scan: Some((&plan.scan).into()),
-            extract: Some((&plan.extract).into()),
+            metadata_reader: Some((&plan.metadata_reader).into()),
         }
     }
 }
