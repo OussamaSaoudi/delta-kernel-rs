@@ -730,6 +730,9 @@ pub enum ScanPhase {
     Commit(CommitPhasePlan),
     /// Query checkpoint schema to detect V2 checkpoints - no sink (schema only)
     SchemaQuery(SchemaQueryPhasePlan),
+    /// Read JSON checkpoint - collects sidecars and streams add actions - Result sink
+    /// This handles JSON V2 checkpoints where we don't know a priori if sidecars exist
+    JsonCheckpoint(JsonCheckpointPhasePlan),
     /// Read checkpoint manifest (v2 checkpoints) - Drop sink
     CheckpointManifest(CheckpointManifestPlan),
     /// Read checkpoint leaf/sidecar files - Result sink
@@ -744,6 +747,7 @@ impl ScanPhase {
         match self {
             Self::Commit(_) => "Commit",
             Self::SchemaQuery(_) => "SchemaQuery",
+            Self::JsonCheckpoint(_) => "JsonCheckpoint",
             Self::CheckpointManifest(_) => "CheckpointManifest",
             Self::CheckpointLeaf(_) => "CheckpointLeaf",
             Self::Complete => "Complete",
@@ -755,6 +759,7 @@ impl ScanPhase {
         match self {
             Self::Commit(p) => Some(p.as_query_plan()),
             Self::SchemaQuery(p) => Some(p.as_query_plan()),
+            Self::JsonCheckpoint(p) => Some(p.as_query_plan()),
             Self::CheckpointManifest(p) => Some(p.as_query_plan()),
             Self::CheckpointLeaf(p) => Some(p.as_query_plan()),
             Self::Complete => None,
@@ -942,9 +947,23 @@ impl ScanStateMachine {
                         self.phase = ScanPhase::CheckpointLeaf(leaf_plan);
                     }
                     Some(CheckpointType::Classic) | None => {
-                        // Single-part checkpoint - query schema to detect V2
-                        let schema_plan = self.create_schema_query_plan()?;
-                        self.phase = ScanPhase::SchemaQuery(schema_plan);
+                        // Check if the checkpoint file is JSON (can't do parquet schema query)
+                        let is_json_checkpoint = self.state.checkpoint_files.first()
+                            .map(|f| f.location.path().ends_with(".json"))
+                            .unwrap_or(false);
+                        
+                        if is_json_checkpoint {
+                            // JSON checkpoints can't be queried for parquet schema.
+                            // We don't know a priori if they have sidecars, so use the
+                            // hybrid JsonCheckpoint phase that both collects sidecars
+                            // and streams add actions.
+                            let json_plan = self.create_json_checkpoint_plan()?;
+                            self.phase = ScanPhase::JsonCheckpoint(json_plan);
+                        } else {
+                            // Parquet checkpoint - query schema to detect V2 with sidecars
+                            let schema_plan = self.create_schema_query_plan()?;
+                            self.phase = ScanPhase::SchemaQuery(schema_plan);
+                        }
                     }
                 }
                 Ok(AdvanceResult::Continue)
@@ -964,6 +983,23 @@ impl ScanStateMachine {
                     self.phase = ScanPhase::CheckpointLeaf(leaf_plan);
                 }
                 Ok(AdvanceResult::Continue)
+            }
+            ScanPhase::JsonCheckpoint(_) => {
+                // After JSON checkpoint phase, check if any sidecars were collected.
+                // The phase already streamed add actions from the checkpoint file.
+                self.extract_sidecar_files(&executed_plan)?;
+                
+                if self.state.sidecar_files.is_empty() {
+                    // No sidecars - all add actions were in the checkpoint, we're done
+                    self.phase = ScanPhase::Complete;
+                    Ok(AdvanceResult::Done(self.build_result()))
+                } else {
+                    // Sidecars found - need to read them for more add actions
+                    self.state.checkpoint_type = Some(CheckpointType::V2);
+                    let leaf_plan = self.create_checkpoint_leaf_plan()?;
+                    self.phase = ScanPhase::CheckpointLeaf(leaf_plan);
+                    Ok(AdvanceResult::Continue)
+                }
             }
             ScanPhase::CheckpointManifest(_) => {
                 // After manifest, extract sidecar files and read the checkpoint + sidecars
@@ -1066,63 +1102,110 @@ impl ScanStateMachine {
 
     fn create_checkpoint_manifest_plan(&self) -> DeltaResult<CheckpointManifestPlan> {
         use crate::schema::{DataType, StructField, StructType};
+        use crate::Expression;
 
-        // Schema for v2 checkpoint manifest
-        let schema = Arc::new(StructType::new_unchecked(vec![StructField::not_null(
+        // Schema for v2 checkpoint manifest - we need the sidecar struct
+        let schema = Arc::new(StructType::new_unchecked(vec![StructField::nullable(
             "sidecar",
             DataType::struct_type_unchecked(vec![
-                StructField::not_null("path", DataType::STRING),
-                StructField::not_null("sizeInBytes", DataType::LONG),
+                StructField::nullable("path", DataType::STRING),
+                StructField::nullable("sizeInBytes", DataType::LONG),
+                StructField::nullable("modificationTime", DataType::LONG),
+                StructField::nullable(
+                    "tags",
+                    DataType::Map(Box::new(crate::schema::MapType::new(
+                        DataType::STRING,
+                        DataType::STRING,
+                        true,
+                    ))),
+                ),
             ]),
         )]));
 
-        // Output schema for sidecar file paths
+        // Output schema for sidecar file paths - just path and sizeInBytes
         let output_schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::not_null("path", DataType::STRING),
-            StructField::not_null("sizeInBytes", DataType::LONG),
+            StructField::nullable("path", DataType::STRING),
+            StructField::nullable("sizeInBytes", DataType::LONG),
         ]));
+
+        // Project sidecar.path and sidecar.sizeInBytes
+        let columns = vec![
+            Expression::column(["sidecar", "path"]).into(),
+            Expression::column(["sidecar", "sizeInBytes"]).into(),
+        ];
 
         Ok(CheckpointManifestPlan {
             scan: ScanNode {
                 file_type: FileType::Parquet,
-                files: vec![], // Would be populated with manifest file
+                files: self.state.checkpoint_files.clone(), // Use the checkpoint files
                 schema,
             },
             project: SelectNode {
-                columns: vec![],
+                columns,
                 output_schema,
             },
+            sidecar_collector: ConsumeByKDF::sidecar_collector(self.state.log_root.clone()),
             sink: SinkNode::drop(), // Drop sink - side effect only (collects sidecar paths)
         })
     }
 
     fn create_checkpoint_leaf_plan(&self) -> DeltaResult<CheckpointLeafPlan> {
-        use crate::schema::{DataType, StructField, StructType};
+        use crate::actions::{get_commit_schema, ADD_NAME};
+        use crate::scan::log_replay::{get_add_transform_expr, SCAN_ROW_SCHEMA};
 
-        // Schema for reading add actions from checkpoint files
-        let schema = Arc::new(StructType::new_unchecked(vec![StructField::nullable(
-            "add",
-            DataType::struct_type_unchecked(vec![
-                StructField::not_null("path", DataType::STRING),
-                StructField::not_null("size", DataType::LONG),
-            ]),
-        )]));
+        // Use the same schema as CHECKPOINT_READ_SCHEMA: get_commit_schema().project(&[ADD_NAME])
+        // This ensures we read the full 'add' struct from checkpoint files
+        let schema = get_commit_schema().project(&[ADD_NAME])?;
 
-        // Project to output schema
-        let output_schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::nullable("path", DataType::STRING),
-            StructField::nullable("size", DataType::LONG),
-        ]));
+        // Use the standard scan row schema and transform expression from log_replay
+        // (same as CommitPhasePlan for consistency)
+        let output_schema = SCAN_ROW_SCHEMA.clone();
+        let transform_expr = get_add_transform_expr();
+
+        // Create checkpoint dedup filter with keys from commit phase
+        // This ensures we filter out files already seen in commit files
+        let checkpoint_dedup_state = match &self.state.dedup_state {
+            FilterKdfState::AddRemoveDedup(add_remove_state) => {
+                add_remove_state.to_checkpoint_dedup_state()
+            }
+            _ => CheckpointDedupState::new(), // Fallback to empty state
+        };
+
+        // For V2 checkpoints with sidecars, read from sidecar files instead of checkpoint files
+        // Sidecar files contain the actual add actions, while the checkpoint file only has the manifest
+        let files = if !self.state.sidecar_files.is_empty() {
+            self.state.sidecar_files.clone()
+        } else {
+            self.state.checkpoint_files.clone()
+        };
+
+        // Determine file type based on the file extension
+        // Sidecar files are always parquet, but checkpoint files can be JSON or Parquet
+        let file_type = if !self.state.sidecar_files.is_empty() {
+            // Sidecar files are always parquet
+            FileType::Parquet
+        } else {
+            // Checkpoint files can be JSON or Parquet
+            files.first()
+                .map(|f| {
+                    if f.location.path().ends_with(".json") {
+                        FileType::Json
+                    } else {
+                        FileType::Parquet
+                    }
+                })
+                .unwrap_or(FileType::Parquet)
+        };
 
         Ok(CheckpointLeafPlan {
             scan: ScanNode {
-                file_type: FileType::Parquet,
-                files: self.state.checkpoint_files.clone(),
+                file_type,
+                files,
                 schema,
             },
-            dedup_filter: FilterByKDF::checkpoint_dedup(),
+            dedup_filter: FilterByKDF::with_state(FilterKdfState::CheckpointDedup(checkpoint_dedup_state)),
             project: SelectNode {
-                columns: vec![],
+                columns: vec![transform_expr],
                 output_schema,
             },
             sink: SinkNode::results(), // Result sink - streams file actions
@@ -1141,6 +1224,45 @@ impl ScanStateMachine {
         Ok(SchemaQueryPhasePlan {
             schema_query: SchemaQueryNode::schema_store(file_path),
             sink: SinkNode::drop(), // Drop sink - schema query produces no user-facing data
+        })
+    }
+
+    /// Create plan for reading JSON checkpoints that may or may not have sidecars.
+    ///
+    /// This plan:
+    /// 1. Scans the JSON checkpoint file
+    /// 2. Collects sidecar file paths via ConsumeByKDF (sees all rows before filtering)
+    /// 3. Filters add/remove actions via FilterByKDF (reuses dedup state from commit phase)
+    /// 4. Projects add actions to SCAN_ROW_SCHEMA
+    /// 5. Streams results to caller
+    ///
+    /// After execution, if sidecars were collected, we transition to CheckpointLeaf phase
+    /// to read the sidecar files. If no sidecars, we're done.
+    fn create_json_checkpoint_plan(&self) -> DeltaResult<JsonCheckpointPhasePlan> {
+        use crate::actions::{get_commit_schema, ADD_NAME, REMOVE_NAME};
+        use crate::scan::log_replay::{get_add_transform_expr, SCAN_ROW_SCHEMA};
+
+        // Use the full commit schema which includes sidecar as an optional field.
+        // JSON files that don't have sidecar rows will simply have null for that column.
+        // This avoids MissingColumn errors when sidecar is not present.
+        let schema = get_commit_schema();
+
+        Ok(JsonCheckpointPhasePlan {
+            scan: ScanNode {
+                file_type: FileType::Json,
+                files: self.state.checkpoint_files.clone(),
+                schema: schema.clone(),
+            },
+            // SidecarCollector sees all rows before filtering
+            // It gracefully handles rows without sidecar data
+            sidecar_collector: ConsumeByKDF::sidecar_collector(self.state.log_root.clone()),
+            // Reuse dedup state from commit phase to filter out already-seen files
+            dedup_filter: FilterByKDF::with_state(self.state.dedup_state.clone()),
+            project: SelectNode {
+                columns: vec![get_add_transform_expr()],
+                output_schema: SCAN_ROW_SCHEMA.clone(),
+            },
+            sink: SinkNode::results(), // Stream add actions to caller
         })
     }
 

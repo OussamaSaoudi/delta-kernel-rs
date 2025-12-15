@@ -128,10 +128,19 @@ fn deserialize_file_action_keys(bytes: &[u8]) -> DeltaResult<HashSet<FileActionK
 /// State for AddRemoveDedup KDF - deduplicates add/remove actions during commit log replay.
 ///
 /// Tracks seen file keys (path + optional deletion vector unique ID) and filters out
-/// duplicates. State is mutable and accumulates across batches.
-#[derive(Debug, Clone, Default)]
+/// duplicates. Uses `Arc<Mutex<...>>` for interior mutability so state mutations are
+/// visible even when the state is cloned (e.g., when moved into an iterator closure).
+#[derive(Debug, Clone)]
 pub struct AddRemoveDedupState {
-    seen_keys: HashSet<FileActionKey>,
+    seen_keys: Arc<std::sync::Mutex<HashSet<FileActionKey>>>,
+}
+
+impl Default for AddRemoveDedupState {
+    fn default() -> Self {
+        Self {
+            seen_keys: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        }
+    }
 }
 
 impl AddRemoveDedupState {
@@ -142,10 +151,17 @@ impl AddRemoveDedupState {
 
     /// Apply dedup filter to a batch - monomorphized, no dispatch overhead.
     ///
+    /// This processes BOTH add and remove actions:
+    /// - Both add and remove file keys are recorded in seen_keys
+    /// - Only add actions pass through (remove actions are filtered out but recorded)
+    /// - This ensures that files removed in commits don't appear from checkpoints
+    ///
     /// For each row where selection[i] is true:
-    /// - Extract file key (path, dv_unique_id)
+    /// - Extract file key from add.path or remove.path
     /// - If already seen: set selection[i] = false (filter out)
-    /// - Else: add to seen set, keep selection[i] = true
+    /// - Else: add to seen set
+    ///   - If it's an add: keep selection[i] = true
+    ///   - If it's a remove: set selection[i] = false (don't return removes, just record them)
     #[inline]
     pub fn apply(
         &mut self,
@@ -165,30 +181,40 @@ impl AddRemoveDedupState {
         let record_batch = arrow_data.record_batch();
         let num_rows = record_batch.num_rows();
 
-        // Get the path column from nested add.path struct
-        let path_col = record_batch
+        // Get add.path column
+        let add_path_col = record_batch
             .column_by_name("add")
             .and_then(|col| col.as_struct_opt())
             .and_then(|s| s.column_by_name("path"));
+        let add_path_array = add_path_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
 
-        let path_array = match path_col {
-            Some(col) => col
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| Error::generic("add.path column is not a string array"))?,
-            None => {
-                // No add.path column - return selection unchanged (row has no add action)
-                return Ok(selection);
-            }
-        };
-
-        // Get optional deletion vector column from nested add.deletionVector struct
-        let dv_col = record_batch
+        // Get add.deletionVector column
+        let add_dv_col = record_batch
             .column_by_name("add")
             .and_then(|col| col.as_struct_opt())
             .and_then(|s| s.column_by_name("deletionVector"));
+        let add_dv_array = add_dv_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
 
-        let dv_array = dv_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
+        // Get remove.path column
+        let remove_path_col = record_batch
+            .column_by_name("remove")
+            .and_then(|col| col.as_struct_opt())
+            .and_then(|s| s.column_by_name("path"));
+        let remove_path_array =
+            remove_path_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
+
+        // Get remove.deletionVector column
+        let remove_dv_col = record_batch
+            .column_by_name("remove")
+            .and_then(|col| col.as_struct_opt())
+            .and_then(|s| s.column_by_name("deletionVector"));
+        let remove_dv_array =
+            remove_dv_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
+
+        // If no add or remove columns, return selection unchanged
+        if add_path_array.is_none() && remove_path_array.is_none() {
+            return Ok(selection);
+        }
 
         // Build new selection by checking each row
         let mut result: Vec<bool> = Vec::with_capacity(num_rows);
@@ -200,12 +226,33 @@ impl AddRemoveDedupState {
                 continue;
             }
 
-            // Get the path
-            let path = if path_array.is_null(i) {
+            // Try to extract add action first
+            let add_path = add_path_array.and_then(|arr| {
+                if arr.is_null(i) {
+                    None
+                } else {
+                    Some(arr.value(i).to_string())
+                }
+            });
+
+            // Try to extract remove action
+            let remove_path = remove_path_array.and_then(|arr| {
+                if arr.is_null(i) {
+                    None
+                } else {
+                    Some(arr.value(i).to_string())
+                }
+            });
+
+            // Determine which action this row represents (add takes precedence)
+            let (path, dv_array, is_add) = if let Some(p) = add_path {
+                (p, add_dv_array, true)
+            } else if let Some(p) = remove_path {
+                (p, remove_dv_array, false)
+            } else {
+                // No add or remove path - filter out
                 result.push(false);
                 continue;
-            } else {
-                path_array.value(i).to_string()
             };
 
             // Get optional deletion vector unique ID
@@ -218,16 +265,22 @@ impl AddRemoveDedupState {
             });
 
             // Create the file action key
-            let key = FileActionKey { path, dv_unique_id };
+            let key = FileActionKey {
+                path,
+                dv_unique_id,
+            };
 
             // Check if we've seen this key before
-            if self.seen_keys.contains(&key) {
+            let mut seen_keys = self.seen_keys.lock().map_err(|_| Error::generic("Lock poisoned"))?;
+            if seen_keys.contains(&key) {
                 // Duplicate - filter out
                 result.push(false);
             } else {
-                // New - add to seen set and keep
-                self.seen_keys.insert(key);
-                result.push(true);
+                // New - add to seen set
+                seen_keys.insert(key);
+                // Only keep add actions, filter out remove actions
+                // (removes are just recorded to prevent checkpoint from returning them)
+                result.push(is_add);
             }
         }
 
@@ -236,33 +289,46 @@ impl AddRemoveDedupState {
 
     /// Serialize state for distribution to executors.
     pub fn serialize(&self) -> DeltaResult<Vec<u8>> {
-        serialize_file_action_keys(&self.seen_keys)
+        let seen_keys = self.seen_keys.lock().map_err(|_| Error::generic("Lock poisoned"))?;
+        serialize_file_action_keys(&seen_keys)
     }
 
     /// Deserialize state from bytes (received from driver).
     pub fn deserialize(bytes: &[u8]) -> DeltaResult<Self> {
         let seen_keys = deserialize_file_action_keys(bytes)?;
-        Ok(Self { seen_keys })
+        Ok(Self { seen_keys: Arc::new(std::sync::Mutex::new(seen_keys)) })
     }
 
     /// Check if a key has been seen.
     pub fn contains(&self, key: &FileActionKey) -> bool {
-        self.seen_keys.contains(key)
+        self.seen_keys.lock().map(|s| s.contains(key)).unwrap_or(false)
     }
 
     /// Insert a key into the seen set.
-    pub fn insert(&mut self, key: FileActionKey) -> bool {
-        self.seen_keys.insert(key)
+    pub fn insert(&self, key: FileActionKey) -> bool {
+        self.seen_keys.lock().map(|mut s| s.insert(key)).unwrap_or(false)
     }
 
     /// Get the number of seen keys.
     pub fn len(&self) -> usize {
-        self.seen_keys.len()
+        self.seen_keys.lock().map(|s| s.len()).unwrap_or(0)
     }
 
     /// Check if empty.
     pub fn is_empty(&self) -> bool {
-        self.seen_keys.is_empty()
+        self.seen_keys.lock().map(|s| s.is_empty()).unwrap_or(true)
+    }
+
+    /// Get a clone of the seen keys.
+    /// Used to transfer state to CheckpointDedupState for checkpoint phase.
+    pub fn seen_keys(&self) -> HashSet<FileActionKey> {
+        self.seen_keys.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// Convert to a CheckpointDedupState for the checkpoint phase.
+    /// The resulting state contains the same keys and can be used for read-only probing.
+    pub fn to_checkpoint_dedup_state(&self) -> CheckpointDedupState {
+        CheckpointDedupState::from_hashset(self.seen_keys())
     }
 }
 
@@ -395,7 +461,6 @@ impl CheckpointDedupState {
                 result.push(true);
             }
         }
-
         Ok(BooleanArray::from(result))
     }
 
@@ -440,14 +505,16 @@ impl CheckpointDedupState {
 /// parquet file footers.
 #[derive(Debug, Clone)]
 pub struct SchemaStoreState {
-    /// Uses OnceLock for thread-safe, one-time initialization during execution
-    schema: std::sync::OnceLock<SchemaRef>,
+    /// Uses Arc<OnceLock> for thread-safe, one-time initialization during execution.
+    /// Arc ensures that when the state is cloned (for execution), both the original
+    /// and clone share the same underlying storage.
+    schema: Arc<std::sync::OnceLock<SchemaRef>>,
 }
 
 impl Default for SchemaStoreState {
     fn default() -> Self {
         Self {
-            schema: std::sync::OnceLock::new(),
+            schema: Arc::new(std::sync::OnceLock::new()),
         }
     }
 }
@@ -1345,7 +1412,7 @@ impl SidecarCollectorState {
     /// - `sidecar.sizeInBytes`: Long - size of sidecar file in bytes
     #[inline]
     pub fn apply(&self, batch: &dyn EngineData) -> DeltaResult<bool> {
-        use crate::arrow::array::{Array, Int64Array, StringArray};
+        use crate::arrow::array::{Array, AsArray, Int64Array, StringArray};
         use crate::engine::arrow_data::ArrowEngineData;
         use crate::AsAny;
 
@@ -1369,26 +1436,40 @@ impl SidecarCollectorState {
             return Ok(true); // Continue with empty batch
         }
 
-        // Get the sidecar path column - try "sidecar.path" or nested "path" under "sidecar"
+        // Get the sidecar path column
+        // Try multiple strategies:
+        // 1. Nested struct: sidecar.path from JSON checkpoints
+        // 2. Literal column name: "sidecar.path" from projected parquet data
+        // 3. Top-level "path" column
         let path_col = record_batch
-            .column_by_name("sidecar.path")
+            .column_by_name("sidecar")
+            .and_then(|col| col.as_struct_opt())
+            .and_then(|s| s.column_by_name("path"))
+            .or_else(|| record_batch.column_by_name("sidecar.path"))
             .or_else(|| record_batch.column_by_name("path"));
 
         let path_array = match path_col {
-            Some(col) => col
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| Error::generic("sidecar.path column is not a StringArray"))?,
+            Some(col) => match col.as_any().downcast_ref::<StringArray>() {
+                Some(arr) => arr,
+                None => {
+                    // Column exists but isn't a string array - skip this batch
+                    return Ok(true);
+                }
+            },
             None => {
-                // No path column found - this shouldn't happen for valid manifest data
-                inner.error = Some("Missing sidecar.path column in manifest batch".to_string());
-                return Ok(false);
+                // No sidecar path column found - this is OK for non-sidecar rows
+                // Just continue processing
+                return Ok(true);
             }
         };
 
-        // Get the sidecar size column (optional but useful)
+        // Get the sidecar size column (optional)
+        // Same strategy: nested struct, literal name, or plain name
         let size_col = record_batch
-            .column_by_name("sidecar.sizeInBytes")
+            .column_by_name("sidecar")
+            .and_then(|col| col.as_struct_opt())
+            .and_then(|s| s.column_by_name("sizeInBytes"))
+            .or_else(|| record_batch.column_by_name("sidecar.sizeInBytes"))
             .or_else(|| record_batch.column_by_name("sizeInBytes"));
 
         let size_array = size_col.and_then(|col| col.as_any().downcast_ref::<Int64Array>());

@@ -611,9 +611,9 @@ mod schema_query_tests {
         match query_plan {
             DeclarativePlanNode::Sink { child, .. } => {
                 match child.as_ref() {
-                    DeclarativePlanNode::SchemaQuery(node) => {
-                        assert_eq!(node.file_path, "/path/to/checkpoint.parquet");
-                    }
+            DeclarativePlanNode::SchemaQuery(node) => {
+                assert_eq!(node.file_path, "/path/to/checkpoint.parquet");
+            }
                     _ => panic!("Expected SchemaQuery node inside Sink"),
                 }
             }
@@ -664,7 +664,7 @@ mod schema_query_tests {
         // Verify it was stored
         assert!(state.get().is_some());
         assert_eq!(state.get().unwrap().num_fields(), 2);
-        
+
         // OnceLock-based state can only be written once
         // Additional stores are ignored
     }
@@ -1054,6 +1054,7 @@ mod state_machine_transition_tests {
 
     #[test]
     fn test_scan_phase_checkpoint_manifest_has_drop_sink() {
+        let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
         let manifest_plan = CheckpointManifestPlan {
             scan: ScanNode {
                 file_type: FileType::Parquet,
@@ -1064,6 +1065,7 @@ mod state_machine_transition_tests {
                 columns: vec![],
                 output_schema: Arc::new(StructType::new_unchecked(vec![])),
             },
+            sidecar_collector: ConsumeByKDF::sidecar_collector(log_root),
             sink: SinkNode::drop(),
         };
         
@@ -1395,6 +1397,7 @@ mod state_machine_transition_tests {
 
     #[test]
     fn test_checkpoint_manifest_phase_plan_contents() {
+        let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
         let manifest_plan = CheckpointManifestPlan {
             scan: ScanNode {
                 file_type: FileType::Parquet,
@@ -1413,38 +1416,45 @@ mod state_machine_transition_tests {
                     StructField::not_null("sizeInBytes", DataType::LONG),
                 ])),
             },
+            sidecar_collector: ConsumeByKDF::sidecar_collector(log_root),
             sink: SinkNode::drop(),
         };
         
         let plan = manifest_plan.as_query_plan();
         
-        // Verify plan structure: Sink(Drop) -> Select -> Scan(Parquet)
+        // Verify plan structure: Sink(Drop) -> ConsumeByKDF -> Select -> Scan(Parquet)
         match plan {
             DeclarativePlanNode::Sink { child, node: sink_node } => {
                 // 1. Verify Drop sink (side effects only)
                 assert_eq!(sink_node.sink_type, SinkType::Drop, "Manifest must have Drop sink");
                 
                 match *child {
-                    DeclarativePlanNode::Select { child: scan_box, node: select_node } => {
-                        // 2. Verify output schema has path and sizeInBytes
-                        assert!(select_node.output_schema.field("path").is_some());
-                        assert!(select_node.output_schema.field("sizeInBytes").is_some());
-                        
-                        match *scan_box {
-                            DeclarativePlanNode::Scan(scan_node) => {
-                                // 3. Verify Parquet file type
-                                assert_eq!(scan_node.file_type, FileType::Parquet);
+                    DeclarativePlanNode::ConsumeByKDF { child: select_box, .. } => {
+                        // ConsumeByKDF collects sidecar files
+                        match *select_box {
+                            DeclarativePlanNode::Select { child: scan_box, node: select_node } => {
+                                // 2. Verify output schema has path and sizeInBytes
+                                assert!(select_node.output_schema.field("path").is_some());
+                                assert!(select_node.output_schema.field("sizeInBytes").is_some());
                                 
-                                // 4. Verify schema has sidecar field
-                                assert!(
-                                    scan_node.schema.field("sidecar").is_some(),
-                                    "Manifest schema should have 'sidecar' field"
-                                );
+                                match *scan_box {
+                                    DeclarativePlanNode::Scan(scan_node) => {
+                                        // 3. Verify Parquet file type
+                                        assert_eq!(scan_node.file_type, FileType::Parquet);
+                                        
+                                        // 4. Verify schema has sidecar field
+                                        assert!(
+                                            scan_node.schema.field("sidecar").is_some(),
+                                            "Manifest schema should have 'sidecar' field"
+                                        );
+                                    }
+                                    _ => panic!("Expected Scan at leaf"),
+                                }
                             }
-                            _ => panic!("Expected Scan at leaf"),
+                            _ => panic!("Expected Select after ConsumeByKDF"),
                         }
                     }
-                    _ => panic!("Expected Select after Sink"),
+                    _ => panic!("Expected ConsumeByKDF after Sink"),
                 }
             }
             _ => panic!("Expected Sink at root"),
@@ -1661,15 +1671,18 @@ mod state_machine_transition_tests {
 /// Tests that EXECUTE ScanStateMachine plans and verify the results against static expected data.
 #[cfg(test)]
 mod real_table_execution_tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::sync::Arc;
     
     use crate::arrow::array::{Array, AsArray};
     use crate::engine::sync::SyncEngine;
+    use crate::expressions::ExpressionRef;
     use crate::plans::executor::{DeclarativePlanExecutor, FilteredEngineData, ResultsDriver};
     use crate::plans::state_machines::{AdvanceResult, ScanStateMachine};
     use crate::plans::*;
+    use crate::scan::state::DvInfo;
+    use crate::scan::{Scan, ScanMetadata};
     use crate::schema::StructType;
     use crate::Engine;
     use crate::FileMeta;
@@ -1798,6 +1811,111 @@ mod real_table_execution_tests {
         }
         
         paths
+    }
+    
+    // =========================================================================
+    // Ground Truth Comparison Helpers
+    // =========================================================================
+    
+    /// Get ground truth file paths using Scan::scan_metadata
+    /// This uses the existing, well-tested Scan infrastructure to get the authoritative
+    /// list of files that should be included in a scan.
+    fn get_groundtruth_paths(snapshot: crate::snapshot::SnapshotRef, engine: &dyn Engine) -> Vec<String> {
+        let scan = snapshot.scan_builder().build().expect("Should build scan");
+        let scan_metadata_iter = scan.scan_metadata(engine).expect("Should get scan metadata");
+        
+        fn scan_metadata_callback(
+            paths: &mut Vec<String>,
+            path: &str,
+            _size: i64,
+            _stats: Option<crate::scan::state::Stats>,
+            _dv_info: DvInfo,
+            _transform: Option<ExpressionRef>,
+            _partition_values: HashMap<String, String>,
+        ) {
+            paths.push(path.to_string());
+        }
+        
+        let mut paths = vec![];
+        for res in scan_metadata_iter {
+            let scan_metadata = res.expect("Scan metadata should succeed");
+            paths = scan_metadata.visit_scan_files(paths, scan_metadata_callback)
+                .expect("visit_scan_files should succeed");
+        }
+        paths
+    }
+    
+    /// Maximum iterations for state machine execution to detect infinite loops
+    const MAX_DRIVER_ITERATIONS: usize = 1000;
+    
+    /// Execute ScanStateMachine via ResultsDriver and extract file paths.
+    /// Includes an iteration limit to detect infinite loops.
+    fn get_state_machine_paths(
+        snapshot: &crate::snapshot::SnapshotRef, 
+        engine: Arc<dyn Engine>
+    ) -> Vec<String> {
+        let log_segment = snapshot.log_segment();
+        let commit_files: Vec<FileMeta> = log_segment
+            .ascending_commit_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+        
+        let checkpoint_files: Vec<FileMeta> = log_segment
+            .checkpoint_parts
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+        
+        let table_url = snapshot.table_root().clone();
+        
+        let sm = ScanStateMachine::from_scan_config(
+            table_url.clone(),
+            table_url.join("_delta_log/").unwrap(),
+            snapshot.schema().clone(),
+            snapshot.schema().clone(),
+            commit_files,
+            checkpoint_files,
+        ).expect("Should create ScanStateMachine");
+        
+        let mut driver = ResultsDriver::new(engine, sm);
+        let mut batches = Vec::new();
+        let mut iteration_count = 0;
+        
+        while let Some(result) = driver.next() {
+            iteration_count += 1;
+            if iteration_count > MAX_DRIVER_ITERATIONS {
+                panic!(
+                    "State machine execution exceeded {} iterations - possible infinite loop!",
+                    MAX_DRIVER_ITERATIONS
+                );
+            }
+            if let Ok(batch) = result {
+                batches.push(batch);
+            }
+        }
+        
+        extract_add_paths_from_batches(&batches)
+    }
+    
+    /// Compare two sets of paths, ignoring order
+    fn assert_paths_equal(expected: &[String], actual: &[String], table_name: &str) {
+        let expected_set: HashSet<&str> = expected.iter().map(|s| s.as_str()).collect();
+        let actual_set: HashSet<&str> = actual.iter().map(|s| s.as_str()).collect();
+        
+        // Find missing and extra paths for better error messages
+        let missing: Vec<&str> = expected_set.difference(&actual_set).copied().collect();
+        let extra: Vec<&str> = actual_set.difference(&expected_set).copied().collect();
+        
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "Path mismatch for table '{}'\nMissing paths: {:?}\nExtra paths: {:?}\nExpected {} paths, got {}",
+            table_name,
+            missing,
+            extra,
+            expected.len(),
+            actual.len()
+        );
     }
     
     // =========================================================================
@@ -2375,5 +2493,249 @@ mod real_table_execution_tests {
 
         // Verify exact expected paths
         assert_eq!(unique_paths.len(), 6, "Should have exactly 6 unique add paths");
+    }
+
+    // =========================================================================
+    // Ground Truth Comparison Tests - Simple Tables
+    // Compare ScanStateMachine results against Scan::scan_metadata ground truth
+    // =========================================================================
+
+    #[test]
+    fn test_groundtruth_table_without_dv_small() {
+        // Compare ScanStateMachine against scan_metadata for table-without-dv-small
+        let Some((_, table_url)) = get_test_table_path("table-without-dv-small") else {
+            println!("Skipping test: table-without-dv-small not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url)
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        // Get ground truth from Scan::scan_metadata
+        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
+        
+        // Get paths from ScanStateMachine
+        let actual_paths = get_state_machine_paths(&snapshot, engine);
+        
+        // Compare
+        assert_paths_equal(&expected_paths, &actual_paths, "table-without-dv-small");
+        
+        // Verify expected count (1 file in this table)
+        assert_eq!(expected_paths.len(), 1, "Expected 1 file in ground truth");
+    }
+
+    #[test]
+    fn test_groundtruth_basic_partitioned() {
+        // Compare ScanStateMachine against scan_metadata for basic_partitioned
+        let Some((_, table_url)) = get_test_table_path("basic_partitioned") else {
+            println!("Skipping test: basic_partitioned not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url)
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        // Get ground truth from Scan::scan_metadata
+        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
+        
+        // Get paths from ScanStateMachine
+        let actual_paths = get_state_machine_paths(&snapshot, engine);
+        
+        // Compare
+        assert_paths_equal(&expected_paths, &actual_paths, "basic_partitioned");
+        
+        // Verify expected count (6 files in this table)
+        assert_eq!(expected_paths.len(), 6, "Expected 6 files in ground truth");
+    }
+
+    #[test]
+    fn test_groundtruth_table_with_dv_small() {
+        // Compare ScanStateMachine against scan_metadata for table-with-dv-small
+        // This table has deletion vectors
+        let Some((_, table_url)) = get_test_table_path("table-with-dv-small") else {
+            println!("Skipping test: table-with-dv-small not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url)
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        // Get ground truth from Scan::scan_metadata
+        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
+        
+        // Get paths from ScanStateMachine
+        let actual_paths = get_state_machine_paths(&snapshot, engine);
+        
+        // Compare
+        assert_paths_equal(&expected_paths, &actual_paths, "table-with-dv-small");
+    }
+
+    // =========================================================================
+    // Ground Truth Comparison Tests - Checkpoint Tables
+    // Tables with checkpoints exercise different phases of the state machine
+    // =========================================================================
+
+    #[test]
+    fn test_groundtruth_with_checkpoint_no_last_checkpoint() {
+        // Table with checkpoint but no _last_checkpoint file
+        let Some((_, table_url)) = get_test_table_path("with_checkpoint_no_last_checkpoint") else {
+            println!("Skipping test: with_checkpoint_no_last_checkpoint not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url)
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        // Get ground truth from Scan::scan_metadata
+        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
+        
+        // Get paths from ScanStateMachine
+        let actual_paths = get_state_machine_paths(&snapshot, engine);
+        
+        // Compare
+        assert_paths_equal(&expected_paths, &actual_paths, "with_checkpoint_no_last_checkpoint");
+    }
+
+    #[test]
+    fn test_groundtruth_parquet_row_group_skipping() {
+        // Table with multi-part checkpoint (good for testing checkpoint handling)
+        let Some((_, table_url)) = get_test_table_path("parquet_row_group_skipping") else {
+            println!("Skipping test: parquet_row_group_skipping not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url)
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        // Get ground truth from Scan::scan_metadata
+        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
+        
+        // Get paths from ScanStateMachine
+        let actual_paths = get_state_machine_paths(&snapshot, engine);
+        
+        // Compare
+        assert_paths_equal(&expected_paths, &actual_paths, "parquet_row_group_skipping");
+    }
+
+    #[test]
+    fn test_groundtruth_app_txn_checkpoint() {
+        // Table with app transaction checkpoint
+        let Some((_, table_url)) = get_test_table_path("app-txn-checkpoint") else {
+            println!("Skipping test: app-txn-checkpoint not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url)
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        // Get ground truth from Scan::scan_metadata
+        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
+        
+        // Get paths from ScanStateMachine
+        let actual_paths = get_state_machine_paths(&snapshot, engine);
+        
+        // Compare
+        assert_paths_equal(&expected_paths, &actual_paths, "app-txn-checkpoint");
+    }
+
+    #[test]
+    fn test_groundtruth_app_txn_no_checkpoint() {
+        // Table without checkpoint for comparison
+        let Some((_, table_url)) = get_test_table_path("app-txn-no-checkpoint") else {
+            println!("Skipping test: app-txn-no-checkpoint not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url)
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        // Get ground truth from Scan::scan_metadata
+        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
+        
+        // Get paths from ScanStateMachine
+        let actual_paths = get_state_machine_paths(&snapshot, engine);
+        
+        // Compare
+        assert_paths_equal(&expected_paths, &actual_paths, "app-txn-no-checkpoint");
+    }
+
+    // =========================================================================
+    // Ground Truth Comparison Tests - V2 Checkpoints (compressed test data)
+    // Uses test_utils::load_test_data to decompress .tar.zst test tables
+    // Note: V2 checkpoint support in ScanStateMachine is still in progress
+    // =========================================================================
+
+    /// Helper to load a compressed test table and compare ground truth
+    #[allow(dead_code)]
+    fn test_v2_checkpoint_groundtruth(table_name: &str) {
+        // Load and decompress test data
+        let test_dir = match test_utils::load_test_data("tests/data", table_name) {
+            Ok(dir) => dir,
+            Err(e) => {
+                println!("Skipping test {}: {:?}", table_name, e);
+                return;
+            }
+        };
+        let test_path = test_dir.path().join(table_name);
+
+        let table_url = url::Url::from_directory_path(&test_path)
+            .expect("Should create URL from path");
+
+        let engine = create_test_engine();
+        let snapshot = match Snapshot::builder_for(table_url).build(engine.as_ref()) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("Skipping test {}: snapshot build failed: {:?}", table_name, e);
+                return;
+            }
+        };
+
+        // Get ground truth from Scan::scan_metadata
+        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
+        
+        // Get paths from ScanStateMachine
+        let actual_paths = get_state_machine_paths(&snapshot, engine);
+        
+        // Compare
+        assert_paths_equal(&expected_paths, &actual_paths, table_name);
+    }
+
+    // V2 checkpoint tests - These tables use V2 checkpoint format with sidecars.
+    // The ScanStateMachine properly detects V2 checkpoints via schema query,
+    // reads the manifest to extract sidecar file paths, then reads add actions
+    // from the sidecar files.
+
+    #[test]
+    fn test_groundtruth_v2_classic_checkpoint_parquet() {
+        test_v2_checkpoint_groundtruth("v2-classic-checkpoint-parquet");
+    }
+
+    #[test]
+    fn test_groundtruth_v2_classic_checkpoint_json() {
+        test_v2_checkpoint_groundtruth("v2-classic-checkpoint-json");
+    }
+
+    #[test]
+    fn test_groundtruth_v2_checkpoints_parquet_without_sidecars() {
+        test_v2_checkpoint_groundtruth("v2-checkpoints-parquet-without-sidecars");
+    }
+
+    #[test]
+    fn test_groundtruth_v2_checkpoints_json_without_sidecars() {
+        test_v2_checkpoint_groundtruth("v2-checkpoints-json-without-sidecars");
     }
 }

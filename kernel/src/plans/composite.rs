@@ -44,13 +44,21 @@ pub struct CommitPhasePlan {
 
 /// Plan for reading checkpoint manifest (v2 checkpoints).
 ///
-/// Structure: Scan → Project → Sink
+/// Structure: Scan → Project → ConsumeByKDF(SidecarCollector) → Sink
+///
+/// For V2 checkpoints, we need to:
+/// 1. Scan the checkpoint file
+/// 2. Project the sidecar.path column
+/// 3. Collect the sidecar file paths via ConsumeByKDF
+/// 4. These paths are then used in the CheckpointLeaf phase
 #[derive(Debug, Clone)]
 pub struct CheckpointManifestPlan {
     /// Scan manifest parquet file
     pub scan: ScanNode,
     /// Project sidecar file paths
     pub project: SelectNode,
+    /// Consumer KDF to collect sidecar file paths
+    pub sidecar_collector: ConsumeByKDF,
     /// Terminal sink (default: Drop)
     pub sink: SinkNode,
 }
@@ -130,6 +138,31 @@ pub struct SchemaQueryPhasePlan {
     pub sink: SinkNode,
 }
 
+/// Plan for reading JSON checkpoints that may or may not have sidecars.
+///
+/// Structure: Scan → ConsumeByKDF(SidecarCollector) → FilterByKDF(AddRemoveDedup) → Select → Sink(Results)
+///
+/// This plan handles both V2 JSON checkpoints with sidecars and V2 JSON checkpoints
+/// where add actions are embedded directly. The SidecarCollector sees all rows to
+/// collect sidecar references, while FilterByKDF deduplicates add actions.
+///
+/// After execution:
+/// - If sidecars were collected: transition to CheckpointLeaf to read sidecar files
+/// - If no sidecars: all add actions were in the checkpoint, done
+#[derive(Debug, Clone)]
+pub struct JsonCheckpointPhasePlan {
+    /// Scan JSON checkpoint file
+    pub scan: ScanNode,
+    /// Consumer KDF to collect sidecar file paths (sees all rows before filtering)
+    pub sidecar_collector: ConsumeByKDF,
+    /// Deduplication filter for add/remove actions
+    pub dedup_filter: FilterByKDF,
+    /// Project add actions to output schema
+    pub project: SelectNode,
+    /// Results sink - streams add actions found in checkpoint
+    pub sink: SinkNode,
+}
+
 // =============================================================================
 // AsQueryPlan Implementations
 // =============================================================================
@@ -170,11 +203,16 @@ impl AsQueryPlan for CommitPhasePlan {
 impl AsQueryPlan for CheckpointManifestPlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
         let scan = DeclarativePlanNode::Scan(self.scan.clone());
+        let project = DeclarativePlanNode::Select {
+            child: Box::new(scan),
+            node: self.project.clone(),
+        };
+        let consume = DeclarativePlanNode::ConsumeByKDF {
+            child: Box::new(project),
+            node: self.sidecar_collector.clone(),
+        };
         DeclarativePlanNode::Sink {
-            child: Box::new(DeclarativePlanNode::Select {
-                child: Box::new(scan),
-                node: self.project.clone(),
-            }),
+            child: Box::new(consume),
             node: self.sink.clone(),
         }
     }
@@ -241,6 +279,30 @@ impl AsQueryPlan for SchemaQueryPhasePlan {
         // SchemaQuery produces no user-facing data - wrap in Drop sink
         DeclarativePlanNode::Sink {
             child: Box::new(DeclarativePlanNode::SchemaQuery(self.schema_query.clone())),
+            node: self.sink.clone(),
+        }
+    }
+}
+
+impl AsQueryPlan for JsonCheckpointPhasePlan {
+    fn as_query_plan(&self) -> DeclarativePlanNode {
+        // Order: Scan → ConsumeByKDF → FilterByKDF → Select → Sink
+        // The consumer KDF sees all rows (including sidecar actions) before filtering
+        let scan = DeclarativePlanNode::Scan(self.scan.clone());
+        let consume = DeclarativePlanNode::ConsumeByKDF {
+            child: Box::new(scan),
+            node: self.sidecar_collector.clone(),
+        };
+        let filter = DeclarativePlanNode::FilterByKDF {
+            child: Box::new(consume),
+            node: self.dedup_filter.clone(),
+        };
+        let select = DeclarativePlanNode::Select {
+            child: Box::new(filter),
+            node: self.project.clone(),
+        };
+        DeclarativePlanNode::Sink {
+            child: Box::new(select),
             node: self.sink.clone(),
         }
     }
