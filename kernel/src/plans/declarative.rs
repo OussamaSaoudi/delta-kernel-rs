@@ -292,5 +292,36 @@ impl DeclarativePlanNode {
     pub fn is_complete(&self) -> bool {
         matches!(self, Self::Sink { .. })
     }
+
+    // =========================================================================
+    // Sink type inspection helpers
+    // =========================================================================
+
+    /// Get the sink type if this plan ends with a Sink node.
+    ///
+    /// Returns `Some(SinkType)` if this is a Sink node, `None` otherwise.
+    /// Used by drivers to determine how to handle plan results.
+    pub fn sink_type(&self) -> Option<SinkType> {
+        match self {
+            Self::Sink { node, .. } => Some(node.sink_type),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a complete plan with a Results sink.
+    ///
+    /// Returns `true` if this plan ends with a Results sink that streams
+    /// data back to the user.
+    pub fn is_results_sink(&self) -> bool {
+        self.sink_type() == Some(SinkType::Results)
+    }
+
+    /// Check if this is a complete plan with a Drop sink.
+    ///
+    /// Returns `true` if this plan ends with a Drop sink that discards
+    /// data after processing (for side-effect-only operations).
+    pub fn is_drop_sink(&self) -> bool {
+        self.sink_type() == Some(SinkType::Drop)
+    }
 }
 

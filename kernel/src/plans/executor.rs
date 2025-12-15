@@ -36,6 +36,57 @@ pub struct FilteredEngineData {
 /// Type alias for the result iterator.
 pub type FilteredDataIter = Box<dyn Iterator<Item = DeltaResult<FilteredEngineData>> + Send>;
 
+use super::kdf_state::ConsumerKdfState;
+
+/// Iterator for ConsumeByKDF that applies consumer state to each batch and passes through.
+///
+/// Uses interior mutability in ConsumerKdfState to accumulate state during iteration.
+struct ConsumeByKdfIterator {
+    child_iter: FilteredDataIter,
+    state: ConsumerKdfState,
+    done: bool,
+}
+
+impl Iterator for ConsumeByKdfIterator {
+    type Item = DeltaResult<FilteredEngineData>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        match self.child_iter.next() {
+            Some(Ok(batch)) => {
+                // Apply consumer to batch (mutates state via interior mutability)
+                match self.state.apply(batch.engine_data.as_ref()) {
+                    Ok(true) => Some(Ok(batch)), // Continue, pass through
+                    Ok(false) => {
+                        // Break signal - finalize and stop
+                        self.state.finalize();
+                        self.done = true;
+                        // Still return this batch, but no more after
+                        Some(Ok(batch))
+                    }
+                    Err(e) => {
+                        self.done = true;
+                        Some(Err(e))
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                self.done = true;
+                Some(Err(e))
+            }
+            None => {
+                // Child exhausted - finalize consumer
+                self.state.finalize();
+                self.done = true;
+                None
+            }
+        }
+    }
+}
+
 /// Executor for `DeclarativePlanNode` trees.
 ///
 /// This executor interprets declarative plan nodes and executes them using the
@@ -140,18 +191,75 @@ impl DeclarativePlanExecutor {
     }
 
     /// Execute a FileListing node - lists files from a storage path.
+    ///
+    /// Converts file metadata from storage into batches suitable for consumer KDFs.
+    /// Each batch contains columns: path (String), size (Int64), modificationTime (Int64)
     fn execute_file_listing(&self, node: FileListingNode) -> DeltaResult<FilteredDataIter> {
+        use crate::arrow::array::{Int64Array, RecordBatch, StringArray};
+        use crate::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+        use crate::engine::arrow_data::ArrowEngineData;
+
         let FileListingNode { path } = node;
 
         // Use the storage handler to list files
         let storage = self.engine.storage_handler();
-        let _files = storage.list_from(&path)?;
+        let files_iter = storage.list_from(&path)?;
 
-        // For now, return error - file listing produces metadata, not data batches
-        // In a full implementation, this would convert FileMeta to a columnar format
-        Err(Error::generic(
-            "FileListing node not yet fully implemented - use Scan with explicit file list",
-        ))
+        // Collect all files and their metadata
+        let files: Vec<_> = files_iter.collect::<Result<Vec<_>, _>>()?;
+
+        if files.is_empty() {
+            return Ok(Box::new(std::iter::empty()));
+        }
+
+        // Create Arrow schema for file listing batch
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("path", ArrowDataType::Utf8, false),
+            Field::new("size", ArrowDataType::Int64, true),
+            Field::new("modificationTime", ArrowDataType::Int64, true),
+        ]));
+
+        // Extract file names (relative paths from log directory) and metadata
+        let mut paths: Vec<String> = Vec::with_capacity(files.len());
+        let mut sizes: Vec<i64> = Vec::with_capacity(files.len());
+        let mut mod_times: Vec<i64> = Vec::with_capacity(files.len());
+
+        for file in files {
+            // Extract just the file name from the full URL path
+            let file_name = file
+                .location
+                .path_segments()
+                .and_then(|mut s| s.next_back())
+                .unwrap_or("");
+            paths.push(file_name.to_string());
+            sizes.push(file.size as i64);
+            mod_times.push(file.last_modified);
+        }
+
+        // Create Arrow arrays
+        let path_array = StringArray::from(paths);
+        let size_array = Int64Array::from(sizes);
+        let mod_time_array = Int64Array::from(mod_times);
+
+        // Create RecordBatch
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(path_array),
+                Arc::new(size_array),
+                Arc::new(mod_time_array),
+            ],
+        )
+        .map_err(|e| Error::generic(format!("Failed to create file listing batch: {}", e)))?;
+
+        // Wrap in ArrowEngineData and return as single batch
+        let engine_data = ArrowEngineData::from(batch);
+        let selection_vector = vec![true; engine_data.len()];
+
+        Ok(Box::new(std::iter::once(Ok(FilteredEngineData {
+            engine_data: Arc::new(engine_data),
+            selection_vector,
+        }))))
     }
 
     /// Execute a SchemaQuery node - reads parquet file schema (footer only).
@@ -208,38 +316,25 @@ impl DeclarativePlanExecutor {
     /// - `true` (Continue): Keep feeding data
     /// - `false` (Break): Stop iteration
     ///
-    /// Consumer KDFs accumulate state across batches but don't produce output data.
-    /// Any error stored in the consumer state is surfaced after iteration completes.
+    /// Consumer KDFs accumulate state across batches via interior mutability.
+    /// The state is cloned (Arc clone - cheap) and captured in the iterator closure.
+    /// After iteration, the original plan's state contains the accumulated results.
+    ///
+    /// Data is passed through to allow Sink to decide what happens with it.
     fn execute_consume_by_kdf(
         &self,
         child: DeclarativePlanNode,
-        mut node: ConsumeByKDF,
+        node: ConsumeByKDF,
     ) -> DeltaResult<FilteredDataIter> {
         let child_iter = self.execute(child)?;
+        let state = node.state.clone(); // Clone Arc, not the inner state
 
-        // Process batches until Break or error
-        for result in child_iter {
-            let FilteredEngineData { engine_data, .. } = result?;
-
-            // Apply the Consumer KDF
-            match node.state.apply(engine_data.as_ref()) {
-                Ok(true) => continue,  // Continue
-                Ok(false) => break,    // Break
-                Err(e) => return Err(e), // Error surfaces immediately
-            }
-        }
-
-        // Finalize the consumer state
-        node.state.finalize();
-
-        // Check for any error that occurred during consumption
-        if let Some(err) = node.state.take_error() {
-            return Err(err);
-        }
-
-        // Consumer KDFs don't produce output data - return empty iterator
-        // The accumulated state is accessed through the node reference
-        Ok(Box::new(std::iter::empty()))
+        // Return iterator that applies consumer to each batch and passes through
+        Ok(Box::new(ConsumeByKdfIterator {
+            child_iter,
+            state,
+            done: false,
+        }))
     }
 
     /// Execute a FilterByExpression node - evaluates a predicate expression.
@@ -637,6 +732,277 @@ impl<SM: StateMachine> Iterator for StateMachineIterator<SM> {
     }
 }
 
+// =============================================================================
+// DropOnlyDriver - For state machines with no result streaming
+// =============================================================================
+
+/// Driver for state machines that only use Drop sinks (no result streaming).
+///
+/// This driver is designed for operations like `SnapshotStateMachine` that execute
+/// plans purely for side effects (accumulating state in KDFs) and don't stream
+/// any results back to the caller.
+///
+/// # Behavior
+///
+/// - Iterates through all state machine phases
+/// - Validates that ALL plans have `Drop` sinks
+/// - Executes each plan to completion (triggering side effects in KDFs)
+/// - Returns the final result when the state machine completes
+/// - **Errors if a `Results` sink is encountered** (programmer error)
+///
+/// # Example
+///
+/// ```ignore
+/// let snapshot_sm = SnapshotStateMachine::new(table_root)?;
+/// let driver = DropOnlyDriver::new(engine, snapshot_sm);
+/// let snapshot: Snapshot = driver.execute()?;
+/// ```
+pub struct DropOnlyDriver<SM: StateMachine> {
+    engine: Arc<dyn Engine>,
+    sm: SM,
+}
+
+impl<SM: StateMachine> DropOnlyDriver<SM> {
+    /// Create a new DropOnlyDriver with the given engine and state machine.
+    pub fn new(engine: Arc<dyn Engine>, sm: SM) -> Self {
+        Self { engine, sm }
+    }
+
+    /// Execute the state machine to completion.
+    ///
+    /// Runs each phase's plan, validating that all plans use Drop sinks.
+    /// Returns the final result when the state machine reaches a terminal state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - A plan uses a `Results` sink instead of `Drop`
+    /// - Plan execution fails and state machine doesn't handle the error
+    /// - State machine advancement fails
+    pub fn execute(mut self) -> DeltaResult<SM::Result> {
+        loop {
+            // Get the current plan
+            let plan = self.sm.get_plan()?;
+
+            // Validate: must be a Drop sink or no sink (incomplete plan)
+            // Plans ending with Results sink are not allowed
+            if plan.is_results_sink() {
+                return Err(Error::generic(
+                    "DropOnlyDriver encountered Results sink - use ResultsDriver instead",
+                ));
+            }
+
+            // Execute the plan (Drop sink consumes data internally)
+            let executor = DeclarativePlanExecutor::new(self.engine.clone());
+            let execution_result = executor.execute(plan.clone());
+
+            // Handle execution results - either success or error
+            let advance_result = match execution_result {
+                Ok(results) => {
+                    // Consume all results to trigger side effects
+                    for result in results {
+                        if let Err(e) = result {
+                            // Batch-level error - pass to state machine
+                            return match self.sm.advance(Err(e))? {
+                                AdvanceResult::Continue => continue,
+                                AdvanceResult::Done(result) => Ok(result),
+                            };
+                        }
+                    }
+                    // All batches consumed successfully
+                    self.sm.advance(Ok(plan))?
+                }
+                Err(e) => {
+                    // Execution failed - let state machine decide how to handle
+                    // (e.g., FileNotFound during CheckpointHint is OK)
+                    self.sm.advance(Err(e))?
+                }
+            };
+
+            match advance_result {
+                AdvanceResult::Continue => continue,
+                AdvanceResult::Done(result) => return Ok(result),
+            }
+        }
+    }
+}
+
+// =============================================================================
+// ResultsDriver - For state machines that stream results
+// =============================================================================
+
+/// Driver for state machines that stream results (e.g., ScanStateMachine).
+///
+/// This driver handles mixed sink types:
+/// - `Results` sinks: Yields `FilteredEngineData` batches to the caller
+/// - `Drop` sinks: Executes silently for side effects (like dedup state accumulation)
+///
+/// # Behavior
+///
+/// - Implements `Iterator` to stream results from `Results` sink plans
+/// - Silently executes `Drop` sink plans (for side-effect KDFs)
+/// - Provides `into_result()` to get the final state machine result after iteration
+///
+/// # Example
+///
+/// ```ignore
+/// let scan_sm = ScanStateMachine::from_scan_config(...)?;
+/// let driver = ResultsDriver::new(engine, scan_sm);
+/// for batch in &mut driver {
+///     let data = batch?;
+///     // Process streamed scan results
+/// }
+/// let scan_result = driver.into_result()?;
+/// ```
+pub struct ResultsDriver<SM: StateMachine> {
+    engine: Arc<dyn Engine>,
+    sm: Option<SM>,
+    current_iter: Option<FilteredDataIter>,
+    current_plan: Option<DeclarativePlanNode>,
+    result: Option<SM::Result>,
+    is_done: bool,
+}
+
+impl<SM: StateMachine> ResultsDriver<SM> {
+    /// Create a new ResultsDriver with the given engine and state machine.
+    pub fn new(engine: Arc<dyn Engine>, sm: SM) -> Self {
+        Self {
+            engine,
+            sm: Some(sm),
+            current_iter: None,
+            current_plan: None,
+            result: None,
+            is_done: false,
+        }
+    }
+
+    /// Check if the driver has finished executing all plans.
+    pub fn is_done(&self) -> bool {
+        self.is_done
+    }
+
+    /// Get the final result after iteration is complete.
+    ///
+    /// Returns `Some(result)` if the state machine has completed,
+    /// `None` if iteration is still in progress or was not completed.
+    pub fn into_result(self) -> Option<SM::Result> {
+        self.result
+    }
+
+    /// Advance to the next phase, returning the result if done.
+    fn advance_phase(&mut self) -> DeltaResult<Option<SM::Result>> {
+        let sm = match self.sm.as_mut() {
+            Some(sm) => sm,
+            None => return Ok(None),
+        };
+
+        let plan = match self.current_plan.take() {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        match sm.advance(Ok(plan))? {
+            AdvanceResult::Continue => Ok(None),
+            AdvanceResult::Done(result) => {
+                self.is_done = true;
+                Ok(Some(result))
+            }
+        }
+    }
+
+    /// Execute a Drop sink plan silently (for side effects only).
+    fn execute_drop_plan(&mut self, plan: DeclarativePlanNode) -> DeltaResult<()> {
+        let executor = DeclarativePlanExecutor::new(self.engine.clone());
+        let results = executor.execute(plan)?;
+        
+        // Consume all results to trigger side effects
+        for result in results {
+            let _batch = result?;
+        }
+        
+        Ok(())
+    }
+}
+
+impl<SM: StateMachine> Iterator for ResultsDriver<SM> {
+    type Item = DeltaResult<FilteredEngineData>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.is_done {
+            return None;
+        }
+
+        loop {
+            // If we have an active iterator from a Results sink, yield from it
+            if let Some(ref mut iter) = self.current_iter {
+                if let Some(result) = iter.next() {
+                    return Some(result);
+                }
+                // Current iterator exhausted, advance the state machine
+                self.current_iter = None;
+                
+                match self.advance_phase() {
+                    Ok(Some(result)) => {
+                        self.result = Some(result);
+                        return None; // Done - caller can use into_result()
+                    }
+                    Ok(None) => {
+                        // Continue to next plan
+                    }
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+
+            // Get the state machine
+            let sm = match self.sm.as_mut() {
+                Some(sm) => sm,
+                None => {
+                    self.is_done = true;
+                    return None;
+                }
+            };
+
+            // Get the next plan
+            let plan = match sm.get_plan() {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+
+            // Check sink type and handle accordingly
+            if plan.is_results_sink() {
+                // Results sink - execute and stream results to caller
+                let executor = DeclarativePlanExecutor::new(self.engine.clone());
+                let results = match executor.execute(plan.clone()) {
+                    Ok(r) => r,
+                    Err(e) => return Some(Err(e)),
+                };
+
+                self.current_iter = Some(results);
+                self.current_plan = Some(plan);
+                // Loop will yield from current_iter
+            } else {
+                // Drop sink (or incomplete plan) - execute silently for side effects
+                if let Err(e) = self.execute_drop_plan(plan.clone()) {
+                    return Some(Err(e));
+                }
+                self.current_plan = Some(plan);
+                
+                // Advance immediately since there's nothing to yield
+                match self.advance_phase() {
+                    Ok(Some(result)) => {
+                        self.result = Some(result);
+                        return None;
+                    }
+                    Ok(None) => {
+                        // Continue to next plan
+                    }
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1020,16 +1386,33 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_file_listing_not_implemented() {
+    fn test_file_listing_executes() {
         let engine = create_test_engine();
         let executor = DeclarativePlanExecutor::new(engine);
 
-        let plan = DeclarativePlanNode::FileListing(FileListingNode {
-            path: url::Url::parse("file:///tmp/test").unwrap(),
-        });
+        // Use a test data directory that exists
+        let Some((test_path, _)) = get_test_table_path() else {
+            println!("Skipping test: test table not found");
+            return;
+        };
+        let log_path = test_path.join("_delta_log");
+        let log_url = url::Url::from_file_path(&log_path).unwrap();
+
+        let plan = DeclarativePlanNode::FileListing(FileListingNode { path: log_url });
 
         let result = executor.execute(plan);
-        assert!(result.is_err());
+        assert!(
+            result.is_ok(),
+            "FileListing should succeed: {:?}",
+            result.err()
+        );
+
+        // Verify we get file listing batches
+        let batches: Vec<_> = result.unwrap().collect();
+        assert!(
+            !batches.is_empty(),
+            "Should get at least one batch from file listing"
+        );
     }
 
     // =========================================================================
@@ -1368,19 +1751,29 @@ mod tests {
         let plan = sm.get_plan();
         assert!(plan.is_ok(), "Should be able to get plan");
 
-        // The first phase should produce a ConsumeByKDF -> Scan plan for _last_checkpoint
+        // The first phase should produce a Sink(Drop) -> ConsumeByKDF -> Scan plan for _last_checkpoint
         let plan = plan.unwrap();
+        
+        // Verify it's a Drop sink (all snapshot phases use Drop sinks)
+        assert!(plan.is_drop_sink(), "Snapshot plans should use Drop sinks");
+        
         match plan {
-            DeclarativePlanNode::ConsumeByKDF { child, node: _ } => {
+            DeclarativePlanNode::Sink { child, node } => {
+                assert_eq!(node.sink_type, SinkType::Drop);
                 match child.as_ref() {
-                    DeclarativePlanNode::Scan(scan) => {
-                        assert_eq!(scan.file_type, super::FileType::Json);
-                        assert!(!scan.files.is_empty());
+                    DeclarativePlanNode::ConsumeByKDF { child: inner, node: _ } => {
+                        match inner.as_ref() {
+                            DeclarativePlanNode::Scan(scan) => {
+                                assert_eq!(scan.file_type, super::FileType::Json);
+                                assert!(!scan.files.is_empty());
+                            }
+                            _ => panic!("Expected Scan as child of ConsumeByKDF"),
+                        }
                     }
-                    _ => panic!("Expected Scan as child of ConsumeByKDF"),
+                    _ => panic!("Expected ConsumeByKDF as child of Sink"),
                 }
             }
-            _ => panic!("Expected ConsumeByKDF plan for CheckpointHint phase"),
+            _ => panic!("Expected Sink plan for CheckpointHint phase"),
         }
     }
 
@@ -1486,21 +1879,24 @@ mod tests {
         assert_eq!(sm.phase_name(), "CheckpointHint");
 
         // Get plan and simulate advance (with error since we're not actually executing)
-        // CheckpointHint phase now returns ConsumeByKDF wrapping a Scan
+        // CheckpointHint phase now returns Sink(Drop) -> ConsumeByKDF -> Scan
         let plan = sm.get_plan().unwrap();
-        assert!(matches!(plan, DeclarativePlanNode::ConsumeByKDF { .. }));
+        
+        // Verify it's a Drop sink (all snapshot phases use Drop sinks)
+        assert!(plan.is_drop_sink(), "Snapshot plans should use Drop sinks");
+        assert!(matches!(plan, DeclarativePlanNode::Sink { .. }));
 
         // Advance to ListFiles
         let result = sm.advance(Ok(plan));
         assert!(matches!(result, Ok(AdvanceResult::Continue)));
         assert_eq!(sm.phase_name(), "ListFiles");
 
-        // Get next plan - now wrapped in ConsumeByKDF for LogSegmentBuilder
+        // Get next plan - now wrapped in Sink(Drop) -> ConsumeByKDF for LogSegmentBuilder
         let plan = sm.get_plan().unwrap();
+        assert!(plan.is_drop_sink(), "Snapshot plans should use Drop sinks");
         assert!(
-            matches!(plan, DeclarativePlanNode::ConsumeByKDF { .. })
-                || matches!(plan, DeclarativePlanNode::FileListing(_)),
-            "Expected ConsumeByKDF or FileListing, got {:?}",
+            matches!(plan, DeclarativePlanNode::Sink { .. }),
+            "Expected Sink plan, got {:?}",
             plan
         );
 
@@ -2022,4 +2418,527 @@ mod tests {
     //
     //     assert!(scan_sm.is_terminal());
     // }
+
+    // =========================================================================
+    // DropOnlyDriver and ResultsDriver Tests
+    // =========================================================================
+
+    #[test]
+    fn test_drop_only_driver_rejects_results_sink() {
+        use crate::plans::state_machines::StateMachine;
+
+        // Create a mock state machine that returns a Results sink plan
+        struct MockResultsStateMachine {
+            done: bool,
+        }
+
+        impl StateMachine for MockResultsStateMachine {
+            type Result = ();
+
+            fn get_plan(&self) -> DeltaResult<DeclarativePlanNode> {
+                // Create a simple plan with a Results sink
+                let schema = Arc::new(StructType::new_unchecked(vec![StructField::nullable(
+                    "value",
+                    DataType::LONG,
+                )]));
+                Ok(DeclarativePlanNode::Scan(ScanNode {
+                    file_type: FileType::Json,
+                    files: vec![],
+                    schema,
+                })
+                .sink_results())
+            }
+
+            fn advance(
+                &mut self,
+                _result: DeltaResult<DeclarativePlanNode>,
+            ) -> DeltaResult<AdvanceResult<Self::Result>> {
+                self.done = true;
+                Ok(AdvanceResult::Done(()))
+            }
+
+            fn operation_type(&self) -> crate::plans::state_machines::OperationType {
+                crate::plans::state_machines::OperationType::Scan
+            }
+
+            fn phase_name(&self) -> &'static str {
+                "Test"
+            }
+        }
+
+        let engine = create_test_engine();
+        let sm = MockResultsStateMachine { done: false };
+        let driver = DropOnlyDriver::new(engine, sm);
+
+        // DropOnlyDriver should error on Results sink
+        let result = driver.execute();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Results sink"),
+            "Error should mention Results sink: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_drop_only_driver_accepts_drop_sink() {
+        use crate::plans::state_machines::StateMachine;
+
+        // Create a mock state machine that returns a Drop sink plan
+        struct MockDropStateMachine {
+            calls: std::cell::Cell<usize>,
+        }
+
+        impl StateMachine for MockDropStateMachine {
+            type Result = String;
+
+            fn get_plan(&self) -> DeltaResult<DeclarativePlanNode> {
+                let schema = Arc::new(StructType::new_unchecked(vec![StructField::nullable(
+                    "value",
+                    DataType::LONG,
+                )]));
+                // Return a Drop sink plan
+                Ok(DeclarativePlanNode::Scan(ScanNode {
+                    file_type: FileType::Json,
+                    files: vec![], // Empty files so execution succeeds quickly
+                    schema,
+                })
+                .sink_drop())
+            }
+
+            fn advance(
+                &mut self,
+                _result: DeltaResult<DeclarativePlanNode>,
+            ) -> DeltaResult<AdvanceResult<Self::Result>> {
+                let calls = self.calls.get() + 1;
+                self.calls.set(calls);
+                if calls >= 2 {
+                    Ok(AdvanceResult::Done("completed".to_string()))
+                } else {
+                    Ok(AdvanceResult::Continue)
+                }
+            }
+
+            fn operation_type(&self) -> crate::plans::state_machines::OperationType {
+                crate::plans::state_machines::OperationType::SnapshotBuild
+            }
+
+            fn phase_name(&self) -> &'static str {
+                "Test"
+            }
+        }
+
+        let engine = create_test_engine();
+        let sm = MockDropStateMachine {
+            calls: std::cell::Cell::new(0),
+        };
+        let driver = DropOnlyDriver::new(engine, sm);
+
+        // DropOnlyDriver should accept Drop sink and complete successfully
+        let result = driver.execute();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "completed");
+    }
+
+    #[test]
+    fn test_results_driver_streams_from_results_sink() {
+        use crate::plans::state_machines::StateMachine;
+
+        // Create a mock state machine that returns a Results sink plan
+        struct MockStreamingStateMachine {
+            done: bool,
+        }
+
+        impl StateMachine for MockStreamingStateMachine {
+            type Result = String;
+
+            fn get_plan(&self) -> DeltaResult<DeclarativePlanNode> {
+                let schema = Arc::new(StructType::new_unchecked(vec![StructField::nullable(
+                    "value",
+                    DataType::LONG,
+                )]));
+                // Return a Results sink plan (empty files so no actual data)
+                Ok(DeclarativePlanNode::Scan(ScanNode {
+                    file_type: FileType::Json,
+                    files: vec![],
+                    schema,
+                })
+                .sink_results())
+            }
+
+            fn advance(
+                &mut self,
+                _result: DeltaResult<DeclarativePlanNode>,
+            ) -> DeltaResult<AdvanceResult<Self::Result>> {
+                self.done = true;
+                Ok(AdvanceResult::Done("streamed".to_string()))
+            }
+
+            fn operation_type(&self) -> crate::plans::state_machines::OperationType {
+                crate::plans::state_machines::OperationType::Scan
+            }
+
+            fn phase_name(&self) -> &'static str {
+                "Test"
+            }
+        }
+
+        let engine = create_test_engine();
+        let sm = MockStreamingStateMachine { done: false };
+        let mut driver = ResultsDriver::new(engine, sm);
+
+        // Consume the iterator (should be empty since no files)
+        let batches: Vec<_> = driver.by_ref().collect();
+        assert!(batches.is_empty(), "Should have no batches from empty files");
+
+        // Should be done and have result
+        assert!(driver.is_done());
+        let result = driver.into_result();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "streamed");
+    }
+
+    #[test]
+    fn test_results_driver_handles_drop_sink_silently() {
+        use crate::plans::state_machines::StateMachine;
+
+        // Create a mock state machine that returns Drop sink first, then Results sink
+        struct MockMixedStateMachine {
+            phase: std::cell::Cell<usize>,
+        }
+
+        impl StateMachine for MockMixedStateMachine {
+            type Result = String;
+
+            fn get_plan(&self) -> DeltaResult<DeclarativePlanNode> {
+                let schema = Arc::new(StructType::new_unchecked(vec![StructField::nullable(
+                    "value",
+                    DataType::LONG,
+                )]));
+
+                if self.phase.get() == 0 {
+                    // First phase: Drop sink (internal processing)
+                    Ok(DeclarativePlanNode::Scan(ScanNode {
+                        file_type: FileType::Json,
+                        files: vec![],
+                        schema,
+                    })
+                    .sink_drop())
+                } else {
+                    // Second phase: Results sink (stream to user)
+                    Ok(DeclarativePlanNode::Scan(ScanNode {
+                        file_type: FileType::Json,
+                        files: vec![],
+                        schema,
+                    })
+                    .sink_results())
+                }
+            }
+
+            fn advance(
+                &mut self,
+                _result: DeltaResult<DeclarativePlanNode>,
+            ) -> DeltaResult<AdvanceResult<Self::Result>> {
+                let phase = self.phase.get() + 1;
+                self.phase.set(phase);
+
+                if phase >= 2 {
+                    Ok(AdvanceResult::Done("mixed-completed".to_string()))
+                } else {
+                    Ok(AdvanceResult::Continue)
+                }
+            }
+
+            fn operation_type(&self) -> crate::plans::state_machines::OperationType {
+                crate::plans::state_machines::OperationType::Scan
+            }
+
+            fn phase_name(&self) -> &'static str {
+                if self.phase.get() == 0 {
+                    "DropPhase"
+                } else {
+                    "ResultsPhase"
+                }
+            }
+        }
+
+        let engine = create_test_engine();
+        let sm = MockMixedStateMachine {
+            phase: std::cell::Cell::new(0),
+        };
+        let mut driver = ResultsDriver::new(engine, sm);
+
+        // Consume the iterator
+        // Drop phase should be handled silently, Results phase should yield nothing (empty files)
+        let batches: Vec<_> = driver.by_ref().collect();
+        assert!(batches.is_empty());
+
+        // Should complete successfully
+        assert!(driver.is_done());
+        let result = driver.into_result();
+        assert_eq!(result, Some("mixed-completed".to_string()));
+    }
+
+    #[test]
+    fn test_sink_type_helpers() {
+        let schema = Arc::new(StructType::new_unchecked(vec![StructField::nullable(
+            "value",
+            DataType::LONG,
+        )]));
+
+        // Test Drop sink
+        let drop_plan = DeclarativePlanNode::Scan(ScanNode {
+            file_type: FileType::Json,
+            files: vec![],
+            schema: schema.clone(),
+        })
+        .sink_drop();
+
+        assert!(drop_plan.is_complete());
+        assert!(drop_plan.is_drop_sink());
+        assert!(!drop_plan.is_results_sink());
+        assert_eq!(drop_plan.sink_type(), Some(SinkType::Drop));
+
+        // Test Results sink
+        let results_plan = DeclarativePlanNode::Scan(ScanNode {
+            file_type: FileType::Json,
+            files: vec![],
+            schema: schema.clone(),
+        })
+        .sink_results();
+
+        assert!(results_plan.is_complete());
+        assert!(!results_plan.is_drop_sink());
+        assert!(results_plan.is_results_sink());
+        assert_eq!(results_plan.sink_type(), Some(SinkType::Results));
+
+        // Test non-sink plan
+        let non_sink_plan = DeclarativePlanNode::Scan(ScanNode {
+            file_type: FileType::Json,
+            files: vec![],
+            schema,
+        });
+
+        assert!(!non_sink_plan.is_complete());
+        assert!(!non_sink_plan.is_drop_sink());
+        assert!(!non_sink_plan.is_results_sink());
+        assert_eq!(non_sink_plan.sink_type(), None);
+    }
+
+    // =========================================================================
+    // Integration Tests: SnapshotStateMachine with DropOnlyDriver
+    // =========================================================================
+
+    /// Test that DropOnlyDriver can execute SnapshotStateMachine on a real delta table
+    /// and produce a valid Snapshot that matches the traditional API.
+    #[test]
+    fn test_drop_only_driver_snapshot_state_machine_real_table() {
+        use crate::plans::state_machines::SnapshotStateMachine;
+        use crate::Snapshot;
+
+        // Get path to a test table
+        let Some((_, table_url)) = get_test_table_path() else {
+            println!("Skipping test: test table not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+
+        // Build snapshot using traditional API for comparison
+        let expected_snapshot = match Snapshot::builder_for(table_url.clone()).build(engine.as_ref())
+        {
+            Ok(s) => s,
+            Err(e) => {
+                println!("Skipping test: traditional snapshot build failed: {}", e);
+                return;
+            }
+        };
+
+        // Build snapshot using SnapshotStateMachine + DropOnlyDriver
+        let sm = SnapshotStateMachine::new(table_url.clone()).unwrap();
+        let driver = DropOnlyDriver::new(engine.clone(), sm);
+
+        let actual_snapshot = match driver.execute() {
+            Ok(s) => s,
+            Err(e) => {
+                panic!("DropOnlyDriver failed to execute SnapshotStateMachine: {}", e);
+            }
+        };
+
+        // Verify the snapshots match
+        assert_eq!(
+            expected_snapshot.version(),
+            actual_snapshot.version(),
+            "Snapshot versions should match"
+        );
+
+        assert_eq!(
+            expected_snapshot.table_root().as_str(),
+            actual_snapshot.table_root().as_str(),
+            "Table roots should match"
+        );
+
+        // Compare schemas
+        let expected_schema = expected_snapshot.schema();
+        let actual_schema = actual_snapshot.schema();
+        assert_eq!(
+            expected_schema.fields().len(),
+            actual_schema.fields().len(),
+            "Schema field counts should match"
+        );
+
+        for (expected_field, actual_field) in
+            expected_schema.fields().zip(actual_schema.fields())
+        {
+            assert_eq!(
+                expected_field.name(),
+                actual_field.name(),
+                "Field names should match"
+            );
+            assert_eq!(
+                expected_field.data_type(),
+                actual_field.data_type(),
+                "Field data types should match"
+            );
+        }
+
+        println!(
+            "SUCCESS: SnapshotStateMachine produced correct Snapshot at version {}",
+            actual_snapshot.version()
+        );
+    }
+
+    /// Test SnapshotStateMachine with a table that has a checkpoint
+    #[test]
+    fn test_drop_only_driver_snapshot_with_checkpoint() {
+        use crate::plans::state_machines::SnapshotStateMachine;
+        use crate::Snapshot;
+
+        // Get path to a table with checkpoint
+        let Some((_, table_url)) = get_test_table_with_checkpoint_path() else {
+            println!("Skipping test: checkpoint table not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+
+        // Build expected snapshot using traditional API
+        let expected_snapshot = match Snapshot::builder_for(table_url.clone()).build(engine.as_ref())
+        {
+            Ok(s) => s,
+            Err(e) => {
+                println!(
+                    "Skipping test: traditional snapshot build failed: {}",
+                    e
+                );
+                return;
+            }
+        };
+
+        // Build snapshot using SnapshotStateMachine + DropOnlyDriver
+        let sm = SnapshotStateMachine::new(table_url).unwrap();
+        let driver = DropOnlyDriver::new(engine.clone(), sm);
+
+        let actual_snapshot = match driver.execute() {
+            Ok(s) => s,
+            Err(e) => {
+                panic!(
+                    "DropOnlyDriver failed on table with checkpoint: {}",
+                    e
+                );
+            }
+        };
+
+        // Verify versions match
+        assert_eq!(
+            expected_snapshot.version(),
+            actual_snapshot.version(),
+            "Snapshot versions should match for checkpoint table"
+        );
+
+        println!(
+            "SUCCESS: SnapshotStateMachine handled checkpoint correctly, version = {}",
+            actual_snapshot.version()
+        );
+    }
+
+    /// Test multiple tables to ensure SnapshotStateMachine works across different table structures
+    #[test]
+    fn test_drop_only_driver_multiple_tables() {
+        use crate::plans::state_machines::SnapshotStateMachine;
+        use crate::Snapshot;
+
+        let test_tables = [
+            "table-without-dv-small",
+            "table-with-dv-small",
+            "basic_partitioned",
+            "parquet_row_group_skipping",
+        ];
+
+        let engine = create_test_engine();
+        let mut success_count = 0;
+
+        for table_name in &test_tables {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data")
+                .join(table_name);
+
+            if !path.exists() {
+                println!("Skipping {}: path not found", table_name);
+                continue;
+            }
+
+            let table_url = url::Url::from_directory_path(&path).unwrap();
+
+            // Build expected snapshot
+            let expected_snapshot = match Snapshot::builder_for(table_url.clone()).build(engine.as_ref())
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("Skipping {}: traditional build failed: {}", table_name, e);
+                    continue;
+                }
+            };
+
+            // Build using SnapshotStateMachine + DropOnlyDriver
+            let sm = SnapshotStateMachine::new(table_url).unwrap();
+            let driver = DropOnlyDriver::new(engine.clone(), sm);
+
+            match driver.execute() {
+                Ok(actual_snapshot) => {
+                    assert_eq!(
+                        expected_snapshot.version(),
+                        actual_snapshot.version(),
+                        "Version mismatch for table {}",
+                        table_name
+                    );
+                    assert_eq!(
+                        expected_snapshot.schema().fields().len(),
+                        actual_snapshot.schema().fields().len(),
+                        "Schema field count mismatch for table {}",
+                        table_name
+                    );
+                    println!(
+                        "  OK: {} (version {})",
+                        table_name,
+                        actual_snapshot.version()
+                    );
+                    success_count += 1;
+                }
+                Err(e) => {
+                    panic!(
+                        "DropOnlyDriver failed for table {}: {}",
+                        table_name, e
+                    );
+                }
+            }
+        }
+
+        println!(
+            "Successfully tested {} tables with SnapshotStateMachine",
+            success_count
+        );
+        assert!(success_count > 0, "At least one table should succeed");
+    }
 }

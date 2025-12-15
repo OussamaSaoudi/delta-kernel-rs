@@ -90,6 +90,7 @@ mod proto_roundtrip_tests {
                 columns: vec![],
                 output_schema: test_schema(),
             },
+            sink: SinkNode::results(),
         };
 
         // Convert to proto
@@ -147,29 +148,35 @@ mod proto_roundtrip_tests {
                 columns: vec![],
                 output_schema: test_schema(),
             },
+            sink: SinkNode::results(),
         };
 
         // Get tree representation
         let tree = commit_plan.as_query_plan();
 
-        // Verify tree structure: Select -> Filter -> Scan
+        // Verify tree structure: Sink -> Select -> Filter -> Scan
         match tree {
-            DeclarativePlanNode::Select { child, .. } => {
+            DeclarativePlanNode::Sink { child, .. } => {
                 match *child {
-                    DeclarativePlanNode::FilterByKDF { child: inner, node } => {
-                        // Verify it's AddRemoveDedup (variant IS the identity)
-                        assert!(matches!(&node.state, FilterKdfState::AddRemoveDedup(_)));
-                        match *inner {
-                            DeclarativePlanNode::Scan(scan) => {
-                                assert_eq!(scan.file_type, FileType::Json);
+                    DeclarativePlanNode::Select { child, .. } => {
+                        match *child {
+                            DeclarativePlanNode::FilterByKDF { child: inner, node } => {
+                                // Verify it's AddRemoveDedup (variant IS the identity)
+                                assert!(matches!(&node.state, FilterKdfState::AddRemoveDedup(_)));
+                                match *inner {
+                                    DeclarativePlanNode::Scan(scan) => {
+                                        assert_eq!(scan.file_type, FileType::Json);
+                                    }
+                                    _ => panic!("Expected Scan at leaf"),
+                                }
                             }
-                            _ => panic!("Expected Scan at leaf"),
+                            _ => panic!("Expected Filter after Select"),
                         }
                     }
-                    _ => panic!("Expected Filter after Select"),
+                    _ => panic!("Expected Select after Sink"),
                 }
             }
-            _ => panic!("Expected Select at root"),
+            _ => panic!("Expected Sink at root"),
         }
     }
 }
@@ -454,6 +461,7 @@ mod declarative_phase_tests {
                 None, // end_version
                 None, // checkpoint_hint_version
             ),
+            sink: SinkNode::drop(), // Drop sink for snapshot operations
         };
         let phase = SnapshotPhase::ListFiles(list_files_plan);
         let declarative = phase.as_declarative_phase();

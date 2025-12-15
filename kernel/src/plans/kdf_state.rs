@@ -11,7 +11,7 @@
 //! 4. u64 conversion only happens at FFI boundaries
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use url::Url;
 
@@ -465,6 +465,34 @@ impl SchemaStoreState {
 // LogSegmentBuilderState - Builds LogSegment from file listing results
 // =============================================================================
 
+/// Inner mutable state for LogSegmentBuilder.
+#[derive(Debug)]
+struct LogSegmentBuilderInner {
+    /// Log directory root URL
+    log_root: Url,
+    /// Optional end version to stop at
+    end_version: Option<Version>,
+    /// Checkpoint hint version from `_last_checkpoint` file
+    /// When set, the builder knows where to expect a valid checkpoint
+    checkpoint_hint_version: Option<Version>,
+    /// Sorted commit files in the log segment (ascending)
+    ascending_commit_files: Vec<ParsedLogPath>,
+    /// Sorted compaction files in the log segment (ascending)
+    ascending_compaction_files: Vec<ParsedLogPath>,
+    /// Checkpoint files in the log segment
+    checkpoint_parts: Vec<ParsedLogPath>,
+    /// Latest CRC (checksum) file
+    latest_crc_file: Option<ParsedLogPath>,
+    /// Latest commit file (may not be in contiguous segment)
+    latest_commit_file: Option<ParsedLogPath>,
+    /// Stored error to surface during advance()
+    error: Option<String>,
+    /// Current group version for checkpoint grouping
+    current_group_version: Option<Version>,
+    /// New checkpoint parts being accumulated for current version
+    new_checkpoint_parts: Vec<ParsedLogPath>,
+}
+
 /// State for LogSegmentBuilder consumer KDF - builds a LogSegment from file listing.
 ///
 /// This is a **Consumer KDF** that processes batches of file metadata and accumulates
@@ -482,31 +510,12 @@ impl SchemaStoreState {
 /// 3. `apply()` returns `Ok(true)` to continue, `Ok(false)` to stop
 /// 4. If an error occurs, it's stored in `error` and `apply()` returns `Ok(false)`
 /// 5. After completion, extract `ListedLogFiles` via `into_listed_files()`
+///
+/// Uses interior mutability via `Arc<Mutex<>>` to allow `apply(&self)` signature,
+/// enabling use in lazy iterators.
 #[derive(Debug, Clone)]
 pub struct LogSegmentBuilderState {
-    /// Log directory root URL
-    pub log_root: Url,
-    /// Optional end version to stop at
-    pub end_version: Option<Version>,
-    /// Checkpoint hint version from `_last_checkpoint` file
-    /// When set, the builder knows where to expect a valid checkpoint
-    pub checkpoint_hint_version: Option<Version>,
-    /// Sorted commit files in the log segment (ascending)
-    pub ascending_commit_files: Vec<ParsedLogPath>,
-    /// Sorted compaction files in the log segment (ascending)
-    pub ascending_compaction_files: Vec<ParsedLogPath>,
-    /// Checkpoint files in the log segment
-    pub checkpoint_parts: Vec<ParsedLogPath>,
-    /// Latest CRC (checksum) file
-    pub latest_crc_file: Option<ParsedLogPath>,
-    /// Latest commit file (may not be in contiguous segment)
-    pub latest_commit_file: Option<ParsedLogPath>,
-    /// Stored error to surface during advance()
-    pub error: Option<String>,
-    /// Current group version for checkpoint grouping
-    current_group_version: Option<Version>,
-    /// New checkpoint parts being accumulated for current version
-    new_checkpoint_parts: Vec<ParsedLogPath>,
+    inner: Arc<Mutex<LogSegmentBuilderInner>>,
 }
 
 impl LogSegmentBuilderState {
@@ -522,17 +531,19 @@ impl LogSegmentBuilderState {
         checkpoint_hint_version: Option<Version>,
     ) -> Self {
         Self {
-            log_root,
-            end_version,
-            checkpoint_hint_version,
-            ascending_commit_files: Vec::new(),
-            ascending_compaction_files: Vec::new(),
-            checkpoint_parts: Vec::new(),
-            latest_crc_file: None,
-            latest_commit_file: None,
-            error: None,
-            current_group_version: None,
-            new_checkpoint_parts: Vec::new(),
+            inner: Arc::new(Mutex::new(LogSegmentBuilderInner {
+                log_root,
+                end_version,
+                checkpoint_hint_version,
+                ascending_commit_files: Vec::new(),
+                ascending_compaction_files: Vec::new(),
+                checkpoint_parts: Vec::new(),
+                latest_crc_file: None,
+                latest_commit_file: None,
+                error: None,
+                current_group_version: None,
+                new_checkpoint_parts: Vec::new(),
+            })),
         }
     }
 
@@ -547,13 +558,15 @@ impl LogSegmentBuilderState {
     /// - `size`: Long - file size in bytes
     /// - `modificationTime`: Long - modification timestamp
     #[inline]
-    pub fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<bool> {
+    pub fn apply(&self, batch: &dyn EngineData) -> DeltaResult<bool> {
         use crate::arrow::array::{Array, Int64Array, StringArray};
         use crate::engine::arrow_data::ArrowEngineData;
         use crate::AsAny;
 
+        let mut inner = self.inner.lock().unwrap();
+
         // If we already have an error, stop processing
-        if self.error.is_some() {
+        if inner.error.is_some() {
             return Ok(false);
         }
 
@@ -616,10 +629,10 @@ impl LogSegmentBuilderState {
             };
 
             // Parse the path into a URL
-            let file_url = match self.log_root.join(path_str) {
+            let file_url = match inner.log_root.join(path_str) {
                 Ok(url) => url,
                 Err(e) => {
-                    self.error = Some(format!("Failed to parse file path '{}': {}", path_str, e));
+                    inner.error = Some(format!("Failed to parse file path '{}': {}", path_str, e));
                     return Ok(false);
                 }
             };
@@ -636,56 +649,56 @@ impl LogSegmentBuilderState {
                 Ok(Some(path)) => path,
                 Ok(None) => continue, // Not a valid log path, skip
                 Err(e) => {
-                    self.error = Some(format!("Failed to parse log path '{}': {}", path_str, e));
+                    inner.error = Some(format!("Failed to parse log path '{}': {}", path_str, e));
                     return Ok(false);
                 }
             };
 
             // Check if we should stop based on end_version
-            if let Some(end_version) = self.end_version {
+            if let Some(end_version) = inner.end_version {
                 if parsed_path.version > end_version {
                     // Flush any pending checkpoint group before stopping
-                    if let Some(group_version) = self.current_group_version {
-                        self.flush_checkpoint_group(group_version);
+                    if let Some(group_version) = inner.current_group_version {
+                        Self::flush_checkpoint_group_inner(&mut inner, group_version);
                     }
                     return Ok(false); // Break - we've passed the end version
                 }
             }
 
             // Process the file based on its type
-            self.process_file(parsed_path);
+            Self::process_file_inner(&mut inner, parsed_path);
         }
 
         Ok(true) // Continue
     }
 
-    /// Process a single parsed log file.
-    fn process_file(&mut self, file: ParsedLogPath) {
+    /// Process a single parsed log file (operates on inner state).
+    fn process_file_inner(inner: &mut LogSegmentBuilderInner, file: ParsedLogPath) {
         // Check if version changed - need to flush checkpoint group
-        if let Some(group_version) = self.current_group_version {
+        if let Some(group_version) = inner.current_group_version {
             if file.version != group_version {
-                self.flush_checkpoint_group(group_version);
+                Self::flush_checkpoint_group_inner(inner, group_version);
             }
         }
-        self.current_group_version = Some(file.version);
+        inner.current_group_version = Some(file.version);
 
         match &file.file_type {
             LogPathFileType::Commit | LogPathFileType::StagedCommit => {
-                self.ascending_commit_files.push(file);
+                inner.ascending_commit_files.push(file);
             }
             LogPathFileType::CompactedCommit { hi } => {
                 // Only include if within end_version bounds
-                if self.end_version.is_none_or(|end| *hi <= end) {
-                    self.ascending_compaction_files.push(file);
+                if inner.end_version.is_none_or(|end| *hi <= end) {
+                    inner.ascending_compaction_files.push(file);
                 }
             }
             LogPathFileType::SinglePartCheckpoint
             | LogPathFileType::UuidCheckpoint
             | LogPathFileType::MultiPartCheckpoint { .. } => {
-                self.new_checkpoint_parts.push(file);
+                inner.new_checkpoint_parts.push(file);
             }
             LogPathFileType::Crc => {
-                self.latest_crc_file = Some(file);
+                inner.latest_crc_file = Some(file);
             }
             LogPathFileType::Unknown => {
                 // Ignore unknown file types
@@ -693,30 +706,29 @@ impl LogSegmentBuilderState {
         }
     }
 
-    /// Flush accumulated checkpoint parts for a version.
-    fn flush_checkpoint_group(&mut self, version: Version) {
-        if self.new_checkpoint_parts.is_empty() {
+    /// Flush accumulated checkpoint parts for a version (operates on inner state).
+    fn flush_checkpoint_group_inner(inner: &mut LogSegmentBuilderInner, version: Version) {
+        if inner.new_checkpoint_parts.is_empty() {
             return;
         }
 
         // Group and find complete checkpoint
-        let new_parts = std::mem::take(&mut self.new_checkpoint_parts);
-        if let Some(complete_checkpoint) = self.find_complete_checkpoint(new_parts) {
-            self.checkpoint_parts = complete_checkpoint;
+        let new_parts = std::mem::take(&mut inner.new_checkpoint_parts);
+        if let Some(complete_checkpoint) = Self::find_complete_checkpoint_inner(new_parts) {
+            inner.checkpoint_parts = complete_checkpoint;
             // Save latest commit at checkpoint version if exists
-            self.latest_commit_file = self
+            inner.latest_commit_file = inner
                 .ascending_commit_files
                 .pop()
                 .filter(|commit| commit.version == version);
             // Clear commits/compactions before checkpoint
-            self.ascending_commit_files.clear();
-            self.ascending_compaction_files.clear();
+            inner.ascending_commit_files.clear();
+            inner.ascending_compaction_files.clear();
         }
     }
 
-    /// Find a complete checkpoint from parts.
-    fn find_complete_checkpoint(
-        &self,
+    /// Find a complete checkpoint from parts (static helper).
+    fn find_complete_checkpoint_inner(
         parts: Vec<ParsedLogPath>,
     ) -> Option<Vec<ParsedLogPath>> {
         use std::collections::HashMap;
@@ -761,52 +773,115 @@ impl LogSegmentBuilderState {
     /// Finalize the state and check for errors.
     ///
     /// Call this after iteration completes to flush any pending state.
-    pub fn finalize(&mut self) {
+    pub fn finalize(&self) {
+        let mut inner = self.inner.lock().unwrap();
         // Flush final checkpoint group
-        if let Some(group_version) = self.current_group_version {
-            self.flush_checkpoint_group(group_version);
+        if let Some(group_version) = inner.current_group_version {
+            Self::flush_checkpoint_group_inner(&mut inner, group_version);
         }
 
         // Update latest_commit_file if we have commits after checkpoint
-        if let Some(commit_file) = self.ascending_commit_files.last() {
-            self.latest_commit_file = Some(commit_file.clone());
+        if let Some(commit_file) = inner.ascending_commit_files.last() {
+            inner.latest_commit_file = Some(commit_file.clone());
         }
     }
 
     /// Check if an error occurred during processing.
     pub fn has_error(&self) -> bool {
-        self.error.is_some()
+        self.inner.lock().unwrap().error.is_some()
     }
 
     /// Take the error, if any.
-    pub fn take_error(&mut self) -> Option<String> {
-        self.error.take()
+    pub fn take_error(&self) -> Option<String> {
+        self.inner.lock().unwrap().error.take()
     }
 
     /// Convert the accumulated state into a LogSegment.
     ///
     /// This finalizes the state and builds a LogSegment from the accumulated files.
     /// Returns an error if there was a processing error or if the log segment is invalid.
-    pub fn into_log_segment(mut self) -> DeltaResult<LogSegment> {
-        // Check for errors first
-        if let Some(error) = self.error.take() {
+    ///
+    /// Note: This takes ownership of the inner data via locking. Multiple clones of
+    /// this state may exist (due to plan cloning), but only the first to call this
+    /// method will get the data - subsequent calls will see empty vectors.
+    pub fn into_log_segment(&self) -> DeltaResult<LogSegment> {
+        // Finalize first
+        self.finalize();
+
+        // Take ownership of inner data via lock
+        let mut guard = self.inner.lock().unwrap();
+
+        // Check for errors
+        if let Some(error) = guard.error.take() {
             return Err(Error::generic(error));
         }
 
-        // Finalize the state
-        self.finalize();
+        // Take the accumulated data (leaving empty vecs behind)
+        let ascending_commit_files = std::mem::take(&mut guard.ascending_commit_files);
+        let ascending_compaction_files = std::mem::take(&mut guard.ascending_compaction_files);
+        let checkpoint_parts = std::mem::take(&mut guard.checkpoint_parts);
+        let latest_crc_file = guard.latest_crc_file.take();
+        let latest_commit_file = guard.latest_commit_file.take();
+        let log_root = guard.log_root.clone();
+        let end_version = guard.end_version;
 
         // Build ListedLogFiles
         let listed_files = ListedLogFiles::try_new(
-            self.ascending_commit_files,
-            self.ascending_compaction_files,
-            self.checkpoint_parts,
-            self.latest_crc_file,
-            self.latest_commit_file,
+            ascending_commit_files,
+            ascending_compaction_files,
+            checkpoint_parts,
+            latest_crc_file,
+            latest_commit_file,
         )?;
 
         // Build LogSegment
-        LogSegment::try_new(listed_files, self.log_root, self.end_version)
+        LogSegment::try_new(listed_files, log_root, end_version)
+    }
+
+    // Test-only accessors for internal state
+    #[cfg(test)]
+    pub fn log_root(&self) -> Url {
+        self.inner.lock().unwrap().log_root.clone()
+    }
+
+    #[cfg(test)]
+    pub fn end_version(&self) -> Option<Version> {
+        self.inner.lock().unwrap().end_version
+    }
+
+    #[cfg(test)]
+    pub fn ascending_commit_files(&self) -> Vec<ParsedLogPath> {
+        self.inner.lock().unwrap().ascending_commit_files.clone()
+    }
+
+    #[cfg(test)]
+    pub fn checkpoint_parts(&self) -> Vec<ParsedLogPath> {
+        self.inner.lock().unwrap().checkpoint_parts.clone()
+    }
+
+    #[cfg(test)]
+    pub fn latest_commit_file(&self) -> Option<ParsedLogPath> {
+        self.inner.lock().unwrap().latest_commit_file.clone()
+    }
+
+    #[cfg(test)]
+    pub fn error(&self) -> Option<String> {
+        self.inner.lock().unwrap().error.clone()
+    }
+
+    #[cfg(test)]
+    pub fn latest_crc_file(&self) -> Option<ParsedLogPath> {
+        self.inner.lock().unwrap().latest_crc_file.clone()
+    }
+
+    #[cfg(test)]
+    pub fn ascending_compaction_files(&self) -> Vec<ParsedLogPath> {
+        self.inner.lock().unwrap().ascending_compaction_files.clone()
+    }
+
+    #[cfg(test)]
+    pub fn set_error(&self, error: String) {
+        self.inner.lock().unwrap().error = Some(error);
     }
 }
 
@@ -814,10 +889,31 @@ impl LogSegmentBuilderState {
 // CheckpointHintReaderState - Extracts checkpoint hint from _last_checkpoint
 // =============================================================================
 
+/// Inner mutable state for CheckpointHintReader.
+#[derive(Debug, Default)]
+struct CheckpointHintReaderInner {
+    /// The extracted checkpoint version
+    version: Option<Version>,
+    /// The number of actions stored in the checkpoint
+    size: Option<i64>,
+    /// The number of fragments if the checkpoint was written in multiple parts
+    parts: Option<i32>,
+    /// The number of bytes of the checkpoint
+    size_in_bytes: Option<i64>,
+    /// The number of AddFile actions in the checkpoint
+    num_of_add_files: Option<i64>,
+    /// Whether we've processed the hint (only expect one row)
+    processed: bool,
+    /// Stored error to surface during advance()
+    error: Option<String>,
+}
+
 /// State for CheckpointHintReader consumer KDF - extracts checkpoint hint from scan results.
 ///
 /// This is a **Consumer KDF** that processes the scan results of the `_last_checkpoint`
 /// file and extracts the checkpoint hint information (version, size, parts, etc.).
+///
+/// Uses interior mutability via `Arc<Mutex<>>` to allow `apply(&self)` signature.
 ///
 /// # Usage Pattern
 ///
@@ -825,28 +921,23 @@ impl LogSegmentBuilderState {
 /// 2. Feed scanned rows from `_last_checkpoint` file through `apply()`
 /// 3. `apply()` returns `Ok(true)` to continue, `Ok(false)` after extracting hint
 /// 4. After completion, extract the hint via `take_hint()`
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CheckpointHintReaderState {
-    /// The extracted checkpoint version
-    pub version: Option<Version>,
-    /// The number of actions stored in the checkpoint
-    pub size: Option<i64>,
-    /// The number of fragments if the checkpoint was written in multiple parts
-    pub parts: Option<i32>,
-    /// The number of bytes of the checkpoint
-    pub size_in_bytes: Option<i64>,
-    /// The number of AddFile actions in the checkpoint
-    pub num_of_add_files: Option<i64>,
-    /// Whether we've processed the hint (only expect one row)
-    processed: bool,
-    /// Stored error to surface during advance()
-    pub error: Option<String>,
+    inner: Arc<Mutex<CheckpointHintReaderInner>>,
+}
+
+impl Default for CheckpointHintReaderState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CheckpointHintReaderState {
     /// Create new state for reading checkpoint hint.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: Arc::new(Mutex::new(CheckpointHintReaderInner::default())),
+        }
     }
 
     /// Apply consumer to a batch of checkpoint hint data.
@@ -862,18 +953,20 @@ impl CheckpointHintReaderState {
     /// - `sizeInBytes`: Long - size in bytes (optional)
     /// - `numOfAddFiles`: Long - number of add files (optional)
     #[inline]
-    pub fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<bool> {
+    pub fn apply(&self, batch: &dyn EngineData) -> DeltaResult<bool> {
         use crate::arrow::array::{Array, Int32Array, Int64Array};
         use crate::engine::arrow_data::ArrowEngineData;
         use crate::AsAny;
 
+        let mut inner = self.inner.lock().unwrap();
+
         // If we already processed a hint, stop
-        if self.processed {
+        if inner.processed {
             return Ok(false);
         }
 
         // If we have an error, stop processing
-        if self.error.is_some() {
+        if inner.error.is_some() {
             return Ok(false);
         }
 
@@ -895,7 +988,7 @@ impl CheckpointHintReaderState {
         if let Some(version_col) = record_batch.column_by_name("version") {
             if let Some(version_array) = version_col.as_any().downcast_ref::<Int64Array>() {
                 if !version_array.is_null(0) {
-                    self.version = Some(version_array.value(0) as Version);
+                    inner.version = Some(version_array.value(0) as Version);
                 }
             }
         }
@@ -904,7 +997,7 @@ impl CheckpointHintReaderState {
         if let Some(size_col) = record_batch.column_by_name("size") {
             if let Some(size_array) = size_col.as_any().downcast_ref::<Int64Array>() {
                 if !size_array.is_null(0) {
-                    self.size = Some(size_array.value(0));
+                    inner.size = Some(size_array.value(0));
                 }
             }
         }
@@ -913,7 +1006,7 @@ impl CheckpointHintReaderState {
         if let Some(parts_col) = record_batch.column_by_name("parts") {
             if let Some(parts_array) = parts_col.as_any().downcast_ref::<Int32Array>() {
                 if !parts_array.is_null(0) {
-                    self.parts = Some(parts_array.value(0));
+                    inner.parts = Some(parts_array.value(0));
                 }
             }
         }
@@ -923,7 +1016,7 @@ impl CheckpointHintReaderState {
             if let Some(size_in_bytes_array) = size_in_bytes_col.as_any().downcast_ref::<Int64Array>()
             {
                 if !size_in_bytes_array.is_null(0) {
-                    self.size_in_bytes = Some(size_in_bytes_array.value(0));
+                    inner.size_in_bytes = Some(size_in_bytes_array.value(0));
                 }
             }
         }
@@ -932,45 +1025,76 @@ impl CheckpointHintReaderState {
         if let Some(num_add_col) = record_batch.column_by_name("numOfAddFiles") {
             if let Some(num_add_array) = num_add_col.as_any().downcast_ref::<Int64Array>() {
                 if !num_add_array.is_null(0) {
-                    self.num_of_add_files = Some(num_add_array.value(0));
+                    inner.num_of_add_files = Some(num_add_array.value(0));
                 }
             }
         }
 
-        self.processed = true;
+        inner.processed = true;
         
         // Return false to indicate we're done (Break)
         Ok(false)
     }
 
     /// Finalize the state after iteration completes.
-    pub fn finalize(&mut self) {
+    pub fn finalize(&self) {
         // Nothing special needed for finalization
     }
 
     /// Check if a hint was successfully extracted.
     pub fn has_hint(&self) -> bool {
-        self.version.is_some()
+        self.inner.lock().unwrap().version.is_some()
     }
 
     /// Check if an error occurred during processing.
     pub fn has_error(&self) -> bool {
-        self.error.is_some()
+        self.inner.lock().unwrap().error.is_some()
     }
 
     /// Take the error, if any.
-    pub fn take_error(&mut self) -> Option<String> {
-        self.error.take()
+    pub fn take_error(&self) -> Option<String> {
+        self.inner.lock().unwrap().error.take()
     }
 
     /// Get the extracted version, if any.
     pub fn get_version(&self) -> Option<Version> {
-        self.version
+        self.inner.lock().unwrap().version
     }
 
     /// Get the extracted parts count, if any.
     pub fn get_parts(&self) -> Option<i32> {
-        self.parts
+        self.inner.lock().unwrap().parts
+    }
+
+    // Test-only accessors for internal state
+    #[cfg(test)]
+    pub fn version(&self) -> Option<Version> {
+        self.inner.lock().unwrap().version
+    }
+
+    #[cfg(test)]
+    pub fn parts(&self) -> Option<i32> {
+        self.inner.lock().unwrap().parts
+    }
+
+    #[cfg(test)]
+    pub fn size(&self) -> Option<i64> {
+        self.inner.lock().unwrap().size
+    }
+
+    #[cfg(test)]
+    pub fn error(&self) -> Option<String> {
+        self.inner.lock().unwrap().error.clone()
+    }
+
+    #[cfg(test)]
+    pub fn size_in_bytes(&self) -> Option<i64> {
+        self.inner.lock().unwrap().size_in_bytes
+    }
+
+    #[cfg(test)]
+    pub fn num_of_add_files(&self) -> Option<i64> {
+        self.inner.lock().unwrap().num_of_add_files
     }
 }
 
@@ -980,11 +1104,24 @@ impl CheckpointHintReaderState {
 
 use crate::actions::{Metadata, Protocol};
 
+/// Inner mutable state for MetadataProtocolReader.
+#[derive(Debug, Default)]
+struct MetadataProtocolReaderInner {
+    /// The extracted protocol action (complete or None)
+    protocol: Option<Protocol>,
+    /// The extracted metadata action (complete or None)
+    metadata: Option<Metadata>,
+    /// Stored error to surface during advance()
+    error: Option<String>,
+}
+
 /// State for MetadataProtocolReader consumer KDF - extracts metadata and protocol actions.
 ///
 /// This is a **Consumer KDF** that processes the scan results of log files (JSON commits
 /// or Parquet checkpoints) and extracts the first non-null metadata and protocol actions
 /// needed for snapshot construction.
+///
+/// Uses interior mutability via `Arc<Mutex<>>` to allow `apply(&self)` signature.
 ///
 /// This follows the same pattern as `MetadataVisitor` and `ProtocolVisitor` - we use the
 /// existing `Metadata::try_new_from_data` and `Protocol::try_new_from_data` methods which
@@ -996,20 +1133,23 @@ use crate::actions::{Metadata, Protocol};
 /// 2. Feed scanned rows from log files through `apply()`
 /// 3. `apply()` returns `Ok(true)` to continue, `Ok(false)` after extracting both actions
 /// 4. After completion, extract the metadata and protocol via `take_*` accessors
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MetadataProtocolReaderState {
-    /// The extracted protocol action (complete or None)
-    pub protocol: Option<Protocol>,
-    /// The extracted metadata action (complete or None)
-    pub metadata: Option<Metadata>,
-    /// Stored error to surface during advance()
-    pub error: Option<String>,
+    inner: Arc<Mutex<MetadataProtocolReaderInner>>,
+}
+
+impl Default for MetadataProtocolReaderState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MetadataProtocolReaderState {
     /// Create new state for reading metadata and protocol.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: Arc::new(Mutex::new(MetadataProtocolReaderInner::default())),
+        }
     }
 
     /// Apply consumer to a batch of log file data.
@@ -1021,101 +1161,120 @@ impl MetadataProtocolReaderState {
     /// Uses the existing `Protocol::try_new_from_data` and `Metadata::try_new_from_data`
     /// visitor methods which guarantee atomic extraction - we get a complete action or nothing.
     #[inline]
-    pub fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<bool> {
+    pub fn apply(&self, batch: &dyn EngineData) -> DeltaResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+
         // If we already have both, stop
-        if self.protocol.is_some() && self.metadata.is_some() {
+        if inner.protocol.is_some() && inner.metadata.is_some() {
             return Ok(false);
         }
 
         // If we have an error, stop processing
-        if self.error.is_some() {
+        if inner.error.is_some() {
             return Ok(false);
         }
 
         // Try to extract protocol if not found yet
-        if self.protocol.is_none() {
+        if inner.protocol.is_none() {
             match Protocol::try_new_from_data(batch) {
                 Ok(Some(protocol)) => {
-                    self.protocol = Some(protocol);
+                    inner.protocol = Some(protocol);
                 }
                 Ok(None) => {
                     // No protocol in this batch, continue
                 }
                 Err(e) => {
-                    self.error = Some(format!("Failed to extract protocol: {}", e));
+                    inner.error = Some(format!("Failed to extract protocol: {}", e));
                     return Ok(false);
                 }
             }
         }
 
         // Try to extract metadata if not found yet
-        if self.metadata.is_none() {
+        if inner.metadata.is_none() {
             match Metadata::try_new_from_data(batch) {
                 Ok(Some(metadata)) => {
-                    self.metadata = Some(metadata);
+                    inner.metadata = Some(metadata);
                 }
                 Ok(None) => {
                     // No metadata in this batch, continue
                 }
                 Err(e) => {
-                    self.error = Some(format!("Failed to extract metadata: {}", e));
+                    inner.error = Some(format!("Failed to extract metadata: {}", e));
                     return Ok(false);
                 }
             }
         }
 
         // Return false (Break) if we found both, otherwise continue
-        Ok(!(self.protocol.is_some() && self.metadata.is_some()))
+        Ok(!(inner.protocol.is_some() && inner.metadata.is_some()))
     }
 
     /// Finalize the state after iteration completes.
-    pub fn finalize(&mut self) {
+    pub fn finalize(&self) {
         // Nothing special needed for finalization
     }
 
     /// Check if both protocol and metadata were successfully extracted.
     pub fn is_complete(&self) -> bool {
-        self.protocol.is_some() && self.metadata.is_some()
+        let inner = self.inner.lock().unwrap();
+        inner.protocol.is_some() && inner.metadata.is_some()
     }
 
     /// Check if protocol was found.
     pub fn has_protocol(&self) -> bool {
-        self.protocol.is_some()
+        self.inner.lock().unwrap().protocol.is_some()
     }
 
     /// Check if metadata was found.
     pub fn has_metadata(&self) -> bool {
-        self.metadata.is_some()
+        self.inner.lock().unwrap().metadata.is_some()
     }
 
     /// Check if an error occurred during processing.
     pub fn has_error(&self) -> bool {
-        self.error.is_some()
+        self.inner.lock().unwrap().error.is_some()
     }
 
     /// Take the error, if any.
-    pub fn take_error(&mut self) -> Option<String> {
-        self.error.take()
+    pub fn take_error(&self) -> Option<String> {
+        self.inner.lock().unwrap().error.take()
     }
 
     /// Take the extracted protocol, if any.
-    pub fn take_protocol(&mut self) -> Option<Protocol> {
-        self.protocol.take()
+    pub fn take_protocol(&self) -> Option<Protocol> {
+        self.inner.lock().unwrap().protocol.take()
     }
 
     /// Take the extracted metadata, if any.
-    pub fn take_metadata(&mut self) -> Option<Metadata> {
-        self.metadata.take()
+    pub fn take_metadata(&self) -> Option<Metadata> {
+        self.inner.lock().unwrap().metadata.take()
     }
 
-    /// Get a reference to the extracted protocol, if any.
-    pub fn get_protocol(&self) -> Option<&Protocol> {
-        self.protocol.as_ref()
+    /// Get a clone of the extracted protocol, if any.
+    pub fn get_protocol(&self) -> Option<Protocol> {
+        self.inner.lock().unwrap().protocol.clone()
     }
 
-    /// Get a reference to the extracted metadata, if any.
-    pub fn get_metadata(&self) -> Option<&Metadata> {
-        self.metadata.as_ref()
+    /// Get a clone of the extracted metadata, if any.
+    pub fn get_metadata(&self) -> Option<Metadata> {
+        self.inner.lock().unwrap().metadata.clone()
+    }
+
+    // Test-only accessors for internal state
+    #[cfg(test)]
+    pub fn protocol(&self) -> Option<Protocol> {
+        self.inner.lock().unwrap().protocol.clone()
+    }
+
+    #[cfg(test)]
+    pub fn metadata(&self) -> Option<Metadata> {
+        self.inner.lock().unwrap().metadata.clone()
+    }
+
+    #[cfg(test)]
+    pub fn error(&self) -> Option<String> {
+        self.inner.lock().unwrap().error.clone()
     }
 }
 
@@ -1123,10 +1282,23 @@ impl MetadataProtocolReaderState {
 // SidecarCollectorState - Collects sidecar file paths from manifest scan
 // =============================================================================
 
+/// Inner mutable state for SidecarCollector.
+#[derive(Debug)]
+struct SidecarCollectorInner {
+    /// Log directory root URL (used to construct full sidecar file paths)
+    log_root: Url,
+    /// Collected sidecar files
+    sidecar_files: Vec<FileMeta>,
+    /// Stored error to surface during advance()
+    error: Option<String>,
+}
+
 /// State for SidecarCollector consumer KDF - collects sidecar file paths from V2 checkpoint manifest.
 ///
 /// This is a **Consumer KDF** that processes the scan results of a V2 checkpoint manifest
 /// and accumulates the sidecar file paths for subsequent checkpoint leaf reading.
+///
+/// Uses interior mutability via `Arc<Mutex<>>` to allow `apply(&self)` signature.
 ///
 /// # Usage Pattern
 ///
@@ -1136,12 +1308,7 @@ impl MetadataProtocolReaderState {
 /// 4. After completion, extract the sidecar files via `take_sidecar_files()`
 #[derive(Debug, Clone)]
 pub struct SidecarCollectorState {
-    /// Log directory root URL (used to construct full sidecar file paths)
-    pub log_root: Url,
-    /// Collected sidecar files
-    pub sidecar_files: Vec<FileMeta>,
-    /// Stored error to surface during advance()
-    pub error: Option<String>,
+    inner: Arc<Mutex<SidecarCollectorInner>>,
 }
 
 impl SidecarCollectorState {
@@ -1151,9 +1318,11 @@ impl SidecarCollectorState {
     /// * `log_root` - The log directory root URL
     pub fn new(log_root: Url) -> Self {
         Self {
-            log_root,
-            sidecar_files: Vec::new(),
-            error: None,
+            inner: Arc::new(Mutex::new(SidecarCollectorInner {
+                log_root,
+                sidecar_files: Vec::new(),
+                error: None,
+            })),
         }
     }
 
@@ -1167,13 +1336,15 @@ impl SidecarCollectorState {
     /// - `sidecar.path`: String - relative path to sidecar file
     /// - `sidecar.sizeInBytes`: Long - size of sidecar file in bytes
     #[inline]
-    pub fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<bool> {
+    pub fn apply(&self, batch: &dyn EngineData) -> DeltaResult<bool> {
         use crate::arrow::array::{Array, Int64Array, StringArray};
         use crate::engine::arrow_data::ArrowEngineData;
         use crate::AsAny;
 
+        let mut inner = self.inner.lock().unwrap();
+
         // If we already have an error, stop processing
-        if self.error.is_some() {
+        if inner.error.is_some() {
             return Ok(false);
         }
 
@@ -1202,7 +1373,7 @@ impl SidecarCollectorState {
                 .ok_or_else(|| Error::generic("sidecar.path column is not a StringArray"))?,
             None => {
                 // No path column found - this shouldn't happen for valid manifest data
-                self.error = Some("Missing sidecar.path column in manifest batch".to_string());
+                inner.error = Some("Missing sidecar.path column in manifest batch".to_string());
                 return Ok(false);
             }
         };
@@ -1227,10 +1398,10 @@ impl SidecarCollectorState {
 
             // Construct full URL for the sidecar file
             // Sidecar files are in _delta_log/_sidecars/ directory
-            let sidecar_url = match self.log_root.join("_sidecars/").and_then(|u| u.join(path_str)) {
+            let sidecar_url = match inner.log_root.join("_sidecars/").and_then(|u| u.join(path_str)) {
                 Ok(url) => url,
                 Err(e) => {
-                    self.error = Some(format!("Failed to construct sidecar URL for '{}': {}", path_str, e));
+                    inner.error = Some(format!("Failed to construct sidecar URL for '{}': {}", path_str, e));
                     return Ok(false);
                 }
             };
@@ -1242,45 +1413,45 @@ impl SidecarCollectorState {
                 size,
             };
 
-            self.sidecar_files.push(file_meta);
+            inner.sidecar_files.push(file_meta);
         }
 
         Ok(true) // Continue processing
     }
 
     /// Finalize the state after iteration completes.
-    pub fn finalize(&mut self) {
+    pub fn finalize(&self) {
         // Nothing special needed for finalization
     }
 
     /// Check if any sidecar files were collected.
     pub fn has_sidecars(&self) -> bool {
-        !self.sidecar_files.is_empty()
+        !self.inner.lock().unwrap().sidecar_files.is_empty()
     }
 
     /// Get the number of collected sidecar files.
     pub fn sidecar_count(&self) -> usize {
-        self.sidecar_files.len()
+        self.inner.lock().unwrap().sidecar_files.len()
     }
 
     /// Check if an error occurred during processing.
     pub fn has_error(&self) -> bool {
-        self.error.is_some()
+        self.inner.lock().unwrap().error.is_some()
     }
 
     /// Take the error, if any.
-    pub fn take_error(&mut self) -> Option<String> {
-        self.error.take()
+    pub fn take_error(&self) -> Option<String> {
+        self.inner.lock().unwrap().error.take()
     }
 
     /// Take the collected sidecar files.
-    pub fn take_sidecar_files(&mut self) -> Vec<FileMeta> {
-        std::mem::take(&mut self.sidecar_files)
+    pub fn take_sidecar_files(&self) -> Vec<FileMeta> {
+        std::mem::take(&mut self.inner.lock().unwrap().sidecar_files)
     }
 
-    /// Get a reference to the collected sidecar files.
-    pub fn get_sidecar_files(&self) -> &[FileMeta] {
-        &self.sidecar_files
+    /// Get a clone of the collected sidecar files.
+    pub fn get_sidecar_files(&self) -> Vec<FileMeta> {
+        self.inner.lock().unwrap().sidecar_files.clone()
     }
 }
 
@@ -1314,8 +1485,10 @@ impl ConsumerKdfState {
     /// Returns:
     /// - `Ok(true)` = Continue (keep feeding data)
     /// - `Ok(false)` = Break (stop iteration)
+    ///
+    /// Uses interior mutability - takes `&self` to enable use in lazy iterators.
     #[inline]
-    pub fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<bool> {
+    pub fn apply(&self, batch: &dyn EngineData) -> DeltaResult<bool> {
         match self {
             Self::LogSegmentBuilder(state) => state.apply(batch),
             Self::CheckpointHintReader(state) => state.apply(batch),
@@ -1325,7 +1498,7 @@ impl ConsumerKdfState {
     }
 
     /// Finalize the consumer state after iteration completes.
-    pub fn finalize(&mut self) {
+    pub fn finalize(&self) {
         match self {
             Self::LogSegmentBuilder(state) => state.finalize(),
             Self::CheckpointHintReader(state) => state.finalize(),
@@ -1345,7 +1518,7 @@ impl ConsumerKdfState {
     }
 
     /// Take the error as a DeltaResult, if any.
-    pub fn take_error(&mut self) -> Option<Error> {
+    pub fn take_error(&self) -> Option<Error> {
         match self {
             Self::LogSegmentBuilder(state) => {
                 state.take_error().map(Error::generic)
@@ -1885,11 +2058,11 @@ mod tests {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
         let state = LogSegmentBuilderState::new(log_root.clone(), None, None);
 
-        assert_eq!(state.log_root, log_root);
-        assert!(state.end_version.is_none());
-        assert!(state.ascending_commit_files.is_empty());
-        assert!(state.checkpoint_parts.is_empty());
-        assert!(state.error.is_none());
+        assert_eq!(state.log_root(), log_root);
+        assert!(state.end_version().is_none());
+        assert!(state.ascending_commit_files().is_empty());
+        assert!(state.checkpoint_parts().is_empty());
+        assert!(state.error().is_none());
     }
 
     #[test]
@@ -1897,14 +2070,14 @@ mod tests {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
         let state = LogSegmentBuilderState::new(log_root.clone(), Some(10), None);
 
-        assert_eq!(state.log_root, log_root);
-        assert_eq!(state.end_version, Some(10));
+        assert_eq!(state.log_root(), log_root);
+        assert_eq!(state.end_version(), Some(10));
     }
 
     #[test]
     fn test_log_segment_builder_empty_batch() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None, None);
+        let state = LogSegmentBuilderState::new(log_root, None, None);
 
         let batch = create_file_listing_batch(&[]);
 
@@ -1921,7 +2094,7 @@ mod tests {
     #[test]
     fn test_log_segment_builder_commit_files() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None, None);
+        let state = LogSegmentBuilderState::new(log_root, None, None);
 
         // Version 0, 1, 2 commit files
         let batch = create_file_listing_batch(&[
@@ -1936,14 +2109,16 @@ mod tests {
 
         state.finalize();
 
-        assert_eq!(state.ascending_commit_files.len(), 3);
-        assert_eq!(state.ascending_commit_files[0].version, 0);
-        assert_eq!(state.ascending_commit_files[1].version, 1);
-        assert_eq!(state.ascending_commit_files[2].version, 2);
+        let commit_files = state.ascending_commit_files();
+        assert_eq!(commit_files.len(), 3);
+        assert_eq!(commit_files[0].version, 0);
+        assert_eq!(commit_files[1].version, 1);
+        assert_eq!(commit_files[2].version, 2);
         
         // Latest commit should be version 2
-        assert!(state.latest_commit_file.is_some());
-        assert_eq!(state.latest_commit_file.as_ref().unwrap().version, 2);
+        let latest = state.latest_commit_file();
+        assert!(latest.is_some());
+        assert_eq!(latest.as_ref().unwrap().version, 2);
     }
 
     #[test]
@@ -1967,8 +2142,8 @@ mod tests {
 
         state.finalize();
 
-        assert_eq!(state.ascending_commit_files.len(), 4);
-        assert_eq!(state.latest_commit_file.as_ref().unwrap().version, 3);
+        assert_eq!(state.ascending_commit_files().len(), 4);
+        assert_eq!(state.latest_commit_file().as_ref().unwrap().version, 3);
     }
 
     // =========================================================================
@@ -1993,15 +2168,15 @@ mod tests {
 
         // Checkpoint at version 2 should clear commits before it
         // Only commits at version 2 and after should remain
-        assert_eq!(state.checkpoint_parts.len(), 1);
-        assert_eq!(state.checkpoint_parts[0].version, 2);
+        assert_eq!(state.checkpoint_parts().len(), 1);
+        assert_eq!(state.checkpoint_parts()[0].version, 2);
         
         // Commits before checkpoint are cleared, only v3 remains
-        assert_eq!(state.ascending_commit_files.len(), 1);
-        assert_eq!(state.ascending_commit_files[0].version, 3);
+        assert_eq!(state.ascending_commit_files().len(), 1);
+        assert_eq!(state.ascending_commit_files()[0].version, 3);
         
         // Latest commit is v3
-        assert_eq!(state.latest_commit_file.as_ref().unwrap().version, 3);
+        assert_eq!(state.latest_commit_file().as_ref().unwrap().version, 3);
     }
 
     #[test]
@@ -2023,12 +2198,12 @@ mod tests {
         state.finalize();
 
         // Complete 3-part checkpoint should be recognized
-        assert_eq!(state.checkpoint_parts.len(), 3);
-        assert!(state.checkpoint_parts.iter().all(|p| p.version == 2));
+        assert_eq!(state.checkpoint_parts().len(), 3);
+        assert!(state.checkpoint_parts().iter().all(|p| p.version == 2));
         
         // Only commit after checkpoint remains
-        assert_eq!(state.ascending_commit_files.len(), 1);
-        assert_eq!(state.ascending_commit_files[0].version, 3);
+        assert_eq!(state.ascending_commit_files().len(), 1);
+        assert_eq!(state.ascending_commit_files()[0].version, 3);
     }
 
     #[test]
@@ -2050,10 +2225,10 @@ mod tests {
         state.finalize();
 
         // Incomplete checkpoint should not be used
-        assert!(state.checkpoint_parts.is_empty());
+        assert!(state.checkpoint_parts().is_empty());
         
         // All commits should be kept (v0, v1, v3 - no v2 commit in the test data)
-        assert_eq!(state.ascending_commit_files.len(), 3);
+        assert_eq!(state.ascending_commit_files().len(), 3);
     }
 
     #[test]
@@ -2075,16 +2250,16 @@ mod tests {
         state.finalize();
 
         // Checkpoint at v5 clears commits before it
-        assert_eq!(state.checkpoint_parts.len(), 1);
-        assert_eq!(state.checkpoint_parts[0].version, 5);
+        assert_eq!(state.checkpoint_parts().len(), 1);
+        assert_eq!(state.checkpoint_parts()[0].version, 5);
         
         // Only commits after checkpoint (v6, v7) remain
-        assert_eq!(state.ascending_commit_files.len(), 2);
-        assert_eq!(state.ascending_commit_files[0].version, 6);
-        assert_eq!(state.ascending_commit_files[1].version, 7);
+        assert_eq!(state.ascending_commit_files().len(), 2);
+        assert_eq!(state.ascending_commit_files()[0].version, 6);
+        assert_eq!(state.ascending_commit_files()[1].version, 7);
         
         // Latest commit is v7
-        assert_eq!(state.latest_commit_file.as_ref().unwrap().version, 7);
+        assert_eq!(state.latest_commit_file().as_ref().unwrap().version, 7);
     }
 
     #[test]
@@ -2106,12 +2281,12 @@ mod tests {
         state.finalize();
 
         // Later checkpoint at v5 should replace the one at v2
-        assert_eq!(state.checkpoint_parts.len(), 1);
-        assert_eq!(state.checkpoint_parts[0].version, 5);
+        assert_eq!(state.checkpoint_parts().len(), 1);
+        assert_eq!(state.checkpoint_parts()[0].version, 5);
         
         // Only commit after v5 checkpoint remains
-        assert_eq!(state.ascending_commit_files.len(), 1);
-        assert_eq!(state.ascending_commit_files[0].version, 6);
+        assert_eq!(state.ascending_commit_files().len(), 1);
+        assert_eq!(state.ascending_commit_files()[0].version, 6);
     }
 
     // =========================================================================
@@ -2134,8 +2309,8 @@ mod tests {
         state.finalize();
 
         // Latest CRC should be version 1
-        assert!(state.latest_crc_file.is_some());
-        assert_eq!(state.latest_crc_file.as_ref().unwrap().version, 1);
+        assert!(state.latest_crc_file().is_some());
+        assert_eq!(state.latest_crc_file().as_ref().unwrap().version, 1);
     }
 
     // =========================================================================
@@ -2157,8 +2332,8 @@ mod tests {
         assert!(state.apply(&batch).unwrap());
         state.finalize();
 
-        assert_eq!(state.ascending_compaction_files.len(), 1);
-        assert_eq!(state.ascending_compaction_files[0].version, 0);
+        assert_eq!(state.ascending_compaction_files().len(), 1);
+        assert_eq!(state.ascending_compaction_files()[0].version, 0);
     }
 
     #[test]
@@ -2180,7 +2355,7 @@ mod tests {
         state.finalize();
 
         // Only the compaction with hi <= end_version should be included
-        assert_eq!(state.ascending_compaction_files.len(), 1);
+        assert_eq!(state.ascending_compaction_files().len(), 1);
     }
 
     // =========================================================================
@@ -2208,8 +2383,8 @@ mod tests {
         state.finalize();
 
         // Only versions 0, 1, 2 should be included
-        assert_eq!(state.ascending_commit_files.len(), 3);
-        assert_eq!(state.ascending_commit_files[2].version, 2);
+        assert_eq!(state.ascending_commit_files().len(), 3);
+        assert_eq!(state.ascending_commit_files()[2].version, 2);
     }
 
     #[test]
@@ -2234,11 +2409,11 @@ mod tests {
         state.finalize();
 
         // Checkpoint at v2 should be kept
-        assert_eq!(state.checkpoint_parts.len(), 1);
-        assert_eq!(state.checkpoint_parts[0].version, 2);
+        assert_eq!(state.checkpoint_parts().len(), 1);
+        assert_eq!(state.checkpoint_parts()[0].version, 2);
         
         // Commits v3, v4, v5 after checkpoint should be kept
-        assert_eq!(state.ascending_commit_files.len(), 3);
+        assert_eq!(state.ascending_commit_files().len(), 3);
     }
 
     // =========================================================================
@@ -2262,7 +2437,7 @@ mod tests {
         state.finalize();
 
         // Only commit files should be collected
-        assert_eq!(state.ascending_commit_files.len(), 3);
+        assert_eq!(state.ascending_commit_files().len(), 3);
     }
 
     // =========================================================================
@@ -2272,10 +2447,10 @@ mod tests {
     #[test]
     fn test_log_segment_builder_error_handling() {
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let mut state = LogSegmentBuilderState::new(log_root, None, None);
+        let state = LogSegmentBuilderState::new(log_root, None, None);
 
         // Manually set an error
-        state.error = Some("Test error".to_string());
+        state.set_error("Test error".to_string());
 
         let batch = create_file_listing_batch(&[("00000000000000000001.json", 1000, 100)]);
         let result = state.apply(&batch);
@@ -2364,12 +2539,12 @@ mod tests {
         state.finalize();
 
         // Checkpoint at v0
-        assert_eq!(state.checkpoint_parts.len(), 1);
-        assert_eq!(state.checkpoint_parts[0].version, 0);
+        assert_eq!(state.checkpoint_parts().len(), 1);
+        assert_eq!(state.checkpoint_parts()[0].version, 0);
         
         // Only v1 commit after checkpoint
-        assert_eq!(state.ascending_commit_files.len(), 1);
-        assert_eq!(state.ascending_commit_files[0].version, 1);
+        assert_eq!(state.ascending_commit_files().len(), 1);
+        assert_eq!(state.ascending_commit_files()[0].version, 1);
     }
 
     #[test]
@@ -2389,14 +2564,14 @@ mod tests {
         state.finalize();
 
         // Checkpoint at v2
-        assert_eq!(state.checkpoint_parts.len(), 1);
+        assert_eq!(state.checkpoint_parts().len(), 1);
         
         // No commits after checkpoint
-        assert!(state.ascending_commit_files.is_empty());
+        assert!(state.ascending_commit_files().is_empty());
         
         // But latest_commit_file should be v2 (at checkpoint version)
-        assert!(state.latest_commit_file.is_some());
-        assert_eq!(state.latest_commit_file.as_ref().unwrap().version, 2);
+        assert!(state.latest_commit_file().is_some());
+        assert_eq!(state.latest_commit_file().as_ref().unwrap().version, 2);
     }
 
     #[test]
@@ -2414,13 +2589,13 @@ mod tests {
         state.finalize();
 
         // No checkpoint
-        assert!(state.checkpoint_parts.is_empty());
+        assert!(state.checkpoint_parts().is_empty());
         
         // All commits kept
-        assert_eq!(state.ascending_commit_files.len(), 3);
+        assert_eq!(state.ascending_commit_files().len(), 3);
         
         // Latest commit is v2
-        assert_eq!(state.latest_commit_file.as_ref().unwrap().version, 2);
+        assert_eq!(state.latest_commit_file().as_ref().unwrap().version, 2);
     }
 
     #[test]
@@ -2440,12 +2615,12 @@ mod tests {
         state.finalize();
 
         // UUID checkpoint should be recognized
-        assert_eq!(state.checkpoint_parts.len(), 1);
-        assert_eq!(state.checkpoint_parts[0].version, 2);
+        assert_eq!(state.checkpoint_parts().len(), 1);
+        assert_eq!(state.checkpoint_parts()[0].version, 2);
         
         // Commits after checkpoint
-        assert_eq!(state.ascending_commit_files.len(), 1);
-        assert_eq!(state.ascending_commit_files[0].version, 3);
+        assert_eq!(state.ascending_commit_files().len(), 1);
+        assert_eq!(state.ascending_commit_files()[0].version, 3);
     }
 
     // =========================================================================
@@ -2541,7 +2716,7 @@ mod tests {
         
         // No hint should be extracted
         assert!(!state.has_hint());
-        assert!(state.version.is_none());
+        assert!(state.version().is_none());
         assert!(!state.has_error());
     }
 
@@ -2552,7 +2727,7 @@ mod tests {
 
         // Never called apply - state should be clean
         assert!(!state.has_hint());
-        assert!(state.version.is_none());
+        assert!(state.version().is_none());
         assert!(!state.has_error());
         assert!(state.get_version().is_none());
     }
@@ -2575,11 +2750,11 @@ mod tests {
 
         // All fields should be extracted
         assert!(state.has_hint());
-        assert_eq!(state.version, Some(42));
-        assert_eq!(state.size, Some(1000));
-        assert_eq!(state.parts, Some(3));
-        assert_eq!(state.size_in_bytes, Some(5000));
-        assert_eq!(state.num_of_add_files, Some(500));
+        assert_eq!(state.version(), Some(42));
+        assert_eq!(state.size(), Some(1000));
+        assert_eq!(state.parts(), Some(3));
+        assert_eq!(state.size_in_bytes(), Some(5000));
+        assert_eq!(state.num_of_add_files(), Some(500));
         assert!(!state.has_error());
     }
 
@@ -2601,9 +2776,9 @@ mod tests {
         assert!(!result.unwrap()); // false = break
 
         assert!(state.has_hint());
-        assert_eq!(state.version, Some(10));
-        assert!(state.size.is_none());
-        assert!(state.parts.is_none());
+        assert_eq!(state.version(), Some(10));
+        assert!(state.size().is_none());
+        assert!(state.parts().is_none());
     }
 
     #[test]
@@ -2625,7 +2800,7 @@ mod tests {
 
         // No valid hint (version is required)
         assert!(!state.has_hint());
-        assert!(state.version.is_none());
+        assert!(state.version().is_none());
     }
 
     #[test]
@@ -2652,7 +2827,7 @@ mod tests {
 
         // Now we have the hint
         assert!(state.has_hint());
-        assert_eq!(state.version, Some(100));
+        assert_eq!(state.version(), Some(100));
     }
 
     #[test]
@@ -2671,7 +2846,7 @@ mod tests {
         assert!(!result.unwrap()); // false = already processed
 
         // Original version should be retained
-        assert_eq!(state.version, Some(42));
+        assert_eq!(state.version(), Some(42));
     }
 
     #[test]
@@ -2685,7 +2860,7 @@ mod tests {
         state.finalize();
 
         assert!(state.has_hint());
-        assert_eq!(state.version, Some(50));
+        assert_eq!(state.version(), Some(50));
     }
 
     #[test]
@@ -2733,8 +2908,8 @@ mod tests {
         // Verify hint was extracted
         if let ConsumerKdfState::CheckpointHintReader(inner) = state {
             assert!(inner.has_hint());
-            assert_eq!(inner.version, Some(77));
-            assert_eq!(inner.parts, Some(2));
+            assert_eq!(inner.version(), Some(77));
+            assert_eq!(inner.parts(), Some(2));
         }
     }
 
@@ -2778,8 +2953,8 @@ mod tests {
     #[test]
     fn test_metadata_protocol_reader_new() {
         let state = MetadataProtocolReaderState::new();
-        assert!(state.protocol.is_none());
-        assert!(state.metadata.is_none());
+        assert!(state.protocol().is_none());
+        assert!(state.metadata().is_none());
         assert!(!state.is_complete());
         assert!(!state.has_protocol());
         assert!(!state.has_metadata());
@@ -2918,13 +3093,13 @@ mod tests {
         // Take protocol
         let protocol = state.take_protocol();
         assert!(protocol.is_some());
-        assert!(state.protocol.is_none()); // Now None after take
+        assert!(state.protocol().is_none()); // Now None after take
         assert!(!state.has_protocol());
 
         // Take metadata
         let metadata = state.take_metadata();
         assert!(metadata.is_some());
-        assert!(state.metadata.is_none()); // Now None after take
+        assert!(state.metadata().is_none()); // Now None after take
         assert!(!state.has_metadata());
 
         // Second take returns None

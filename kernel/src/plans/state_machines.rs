@@ -56,7 +56,7 @@ use crate::{DeltaResult, Error};
 use super::composite::*;
 use super::declarative::DeclarativePlanNode;
 use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState, MetadataProtocolReaderState};
-use super::nodes::{ConsumeByKDF, FileListingNode, FileType, FilterByKDF, FirstNonNullNode, ScanNode, SchemaQueryNode, SelectNode};
+use super::nodes::{ConsumeByKDF, FileListingNode, FileType, FilterByKDF, FirstNonNullNode, ScanNode, SchemaQueryNode, SelectNode, SinkNode};
 use super::AsQueryPlan;
 
 // =============================================================================
@@ -451,6 +451,12 @@ impl SnapshotStateMachine {
                         // _last_checkpoint file not found is OK - continue without hint
                         // checkpoint_hint_version remains None
                     }
+                    Err(Error::IOError(ref io_err))
+                        if io_err.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        // IOError with NotFound kind is also OK - file doesn't exist
+                        // checkpoint_hint_version remains None
+                    }
                     Err(e) => {
                         // Other errors should be propagated
                         return Err(e);
@@ -549,6 +555,7 @@ impl SnapshotStateMachine {
                 schema: checkpoint_schema,
             },
             hint_reader: ConsumeByKDF::checkpoint_hint_reader(),
+            sink: SinkNode::drop(), // Drop sink - no results, just side effects
         })
     }
 
@@ -564,11 +571,13 @@ impl SnapshotStateMachine {
                 state.version.map(|v| v as u64),
                 state.checkpoint_hint_version.map(|v| v as u64),
             ),
+            sink: SinkNode::drop(), // Drop sink - no results, just side effects
         })
     }
 
     fn create_load_metadata_plan(state: &SnapshotBuildState) -> DeltaResult<MetadataLoadPlan> {
-        use crate::schema::{ArrayType, DataType, MapType, StructField, StructType};
+        use crate::actions::{METADATA_NAME, PROTOCOL_NAME};
+        use crate::schema::{StructField, StructType, ToSchema};
 
         // Get the log segment built during ListFiles phase
         let log_segment = state
@@ -576,36 +585,11 @@ impl SnapshotStateMachine {
             .as_ref()
             .ok_or_else(|| Error::generic("LogSegment not available for LoadMetadata phase"))?;
 
-        // Comprehensive schema for reading protocol/metadata from log files
+        // Use the canonical schemas from Protocol and Metadata types
+        // This ensures field order matches what the visitors expect
         let schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::nullable(
-                "protocol",
-                DataType::struct_type_unchecked(vec![
-                    StructField::not_null("minReaderVersion", DataType::INTEGER),
-                    StructField::not_null("minWriterVersion", DataType::INTEGER),
-                    StructField::nullable("readerFeatures", ArrayType::new(DataType::STRING, true)),
-                    StructField::nullable("writerFeatures", ArrayType::new(DataType::STRING, true)),
-                ]),
-            ),
-            StructField::nullable(
-                "metaData",
-                DataType::struct_type_unchecked(vec![
-                    StructField::not_null("id", DataType::STRING),
-                    StructField::nullable("name", DataType::STRING),
-                    StructField::nullable("description", DataType::STRING),
-                    StructField::nullable("schemaString", DataType::STRING),
-                    StructField::nullable("createdTime", DataType::LONG),
-                    StructField::nullable("partitionColumns", ArrayType::new(DataType::STRING, true)),
-                    StructField::nullable(
-                        "format",
-                        DataType::struct_type_unchecked(vec![
-                            StructField::nullable("provider", DataType::STRING),
-                            StructField::nullable("options", MapType::new(DataType::STRING, DataType::STRING, true)),
-                        ]),
-                    ),
-                    StructField::nullable("configuration", MapType::new(DataType::STRING, DataType::STRING, true)),
-                ]),
-            ),
+            StructField::nullable(PROTOCOL_NAME, crate::actions::Protocol::to_schema()),
+            StructField::nullable(METADATA_NAME, crate::actions::Metadata::to_schema()),
         ]));
 
         // Build list of files to scan from checkpoint_parts and commit_files
@@ -637,6 +621,7 @@ impl SnapshotStateMachine {
                 schema,
             },
             metadata_reader: ConsumeByKDF::metadata_protocol_reader(),
+            sink: SinkNode::drop(), // Drop sink - no results, just side effects
         })
     }
 
@@ -654,28 +639,28 @@ impl SnapshotStateMachine {
                     }
                     ConsumerKdfState::CheckpointHintReader(hint_state) => {
                         // Check for errors first
-                        if let Some(ref error) = hint_state.error {
-                            return Err(Error::generic(error.clone()));
+                        if let Some(error) = hint_state.take_error() {
+                            return Err(Error::generic(error));
                         }
 
                         // Extract checkpoint hint version if present
-                        if let Some(version) = hint_state.version {
+                        if let Some(version) = hint_state.get_version() {
                             self.state.checkpoint_hint_version = Some(version as i64);
                         }
                     }
                     ConsumerKdfState::MetadataProtocolReader(mp_state) => {
                         // Check for errors first
-                        if let Some(ref error) = mp_state.error {
-                            return Err(Error::generic(error.clone()));
+                        if let Some(error) = mp_state.take_error() {
+                            return Err(Error::generic(error));
                         }
 
                         // Extract protocol if present (already a complete Protocol or None)
-                        if let Some(protocol) = mp_state.protocol.clone() {
+                        if let Some(protocol) = mp_state.take_protocol() {
                             self.state.protocol = Some(protocol);
                         }
 
                         // Extract metadata if present (already a complete Metadata or None)
-                        if let Some(metadata) = mp_state.metadata.clone() {
+                        if let Some(metadata) = mp_state.take_metadata() {
                             self.state.metadata = Some(metadata);
                         }
                     }
@@ -690,7 +675,8 @@ impl SnapshotStateMachine {
             | DeclarativePlanNode::FilterByExpression { child, .. }
             | DeclarativePlanNode::Select { child, .. }
             | DeclarativePlanNode::ParseJson { child, .. }
-            | DeclarativePlanNode::FirstNonNull { child, .. } => {
+            | DeclarativePlanNode::FirstNonNull { child, .. }
+            | DeclarativePlanNode::Sink { child, .. } => {
                 self.extract_consumer_kdf_state(*child)
             }
             // Leaf nodes have no consumer state
@@ -1006,7 +992,8 @@ impl ScanStateMachine {
             DeclarativePlanNode::FilterByExpression { child, .. }
             | DeclarativePlanNode::Select { child, .. }
             | DeclarativePlanNode::ParseJson { child, .. }
-            | DeclarativePlanNode::FirstNonNull { child, .. } => {
+            | DeclarativePlanNode::FirstNonNull { child, .. }
+            | DeclarativePlanNode::Sink { child, .. } => {
                 self.extract_kdf_state_recursive(child)
             }
             DeclarativePlanNode::Scan(_)
@@ -1163,7 +1150,8 @@ impl ScanStateMachine {
             | DeclarativePlanNode::FilterByExpression { child, .. }
             | DeclarativePlanNode::Select { child, .. }
             | DeclarativePlanNode::ParseJson { child, .. }
-            | DeclarativePlanNode::FirstNonNull { child, .. } => self.check_schema_has_sidecar(child),
+            | DeclarativePlanNode::FirstNonNull { child, .. }
+            | DeclarativePlanNode::Sink { child, .. } => self.check_schema_has_sidecar(child),
             // Leaf nodes that aren't SchemaQuery
             DeclarativePlanNode::Scan(_) | DeclarativePlanNode::FileListing(_) => false,
         }
@@ -1183,7 +1171,8 @@ impl ScanStateMachine {
             | DeclarativePlanNode::FilterByExpression { child, .. }
             | DeclarativePlanNode::Select { child, .. }
             | DeclarativePlanNode::ParseJson { child, .. }
-            | DeclarativePlanNode::FirstNonNull { child, .. } => self.extract_sidecar_files(child),
+            | DeclarativePlanNode::FirstNonNull { child, .. }
+            | DeclarativePlanNode::Sink { child, .. } => self.extract_sidecar_files(child),
             // Leaf nodes
             DeclarativePlanNode::Scan(_)
             | DeclarativePlanNode::FileListing(_)
