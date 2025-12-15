@@ -245,6 +245,46 @@ pub struct FirstNonNullNode {
     pub columns: Vec<String>,
 }
 
+// =============================================================================
+// Sink Nodes (terminal nodes that consume data)
+// =============================================================================
+
+/// Sink type determines what happens to data flowing into the sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkType {
+    /// Discard all incoming data (consume without output)
+    Drop,
+    /// Stream results back to the user
+    Results,
+}
+
+/// Terminal node that consumes data flow.
+///
+/// All complete plans must end with a sink. Sinks determine the fate of data:
+/// - `Drop`: Data is consumed and discarded (useful for side-effect-only operations)
+/// - `Results`: Data is streamed back to the user
+#[derive(Debug, Clone)]
+pub struct SinkNode {
+    /// The type of sink determining data fate
+    pub sink_type: SinkType,
+}
+
+impl SinkNode {
+    /// Create a Drop sink that discards all data.
+    pub fn drop() -> Self {
+        Self {
+            sink_type: SinkType::Drop,
+        }
+    }
+
+    /// Create a Results sink that streams data to the user.
+    pub fn results() -> Self {
+        Self {
+            sink_type: SinkType::Results,
+        }
+    }
+}
+
 // WRITE EXTENSION:
 //
 // Need to introduce the following notions:

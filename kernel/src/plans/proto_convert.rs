@@ -155,6 +155,39 @@ impl From<&FirstNonNullNode> for proto::FirstNonNullNode {
 }
 
 // =============================================================================
+// Sink Node Conversions: Rust -> Proto
+// =============================================================================
+
+impl From<SinkType> for i32 {
+    fn from(st: SinkType) -> i32 {
+        match st {
+            SinkType::Drop => proto::SinkType::Drop as i32,
+            SinkType::Results => proto::SinkType::Results as i32,
+        }
+    }
+}
+
+impl TryFrom<i32> for SinkType {
+    type Error = Error;
+
+    fn try_from(value: i32) -> DeltaResult<Self> {
+        match proto::SinkType::try_from(value) {
+            Ok(proto::SinkType::Drop) => Ok(SinkType::Drop),
+            Ok(proto::SinkType::Results) => Ok(SinkType::Results),
+            _ => Err(Error::generic(format!("Unknown sink type: {}", value))),
+        }
+    }
+}
+
+impl From<&SinkNode> for proto::SinkNode {
+    fn from(node: &SinkNode) -> Self {
+        proto::SinkNode {
+            sink_type: node.sink_type.into(),
+        }
+    }
+}
+
+// =============================================================================
 // DeclarativePlanNode Conversion: Rust -> Proto
 // =============================================================================
 
@@ -202,6 +235,12 @@ impl From<&DeclarativePlanNode> for proto::DeclarativePlanNode {
                     node: Some(n.into()),
                 }))
             }
+            DeclarativePlanNode::Sink { child, node: n } => {
+                Node::Sink(Box::new(proto::SinkPlan {
+                    child: Some(Box::new(child.as_ref().into())),
+                    node: Some(n.into()),
+                }))
+            }
         };
 
         proto::DeclarativePlanNode { node: Some(node_variant) }
@@ -222,6 +261,7 @@ impl From<&CommitPhasePlan> for proto::CommitPhasePlan {
             }),
             dedup_filter: Some((&plan.dedup_filter).into()),
             project: Some((&plan.project).into()),
+            sink: Some((&plan.sink).into()),
         }
     }
 }
@@ -231,6 +271,7 @@ impl From<&CheckpointManifestPlan> for proto::CheckpointManifestPlan {
         proto::CheckpointManifestPlan {
             scan: Some((&plan.scan).into()),
             project: Some((&plan.project).into()),
+            sink: Some((&plan.sink).into()),
         }
     }
 }
@@ -241,6 +282,7 @@ impl From<&CheckpointLeafPlan> for proto::CheckpointLeafPlan {
             scan: Some((&plan.scan).into()),
             dedup_filter: Some((&plan.dedup_filter).into()),
             project: Some((&plan.project).into()),
+            sink: Some((&plan.sink).into()),
         }
     }
 }
@@ -250,6 +292,7 @@ impl From<&CheckpointHintPlan> for proto::CheckpointHintPlan {
         proto::CheckpointHintPlan {
             scan: Some((&plan.scan).into()),
             hint_reader: Some((&plan.hint_reader).into()),
+            sink: Some((&plan.sink).into()),
         }
     }
 }
@@ -259,6 +302,7 @@ impl From<&FileListingPhasePlan> for proto::FileListingPhasePlan {
         proto::FileListingPhasePlan {
             listing: Some((&plan.listing).into()),
             log_segment_builder: Some((&plan.log_segment_builder).into()),
+            sink: Some((&plan.sink).into()),
         }
     }
 }
@@ -268,6 +312,7 @@ impl From<&MetadataLoadPlan> for proto::MetadataLoadPlan {
         proto::MetadataLoadPlan {
             scan: Some((&plan.scan).into()),
             metadata_reader: Some((&plan.metadata_reader).into()),
+            sink: Some((&plan.sink).into()),
         }
     }
 }
@@ -276,6 +321,7 @@ impl From<&SchemaQueryPhasePlan> for proto::SchemaQueryPhasePlan {
     fn from(plan: &SchemaQueryPhasePlan) -> Self {
         proto::SchemaQueryPhasePlan {
             schema_query: Some((&plan.schema_query).into()),
+            // No sink - SchemaQuery produces no data
         }
     }
 }

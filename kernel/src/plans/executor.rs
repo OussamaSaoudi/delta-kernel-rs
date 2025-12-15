@@ -71,6 +71,34 @@ impl DeclarativePlanExecutor {
             DeclarativePlanNode::FirstNonNull { child, node } => {
                 self.execute_first_non_null(*child, node)
             }
+            DeclarativePlanNode::Sink { child, node } => self.execute_sink(*child, node),
+        }
+    }
+
+    /// Execute a Sink node - terminal node that consumes data.
+    ///
+    /// Sink nodes determine the fate of data:
+    /// - `Drop`: Consumes and discards all data (useful for side-effect-only operations)
+    /// - `Results`: Passes through data for streaming to the user
+    fn execute_sink(
+        &self,
+        child: DeclarativePlanNode,
+        node: SinkNode,
+    ) -> DeltaResult<FilteredDataIter> {
+        let child_iter = self.execute(child)?;
+
+        match node.sink_type {
+            SinkType::Drop => {
+                // Consume and discard all data - process to trigger side effects
+                for result in child_iter {
+                    let _ = result?;
+                }
+                Ok(Box::new(std::iter::empty()))
+            }
+            SinkType::Results => {
+                // Pass through for streaming to user
+                Ok(child_iter)
+            }
         }
     }
 

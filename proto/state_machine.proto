@@ -23,12 +23,14 @@ message CommitPhasePlan {
   optional DataSkippingPlan data_skipping = 2;   // Optional stats-based filtering
   FilterByKDF dedup_filter = 3;                   // AddRemoveDedup KDF filter
   SelectNode project = 4;                         // Project to output schema
+  SinkNode sink = 5;                              // Terminal sink (default: Results)
 }
 
 // Plan for reading checkpoint manifest (for v2 checkpoints)
 message CheckpointManifestPlan {
   ScanNode scan = 1;                      // Scan manifest parquet
   SelectNode project = 2;                 // Project sidecar paths
+  SinkNode sink = 3;                      // Terminal sink (default: Drop)
 }
 
 // Plan for reading checkpoint leaf files
@@ -36,6 +38,7 @@ message CheckpointLeafPlan {
   ScanNode scan = 1;                      // Scan checkpoint parquet files
   FilterByKDF dedup_filter = 2;           // Dedup KDF for checkpoint
   SelectNode project = 3;                 // Project to output schema
+  SinkNode sink = 4;                      // Terminal sink (default: Results)
 }
 
 // Plan for listing log files
@@ -43,6 +46,7 @@ message CheckpointLeafPlan {
 message FileListingPhasePlan {
   FileListingNode listing = 1;            // List files from _delta_log
   ConsumeByKDF log_segment_builder = 2;   // Consumer to build LogSegment
+  SinkNode sink = 3;                      // Terminal sink (default: Drop)
 }
 
 // Plan for loading table metadata (protocol and metadata actions)
@@ -50,6 +54,7 @@ message FileListingPhasePlan {
 message MetadataLoadPlan {
   ScanNode scan = 1;                      // Scan protocol/metadata files
   ConsumeByKDF metadata_reader = 2;       // Consumer to extract protocol/metadata
+  SinkNode sink = 3;                      // Terminal sink (default: Drop)
 }
 
 // Plan for reading checkpoint hint file (_last_checkpoint)
@@ -57,10 +62,12 @@ message MetadataLoadPlan {
 message CheckpointHintPlan {
   ScanNode scan = 1;                      // Scan _last_checkpoint JSON file
   ConsumeByKDF hint_reader = 2;           // Consumer to extract checkpoint hint
+  SinkNode sink = 3;                      // Terminal sink (default: Drop)
 }
 
 // Plan for querying checkpoint schema to detect V2 checkpoints
 // Uses SchemaStoreState to capture the parquet footer schema
+// No sink - produces no data, just reads footer schema
 message SchemaQueryPhasePlan {
   SchemaQueryNode schema_query = 1;       // Query parquet file schema (footer only)
 }

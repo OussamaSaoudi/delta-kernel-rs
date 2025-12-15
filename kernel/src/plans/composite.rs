@@ -27,7 +27,7 @@ pub struct DataSkippingPlan {
 
 /// Plan for processing commit files (JSON log files).
 ///
-/// Structure: Scan → [DataSkipping] → AddRemoveDedup → Project
+/// Structure: Scan → [DataSkipping] → AddRemoveDedup → Project → Sink
 #[derive(Debug, Clone)]
 pub struct CommitPhasePlan {
     /// Scan commit JSON files
@@ -38,22 +38,26 @@ pub struct CommitPhasePlan {
     pub dedup_filter: FilterByKDF,
     /// Project to output schema
     pub project: SelectNode,
+    /// Terminal sink (default: Results)
+    pub sink: SinkNode,
 }
 
 /// Plan for reading checkpoint manifest (v2 checkpoints).
 ///
-/// Structure: Scan → Project (sidecar paths)
+/// Structure: Scan → Project → Sink
 #[derive(Debug, Clone)]
 pub struct CheckpointManifestPlan {
     /// Scan manifest parquet file
     pub scan: ScanNode,
     /// Project sidecar file paths
     pub project: SelectNode,
+    /// Terminal sink (default: Drop)
+    pub sink: SinkNode,
 }
 
 /// Plan for reading checkpoint leaf/sidecar files.
 ///
-/// Structure: Scan → Dedup → Project
+/// Structure: Scan → Dedup → Project → Sink
 #[derive(Debug, Clone)]
 pub struct CheckpointLeafPlan {
     /// Scan checkpoint parquet files
@@ -62,11 +66,13 @@ pub struct CheckpointLeafPlan {
     pub dedup_filter: FilterByKDF,
     /// Project to output schema
     pub project: SelectNode,
+    /// Terminal sink (default: Results)
+    pub sink: SinkNode,
 }
 
 /// Plan for listing log files.
 ///
-/// Structure: FileListing → ConsumeByKDF (LogSegmentBuilder)
+/// Structure: FileListing → ConsumeByKDF (LogSegmentBuilder) → Sink
 ///
 /// The consumer KDF processes file listing results to build a LogSegment.
 #[derive(Debug, Clone)]
@@ -75,11 +81,13 @@ pub struct FileListingPhasePlan {
     pub listing: FileListingNode,
     /// Consumer KDF to build LogSegment from listing results
     pub log_segment_builder: ConsumeByKDF,
+    /// Terminal sink (default: Drop)
+    pub sink: SinkNode,
 }
 
 /// Plan for loading table metadata (protocol and metadata actions).
 ///
-/// Structure: Scan → ConsumeByKDF (MetadataProtocolReader)
+/// Structure: Scan → ConsumeByKDF (MetadataProtocolReader) → Sink
 ///
 /// The consumer KDF processes scan results to extract the first non-null
 /// protocol and metadata actions needed for snapshot construction.
@@ -89,11 +97,13 @@ pub struct MetadataLoadPlan {
     pub scan: ScanNode,
     /// Consumer KDF to extract protocol and metadata from scan results
     pub metadata_reader: ConsumeByKDF,
+    /// Terminal sink (default: Drop)
+    pub sink: SinkNode,
 }
 
 /// Plan for reading checkpoint hint file (_last_checkpoint).
 ///
-/// Structure: Scan (JSON) → ConsumeByKDF (CheckpointHintReader)
+/// Structure: Scan (JSON) → ConsumeByKDF (CheckpointHintReader) → Sink
 ///
 /// The consumer KDF processes scan results to extract the checkpoint hint.
 #[derive(Debug, Clone)]
@@ -102,11 +112,13 @@ pub struct CheckpointHintPlan {
     pub scan: ScanNode,
     /// Consumer KDF to extract checkpoint hint from scan results
     pub hint_reader: ConsumeByKDF,
+    /// Terminal sink (default: Drop)
+    pub sink: SinkNode,
 }
 
 /// Plan for querying checkpoint schema to detect V2 checkpoints.
 ///
-/// Structure: SchemaQuery (parquet footer read only)
+/// Structure: SchemaQuery (no sink - produces no data)
 ///
 /// Used to determine if a single-part checkpoint is a V2 checkpoint with sidecars
 /// by checking if the schema contains a 'sidecar' column.
@@ -142,10 +154,13 @@ impl AsQueryPlan for CommitPhasePlan {
             node: self.dedup_filter.clone(),
         };
 
-        // Add projection
-        DeclarativePlanNode::Select {
-            child: Box::new(plan),
-            node: self.project.clone(),
+        // Add projection and sink
+        DeclarativePlanNode::Sink {
+            child: Box::new(DeclarativePlanNode::Select {
+                child: Box::new(plan),
+                node: self.project.clone(),
+            }),
+            node: self.sink.clone(),
         }
     }
 }
@@ -153,9 +168,12 @@ impl AsQueryPlan for CommitPhasePlan {
 impl AsQueryPlan for CheckpointManifestPlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
         let scan = DeclarativePlanNode::Scan(self.scan.clone());
-        DeclarativePlanNode::Select {
-            child: Box::new(scan),
-            node: self.project.clone(),
+        DeclarativePlanNode::Sink {
+            child: Box::new(DeclarativePlanNode::Select {
+                child: Box::new(scan),
+                node: self.project.clone(),
+            }),
+            node: self.sink.clone(),
         }
     }
 }
@@ -167,9 +185,12 @@ impl AsQueryPlan for CheckpointLeafPlan {
             child: Box::new(scan),
             node: self.dedup_filter.clone(),
         };
-        DeclarativePlanNode::Select {
-            child: Box::new(dedup),
-            node: self.project.clone(),
+        DeclarativePlanNode::Sink {
+            child: Box::new(DeclarativePlanNode::Select {
+                child: Box::new(dedup),
+                node: self.project.clone(),
+            }),
+            node: self.sink.clone(),
         }
     }
 }
@@ -177,9 +198,12 @@ impl AsQueryPlan for CheckpointLeafPlan {
 impl AsQueryPlan for FileListingPhasePlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
         let listing = DeclarativePlanNode::FileListing(self.listing.clone());
-        DeclarativePlanNode::ConsumeByKDF {
-            child: Box::new(listing),
-            node: self.log_segment_builder.clone(),
+        DeclarativePlanNode::Sink {
+            child: Box::new(DeclarativePlanNode::ConsumeByKDF {
+                child: Box::new(listing),
+                node: self.log_segment_builder.clone(),
+            }),
+            node: self.sink.clone(),
         }
     }
 }
@@ -187,9 +211,12 @@ impl AsQueryPlan for FileListingPhasePlan {
 impl AsQueryPlan for MetadataLoadPlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
         let scan = DeclarativePlanNode::Scan(self.scan.clone());
-        DeclarativePlanNode::ConsumeByKDF {
-            child: Box::new(scan),
-            node: self.metadata_reader.clone(),
+        DeclarativePlanNode::Sink {
+            child: Box::new(DeclarativePlanNode::ConsumeByKDF {
+                child: Box::new(scan),
+                node: self.metadata_reader.clone(),
+            }),
+            node: self.sink.clone(),
         }
     }
 }
@@ -197,15 +224,19 @@ impl AsQueryPlan for MetadataLoadPlan {
 impl AsQueryPlan for CheckpointHintPlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
         let scan = DeclarativePlanNode::Scan(self.scan.clone());
-        DeclarativePlanNode::ConsumeByKDF {
-            child: Box::new(scan),
-            node: self.hint_reader.clone(),
+        DeclarativePlanNode::Sink {
+            child: Box::new(DeclarativePlanNode::ConsumeByKDF {
+                child: Box::new(scan),
+                node: self.hint_reader.clone(),
+            }),
+            node: self.sink.clone(),
         }
     }
 }
 
 impl AsQueryPlan for SchemaQueryPhasePlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
+        // SchemaQuery produces no data - just reads footer schema
         DeclarativePlanNode::SchemaQuery(self.schema_query.clone())
     }
 }

@@ -84,6 +84,21 @@ pub enum DeclarativePlanNode {
         child: Box<DeclarativePlanNode>,
         node: FirstNonNullNode,
     },
+
+    // =========================================================================
+    // Sink Nodes (terminal nodes that consume data)
+    // =========================================================================
+
+    /// Terminal sink node - consumes data flow.
+    ///
+    /// All complete plans must end with a sink. The sink type determines
+    /// what happens to the data:
+    /// - `Drop`: Data is consumed and discarded
+    /// - `Results`: Data is streamed back to the user
+    Sink {
+        child: Box<DeclarativePlanNode>,
+        node: SinkNode,
+    },
 }
 
 impl DeclarativePlanNode {
@@ -220,6 +235,32 @@ impl DeclarativePlanNode {
     }
 
     // =========================================================================
+    // Sink builder methods
+    // =========================================================================
+
+    /// Terminate plan with a Drop sink (discard data).
+    ///
+    /// The Drop sink consumes all incoming data and discards it.
+    /// Useful for side-effect-only operations or internal sub-plans.
+    pub fn sink_drop(self) -> Self {
+        Self::Sink {
+            child: Box::new(self),
+            node: SinkNode::drop(),
+        }
+    }
+
+    /// Terminate plan with a Results sink (stream to user).
+    ///
+    /// The Results sink marks data as user-facing results that
+    /// should be streamed back to the caller.
+    pub fn sink_results(self) -> Self {
+        Self::Sink {
+            child: Box::new(self),
+            node: SinkNode::results(),
+        }
+    }
+
+    // =========================================================================
     // Tree traversal helpers
     // =========================================================================
 
@@ -228,19 +269,28 @@ impl DeclarativePlanNode {
         match self {
             // Leaf nodes
             Self::Scan(_) | Self::FileListing(_) | Self::SchemaQuery(_) => vec![],
-            // Unary nodes
+            // Unary nodes (including Sink)
             Self::FilterByKDF { child, .. }
             | Self::ConsumeByKDF { child, .. }
             | Self::FilterByExpression { child, .. }
             | Self::Select { child, .. }
             | Self::ParseJson { child, .. }
-            | Self::FirstNonNull { child, .. } => vec![child.as_ref()],
+            | Self::FirstNonNull { child, .. }
+            | Self::Sink { child, .. } => vec![child.as_ref()],
         }
     }
 
     /// Check if this is a leaf node (no children).
     pub fn is_leaf(&self) -> bool {
         matches!(self, Self::Scan(_) | Self::FileListing(_) | Self::SchemaQuery(_))
+    }
+
+    /// Check if this plan is complete (ends with a sink).
+    ///
+    /// A plan is considered complete only if it terminates with a Sink node.
+    /// This ensures explicit handling of output data fate.
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Sink { .. })
     }
 }
 

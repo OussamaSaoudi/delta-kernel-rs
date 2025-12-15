@@ -80,6 +80,22 @@ message FirstNonNullNode {
   repeated string columns = 1;
 }
 
+// -----------------------------------------------------------------------------
+// Sink Nodes (terminal nodes that consume data)
+// -----------------------------------------------------------------------------
+
+// Sink type determines what happens to data flowing into the sink
+enum SinkType {
+  DROP = 0;     // Discard all incoming data (consume without output)
+  RESULTS = 1;  // Stream results back to the user
+}
+
+// Terminal node that consumes data flow
+// All complete plans must end with a sink
+message SinkNode {
+  SinkType sink_type = 1;
+}
+
 // =============================================================================
 // DECLARATIVE PLAN NODE (Tree Structure)
 // =============================================================================
@@ -99,6 +115,9 @@ message DeclarativePlanNode {
     SelectPlan select = 13;
     ParseJsonPlan parse_json = 14;
     FirstNonNullPlan first_non_null = 15;
+
+    // Sink nodes (terminal)
+    SinkPlan sink = 16;
   }
 }
 
@@ -134,5 +153,10 @@ message ParseJsonPlan {
 message FirstNonNullPlan {
   DeclarativePlanNode child = 1;
   FirstNonNullNode node = 2;
+}
+
+message SinkPlan {
+  DeclarativePlanNode child = 1;
+  SinkNode node = 2;
 }
 
