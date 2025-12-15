@@ -118,7 +118,7 @@ pub struct CheckpointHintPlan {
 
 /// Plan for querying checkpoint schema to detect V2 checkpoints.
 ///
-/// Structure: SchemaQuery (no sink - produces no data)
+/// Structure: Sink(Drop) -> SchemaQuery
 ///
 /// Used to determine if a single-part checkpoint is a V2 checkpoint with sidecars
 /// by checking if the schema contains a 'sidecar' column.
@@ -126,6 +126,8 @@ pub struct CheckpointHintPlan {
 pub struct SchemaQueryPhasePlan {
     /// Query the parquet file schema (footer read only)
     pub schema_query: SchemaQueryNode,
+    /// Sink for the plan (Drop - schema query produces no user-facing data)
+    pub sink: SinkNode,
 }
 
 // =============================================================================
@@ -236,7 +238,10 @@ impl AsQueryPlan for CheckpointHintPlan {
 
 impl AsQueryPlan for SchemaQueryPhasePlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
-        // SchemaQuery produces no data - just reads footer schema
-        DeclarativePlanNode::SchemaQuery(self.schema_query.clone())
+        // SchemaQuery produces no user-facing data - wrap in Drop sink
+        DeclarativePlanNode::Sink {
+            child: Box::new(DeclarativePlanNode::SchemaQuery(self.schema_query.clone())),
+            node: self.sink.clone(),
+        }
     }
 }

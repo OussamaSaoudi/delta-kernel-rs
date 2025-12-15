@@ -244,23 +244,30 @@ mod typed_state_tests {
 
     #[test]
     fn test_filter_kdf_apply() {
-        use crate::arrow::array::{BooleanArray, RecordBatch, StringArray};
-        use crate::arrow::datatypes::{DataType, Field, Schema};
+        use crate::arrow::array::{BooleanArray, RecordBatch, StringArray, StructArray};
+        use crate::arrow::datatypes::{DataType, Field, Fields, Schema};
         use crate::engine::arrow_data::ArrowEngineData;
         use std::sync::Arc;
+        
+        // Helper to create add struct with path column
+        fn create_add_struct_batch(paths: Vec<&str>) -> RecordBatch {
+            let path_array = StringArray::from(paths);
+            let add_fields = Fields::from(vec![Field::new("path", DataType::Utf8, true)]);
+            let add_struct = StructArray::from(vec![(
+                Arc::new(Field::new("path", DataType::Utf8, true)),
+                Arc::new(path_array) as Arc<dyn crate::arrow::array::Array>,
+            )]);
+            let schema = Schema::new(vec![
+                Field::new("add", DataType::Struct(add_fields), true),
+            ]);
+            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(add_struct)]).unwrap()
+        }
         
         // Create typed state
         let mut state = FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new());
         
-        // Create test batch with file paths
-        let schema = Schema::new(vec![
-            Field::new("path", DataType::Utf8, false),
-        ]);
-        let path_array = StringArray::from(vec!["file1.parquet", "file2.parquet"]);
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(path_array)],
-        ).unwrap();
+        // Create test batch with file paths in add.path
+        let batch = create_add_struct_batch(vec!["file1.parquet", "file2.parquet"]);
         let engine_data = ArrowEngineData::new(batch);
         
         // Create selection vector (all true)
@@ -275,14 +282,7 @@ mod typed_state_tests {
         assert!(result.value(1), "file2 should be selected");
         
         // Apply again with same files (duplicates) + new file
-        let schema2 = Schema::new(vec![
-            Field::new("path", DataType::Utf8, false),
-        ]);
-        let path_array2 = StringArray::from(vec!["file1.parquet", "file3.parquet"]);
-        let batch2 = RecordBatch::try_new(
-            Arc::new(schema2),
-            vec![Arc::new(path_array2)],
-        ).unwrap();
+        let batch2 = create_add_struct_batch(vec!["file1.parquet", "file3.parquet"]);
         let engine_data2 = ArrowEngineData::new(batch2);
         let selection2 = BooleanArray::from(vec![true, true]);
         
@@ -296,20 +296,30 @@ mod typed_state_tests {
 
     #[test]
     fn test_filter_kdf_apply_large_batch() {
-        use crate::arrow::array::{BooleanArray, RecordBatch, StringArray};
-        use crate::arrow::datatypes::{DataType, Field, Schema};
+        use crate::arrow::array::{BooleanArray, RecordBatch, StringArray, StructArray};
+        use crate::arrow::datatypes::{DataType, Field, Fields, Schema};
         use crate::engine::arrow_data::ArrowEngineData;
         use std::sync::Arc;
+        
+        // Helper to create add struct batch
+        fn create_add_struct_batch(paths: Vec<String>) -> RecordBatch {
+            let path_array = StringArray::from(paths);
+            let add_fields = Fields::from(vec![Field::new("path", DataType::Utf8, true)]);
+            let add_struct = StructArray::from(vec![(
+                Arc::new(Field::new("path", DataType::Utf8, true)),
+                Arc::new(path_array) as Arc<dyn crate::arrow::array::Array>,
+            )]);
+            let schema = Schema::new(vec![
+                Field::new("add", DataType::Struct(add_fields), true),
+            ]);
+            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(add_struct)]).unwrap()
+        }
         
         let mut state = FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new());
         
         // Create batch with 100 files
-        let schema = Schema::new(vec![Field::new("path", DataType::Utf8, false)]);
-        let paths: Vec<&str> = (0..100).map(|i| {
-            Box::leak(format!("file{}.parquet", i).into_boxed_str()) as &str
-        }).collect();
-        let path_array = StringArray::from(paths.clone());
-        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(path_array)]).unwrap();
+        let paths: Vec<String> = (0..100).map(|i| format!("file{}.parquet", i)).collect();
+        let batch = create_add_struct_batch(paths.clone());
         let engine_data = ArrowEngineData::new(batch);
         
         let selection = BooleanArray::from(vec![true; 100]);
@@ -321,9 +331,7 @@ mod typed_state_tests {
         }
         
         // Now apply with same 100 files - ALL should be filtered as duplicates
-        let schema2 = Schema::new(vec![Field::new("path", DataType::Utf8, false)]);
-        let path_array2 = StringArray::from(paths);
-        let batch2 = RecordBatch::try_new(Arc::new(schema2), vec![Arc::new(path_array2)]).unwrap();
+        let batch2 = create_add_struct_batch(paths);
         let engine_data2 = ArrowEngineData::new(batch2);
         
         let selection2 = BooleanArray::from(vec![true; 100]);
@@ -337,21 +345,30 @@ mod typed_state_tests {
 
     #[test]
     fn test_filter_kdf_state_isolated_between_instances() {
-        use crate::arrow::array::{BooleanArray, RecordBatch, StringArray};
-        use crate::arrow::datatypes::{DataType, Field, Schema};
+        use crate::arrow::array::{BooleanArray, RecordBatch, StringArray, StructArray};
+        use crate::arrow::datatypes::{DataType, Field, Fields, Schema};
         use crate::engine::arrow_data::ArrowEngineData;
         use std::sync::Arc;
+        
+        // Helper to create add struct batch
+        fn create_add_struct_batch(paths: Vec<&str>) -> RecordBatch {
+            let path_array = StringArray::from(paths);
+            let add_fields = Fields::from(vec![Field::new("path", DataType::Utf8, true)]);
+            let add_struct = StructArray::from(vec![(
+                Arc::new(Field::new("path", DataType::Utf8, true)),
+                Arc::new(path_array) as Arc<dyn crate::arrow::array::Array>,
+            )]);
+            let schema = Schema::new(vec![
+                Field::new("add", DataType::Struct(add_fields), true),
+            ]);
+            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(add_struct)]).unwrap()
+        }
         
         // Create two separate states
         let mut state1 = FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new());
         let mut state2 = FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new());
         
-        let schema = Schema::new(vec![Field::new("path", DataType::Utf8, false)]);
-        let paths: Vec<&str> = vec!["shared_file.parquet"];
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(StringArray::from(paths))],
-        ).unwrap();
+        let batch = create_add_struct_batch(vec!["shared_file.parquet"]);
         let engine_data = ArrowEngineData::new(batch);
         
         // Apply to state1
@@ -542,6 +559,7 @@ mod schema_query_tests {
     fn test_schema_query_phase_plan_to_proto() {
         let plan = SchemaQueryPhasePlan {
             schema_query: SchemaQueryNode::schema_store("/path/to/checkpoint.parquet"),
+            sink: SinkNode::drop(),
         };
 
         // Convert to proto
@@ -557,18 +575,25 @@ mod schema_query_tests {
     fn test_schema_query_phase_as_query_plan() {
         let plan = SchemaQueryPhasePlan {
             schema_query: SchemaQueryNode::schema_store("/path/to/checkpoint.parquet"),
+            sink: SinkNode::drop(),
         };
 
         // Get tree representation
         let tree = plan.as_query_plan();
 
-        // Verify tree structure: just a SchemaQuery leaf node
+        // Verify tree structure: Sink(Drop) -> SchemaQuery
         match tree {
-            DeclarativePlanNode::SchemaQuery(node) => {
-                assert_eq!(node.file_path, "/path/to/checkpoint.parquet");
-                assert!(matches!(&node.state, SchemaReaderState::SchemaStore(_)));
+            DeclarativePlanNode::Sink { child, node } => {
+                assert!(matches!(node.sink_type, SinkType::Drop));
+                match child.as_ref() {
+                    DeclarativePlanNode::SchemaQuery(schema_node) => {
+                        assert_eq!(schema_node.file_path, "/path/to/checkpoint.parquet");
+                        assert!(matches!(&schema_node.state, SchemaReaderState::SchemaStore(_)));
+                    }
+                    _ => panic!("Expected SchemaQuery as child of Sink"),
+                }
             }
-            _ => panic!("Expected SchemaQuery at root"),
+            _ => panic!("Expected Sink at root"),
         }
     }
 
@@ -576,17 +601,23 @@ mod schema_query_tests {
     fn test_schema_query_plan_as_query_plan() {
         let plan = SchemaQueryPhasePlan {
             schema_query: SchemaQueryNode::schema_store("/path/to/checkpoint.parquet"),
+            sink: SinkNode::drop(),
         };
 
         // Get the query plan
         let query_plan = plan.as_query_plan();
 
-        // Verify it's a SchemaQuery node
+        // Verify it's a Sink wrapping SchemaQuery
         match query_plan {
-            DeclarativePlanNode::SchemaQuery(node) => {
-                assert_eq!(node.file_path, "/path/to/checkpoint.parquet");
+            DeclarativePlanNode::Sink { child, .. } => {
+                match child.as_ref() {
+                    DeclarativePlanNode::SchemaQuery(node) => {
+                        assert_eq!(node.file_path, "/path/to/checkpoint.parquet");
+                    }
+                    _ => panic!("Expected SchemaQuery node inside Sink"),
+                }
             }
-            _ => panic!("Expected SchemaQuery node"),
+            _ => panic!("Expected Sink node at root"),
         }
     }
 
@@ -633,16 +664,14 @@ mod schema_query_tests {
         // Verify it was stored
         assert!(state.get().is_some());
         assert_eq!(state.get().unwrap().num_fields(), 2);
-
-        // Take the schema
-        let taken = state.take();
-        assert!(taken.is_some());
-        assert!(state.get().is_none()); // Should be None after take
+        
+        // OnceLock-based state can only be written once
+        // Additional stores are ignored
     }
 
     #[test]
     fn test_schema_store_state_sidecar_detection() {
-        let mut state = SchemaStoreState::new();
+        let state = SchemaStoreState::new();
         
         // Store schema with sidecar
         state.store(schema_with_sidecar());
@@ -651,10 +680,11 @@ mod schema_query_tests {
         let schema = state.get().unwrap();
         assert!(schema.field("sidecar").is_some());
 
-        // Now store schema without sidecar
-        state.store(schema_without_sidecar());
-        let schema = state.get().unwrap();
-        assert!(schema.field("sidecar").is_none());
+        // Test with a new state for schema without sidecar
+        let state2 = SchemaStoreState::new();
+        state2.store(schema_without_sidecar());
+        let schema2 = state2.get().unwrap();
+        assert!(schema2.field("sidecar").is_none());
     }
 
     #[test]
@@ -963,7 +993,7 @@ mod state_machine_transition_tests {
     use url::Url;
     
     use crate::plans::*;
-    use crate::schema::StructType;
+    use crate::schema::{DataType, StructField, StructType};
     use crate::FileMeta;
 
     fn create_test_checkpoint_file() -> FileMeta {
@@ -985,16 +1015,174 @@ mod state_machine_transition_tests {
     }
 
     #[test]
-    fn test_scan_phase_variants() {
-        // Verify ScanPhase variants exist and are correctly typed
-        let _commit = ScanPhase::Commit;
-        let _schema_query = ScanPhase::SchemaQuery;
-        let _manifest = ScanPhase::CheckpointManifest;
-        let _leaf = ScanPhase::CheckpointLeaf;
-        let _complete = ScanPhase::Complete;
-        
+    fn test_scan_phase_complete_is_terminal() {
         // Verify Complete is terminal
-        assert!(matches!(ScanPhase::Complete, ScanPhase::Complete));
+        assert!(ScanPhase::Complete.is_complete());
+        assert!(ScanPhase::Complete.as_query_plan().is_none());
+    }
+
+    #[test]
+    fn test_scan_phase_commit_has_results_sink() {
+        let table_url = Url::parse("file:///test/table").unwrap();
+        let schema = Arc::new(StructType::new_unchecked(vec![]));
+        let sm = ScanStateMachine::new(table_url, schema.clone(), schema).unwrap();
+        
+        // Get the plan from Commit phase
+        let plan = sm.get_plan().expect("Should have a plan");
+        
+        // Verify it's a Results sink
+        assert!(plan.is_results_sink(), "Commit phase should have a Results sink");
+    }
+
+    #[test]
+    fn test_scan_phase_schema_query_has_drop_sink() {
+        // SchemaQuery should have a Drop sink
+        let schema_query_plan = SchemaQueryPhasePlan {
+            schema_query: SchemaQueryNode::schema_store("test.parquet"),
+            sink: SinkNode::drop(),
+        };
+        
+        let plan = schema_query_plan.as_query_plan();
+        
+        // SchemaQuery produces a Sink(Drop) -> SchemaQuery
+        assert!(
+            plan.is_drop_sink(),
+            "SchemaQuery phase should have a Drop sink"
+        );
+        assert!(!plan.is_results_sink(), "SchemaQuery should not be a Results sink");
+    }
+
+    #[test]
+    fn test_scan_phase_checkpoint_manifest_has_drop_sink() {
+        let manifest_plan = CheckpointManifestPlan {
+            scan: ScanNode {
+                file_type: FileType::Parquet,
+                files: vec![],
+                schema: Arc::new(StructType::new_unchecked(vec![])),
+            },
+            project: SelectNode {
+                columns: vec![],
+                output_schema: Arc::new(StructType::new_unchecked(vec![])),
+            },
+            sink: SinkNode::drop(),
+        };
+        
+        let plan = manifest_plan.as_query_plan();
+        
+        // Verify it's a Drop sink (not Results)
+        assert!(!plan.is_results_sink(), "CheckpointManifest should have a Drop sink, not Results");
+        
+        // Verify it IS a Sink node
+        match plan {
+            DeclarativePlanNode::Sink { node, .. } => {
+                assert_eq!(node.sink_type, SinkType::Drop, "CheckpointManifest should have Drop sink type");
+            }
+            _ => panic!("CheckpointManifest plan should be wrapped in a Sink node"),
+        }
+    }
+
+    #[test]
+    fn test_scan_phase_checkpoint_leaf_has_results_sink() {
+        let leaf_plan = CheckpointLeafPlan {
+            scan: ScanNode {
+                file_type: FileType::Parquet,
+                files: vec![],
+                schema: Arc::new(StructType::new_unchecked(vec![])),
+            },
+            dedup_filter: FilterByKDF::checkpoint_dedup(),
+            project: SelectNode {
+                columns: vec![],
+                output_schema: Arc::new(StructType::new_unchecked(vec![])),
+            },
+            sink: SinkNode::results(),
+        };
+        
+        let plan = leaf_plan.as_query_plan();
+        
+        // Verify it's a Results sink
+        assert!(plan.is_results_sink(), "CheckpointLeaf should have a Results sink");
+        
+        // Verify the sink type
+        match plan {
+            DeclarativePlanNode::Sink { node, .. } => {
+                assert_eq!(node.sink_type, SinkType::Results, "CheckpointLeaf should have Results sink type");
+            }
+            _ => panic!("CheckpointLeaf plan should be wrapped in a Sink node"),
+        }
+    }
+
+    #[test]
+    fn test_scan_state_machine_all_phases_have_correct_sinks() {
+        use crate::FileMeta;
+        
+        let table_url = Url::parse("file:///test/table").unwrap();
+        let schema = Arc::new(StructType::new_unchecked(vec![]));
+        
+        // Create state machine with checkpoint files to test all phases
+        let checkpoint_file = FileMeta {
+            location: Url::parse("file:///test/table/_delta_log/00000000000000000001.checkpoint.parquet").unwrap(),
+            last_modified: 0,
+            size: 100,
+        };
+        
+        let mut sm = ScanStateMachine::from_scan_config(
+            table_url.clone(),
+            table_url.join("_delta_log/").unwrap(),
+            schema.clone(),
+            schema,
+            vec![], // no commit files
+            vec![checkpoint_file],
+        ).unwrap();
+        
+        // Phase 1: Commit - should have Results sink
+        let commit_plan = sm.get_plan().expect("Should have Commit plan");
+        assert!(commit_plan.is_results_sink(), "Commit phase must have Results sink");
+        assert_eq!(sm.phase_name(), "Commit");
+        
+        // Advance to next phase (simulate execution completing)
+        // Since there are checkpoint files, it should go to SchemaQuery
+        let result = sm.advance(Ok(commit_plan.clone()));
+        assert!(result.is_ok());
+        
+        // Phase 2: SchemaQuery - should not be a Results sink
+        let schema_query_plan = sm.get_plan().expect("Should have SchemaQuery plan");
+        assert!(!schema_query_plan.is_results_sink(), "SchemaQuery phase must not have Results sink");
+        assert_eq!(sm.phase_name(), "SchemaQuery");
+    }
+
+    #[test]
+    fn test_scan_phase_as_query_plan_returns_correct_plan_type() {
+        let table_url = Url::parse("file:///test/table").unwrap();
+        let schema = Arc::new(StructType::new_unchecked(vec![]));
+        let sm = ScanStateMachine::new(table_url, schema.clone(), schema).unwrap();
+        
+        // Get the plan
+        let plan = sm.get_plan().expect("Should have a plan");
+        
+        // Commit plan should be: Sink -> Select -> Filter -> Scan
+        match plan {
+            DeclarativePlanNode::Sink { child, node } => {
+                assert_eq!(node.sink_type, SinkType::Results);
+                match *child {
+                    DeclarativePlanNode::Select { child: inner, .. } => {
+                        match *inner {
+                            DeclarativePlanNode::FilterByKDF { child: scan_box, node: filter_node } => {
+                                assert!(matches!(filter_node.state, FilterKdfState::AddRemoveDedup(_)));
+                                match *scan_box {
+                                    DeclarativePlanNode::Scan(scan_node) => {
+                                        assert_eq!(scan_node.file_type, FileType::Json);
+                                    }
+                                    _ => panic!("Expected Scan at leaf of Commit plan"),
+                                }
+                            }
+                            _ => panic!("Expected FilterByKDF in Commit plan"),
+                        }
+                    }
+                    _ => panic!("Expected Select in Commit plan"),
+                }
+            }
+            _ => panic!("Commit plan must be wrapped in Sink"),
+        }
     }
 
     #[test]
@@ -1025,5 +1213,1167 @@ mod state_machine_transition_tests {
         // Get plan to verify we can work with the state machine
         let plan = sm.get_plan();
         assert!(plan.is_ok());
+    }
+
+    // =========================================================================
+    // Content Verification Tests
+    // =========================================================================
+
+    #[test]
+    fn test_commit_phase_plan_contents() {
+        use crate::FileMeta;
+        
+        let table_url = Url::parse("file:///test/table").unwrap();
+        let schema = Arc::new(StructType::new_unchecked(vec![
+            StructField::nullable("value", DataType::LONG),
+        ]));
+        
+        // Create commit files
+        let commit_file = FileMeta {
+            location: Url::parse("file:///test/table/_delta_log/00000000000000000000.json").unwrap(),
+            last_modified: 1234567890,
+            size: 500,
+        };
+        
+        let sm = ScanStateMachine::from_scan_config(
+            table_url.clone(),
+            table_url.join("_delta_log/").unwrap(),
+            schema.clone(),
+            schema,
+            vec![commit_file.clone()],
+            vec![],
+        ).unwrap();
+        
+        let plan = sm.get_plan().expect("Should have plan");
+        
+        // Verify plan structure: Sink(Results) -> Select -> FilterByKDF(AddRemoveDedup) -> Scan(Json)
+        match plan {
+            DeclarativePlanNode::Sink { child, node: sink_node } => {
+                // 1. Verify Results sink
+                assert_eq!(sink_node.sink_type, SinkType::Results, "Commit must have Results sink");
+                
+                match *child {
+                    DeclarativePlanNode::Select { child: filter_box, node: select_node } => {
+                        // 2. Verify output schema has path and size columns
+                        assert!(
+                            select_node.output_schema.field("path").is_some(),
+                            "Output schema should have 'path' column"
+                        );
+                        assert!(
+                            select_node.output_schema.field("size").is_some(),
+                            "Output schema should have 'size' column"
+                        );
+                        
+                        match *filter_box {
+                            DeclarativePlanNode::FilterByKDF { child: scan_box, node: filter_node } => {
+                                // 3. Verify AddRemoveDedup filter
+                                match &filter_node.state {
+                                    FilterKdfState::AddRemoveDedup(state) => {
+                                        // State should be empty initially
+                                        assert!(state.is_empty(), "Initial dedup state should be empty");
+                                    }
+                                    _ => panic!("Commit phase must use AddRemoveDedup filter"),
+                                }
+                                
+                                match *scan_box {
+                                    DeclarativePlanNode::Scan(scan_node) => {
+                                        // 4. Verify JSON file type for commits
+                                        assert_eq!(scan_node.file_type, FileType::Json, "Commit files are JSON");
+                                        
+                                        // 5. Verify the commit files are included
+                                        assert_eq!(scan_node.files.len(), 1, "Should have 1 commit file");
+                                        assert_eq!(
+                                            scan_node.files[0].location.as_str(),
+                                            commit_file.location.as_str(),
+                                            "Commit file URL should match"
+                                        );
+                                        
+                                        // 6. Verify schema has add and remove fields
+                                        assert!(
+                                            scan_node.schema.field("add").is_some(),
+                                            "Commit schema should have 'add' field"
+                                        );
+                                        assert!(
+                                            scan_node.schema.field("remove").is_some(),
+                                            "Commit schema should have 'remove' field"
+                                        );
+                                    }
+                                    _ => panic!("Expected Scan node at leaf"),
+                                }
+                            }
+                            _ => panic!("Expected FilterByKDF after Select"),
+                        }
+                    }
+                    _ => panic!("Expected Select after Sink"),
+                }
+            }
+            _ => panic!("Expected Sink at root"),
+        }
+    }
+
+    #[test]
+    fn test_checkpoint_leaf_phase_plan_contents() {
+        use crate::FileMeta;
+        
+        let checkpoint_file = FileMeta {
+            location: Url::parse("file:///test/table/_delta_log/00000000000000000010.checkpoint.parquet").unwrap(),
+            last_modified: 1234567890,
+            size: 10000,
+        };
+        
+        let leaf_plan = CheckpointLeafPlan {
+            scan: ScanNode {
+                file_type: FileType::Parquet,
+                files: vec![checkpoint_file.clone()],
+                schema: Arc::new(StructType::new_unchecked(vec![
+                    StructField::nullable("add", DataType::struct_type_unchecked(vec![
+                        StructField::not_null("path", DataType::STRING),
+                        StructField::not_null("size", DataType::LONG),
+                    ])),
+                ])),
+            },
+            dedup_filter: FilterByKDF::checkpoint_dedup(),
+            project: SelectNode {
+                columns: vec![],
+                output_schema: Arc::new(StructType::new_unchecked(vec![
+                    StructField::nullable("path", DataType::STRING),
+                    StructField::nullable("size", DataType::LONG),
+                ])),
+            },
+            sink: SinkNode::results(),
+        };
+        
+        let plan = leaf_plan.as_query_plan();
+        
+        // Verify plan structure: Sink(Results) -> Select -> FilterByKDF(CheckpointDedup) -> Scan(Parquet)
+        match plan {
+            DeclarativePlanNode::Sink { child, node: sink_node } => {
+                // 1. Verify Results sink
+                assert_eq!(sink_node.sink_type, SinkType::Results, "CheckpointLeaf must have Results sink");
+                
+                match *child {
+                    DeclarativePlanNode::Select { child: filter_box, node: select_node } => {
+                        // 2. Verify output schema
+                        assert!(select_node.output_schema.field("path").is_some());
+                        assert!(select_node.output_schema.field("size").is_some());
+                        
+                        match *filter_box {
+                            DeclarativePlanNode::FilterByKDF { child: scan_box, node: filter_node } => {
+                                // 3. Verify CheckpointDedup filter
+                                assert!(
+                                    matches!(&filter_node.state, FilterKdfState::CheckpointDedup(_)),
+                                    "CheckpointLeaf must use CheckpointDedup filter"
+                                );
+                                
+                                match *scan_box {
+                                    DeclarativePlanNode::Scan(scan_node) => {
+                                        // 4. Verify Parquet file type for checkpoints
+                                        assert_eq!(scan_node.file_type, FileType::Parquet, "Checkpoint files are Parquet");
+                                        
+                                        // 5. Verify checkpoint files are included
+                                        assert_eq!(scan_node.files.len(), 1);
+                                        assert_eq!(
+                                            scan_node.files[0].location.as_str(),
+                                            checkpoint_file.location.as_str()
+                                        );
+                                        
+                                        // 6. Verify schema has add field
+                                        assert!(scan_node.schema.field("add").is_some());
+                                    }
+                                    _ => panic!("Expected Scan at leaf"),
+                                }
+                            }
+                            _ => panic!("Expected FilterByKDF"),
+                        }
+                    }
+                    _ => panic!("Expected Select"),
+                }
+            }
+            _ => panic!("Expected Sink at root"),
+        }
+    }
+
+    #[test]
+    fn test_checkpoint_manifest_phase_plan_contents() {
+        let manifest_plan = CheckpointManifestPlan {
+            scan: ScanNode {
+                file_type: FileType::Parquet,
+                files: vec![],
+                schema: Arc::new(StructType::new_unchecked(vec![
+                    StructField::not_null("sidecar", DataType::struct_type_unchecked(vec![
+                        StructField::not_null("path", DataType::STRING),
+                        StructField::not_null("sizeInBytes", DataType::LONG),
+                    ])),
+                ])),
+            },
+            project: SelectNode {
+                columns: vec![],
+                output_schema: Arc::new(StructType::new_unchecked(vec![
+                    StructField::not_null("path", DataType::STRING),
+                    StructField::not_null("sizeInBytes", DataType::LONG),
+                ])),
+            },
+            sink: SinkNode::drop(),
+        };
+        
+        let plan = manifest_plan.as_query_plan();
+        
+        // Verify plan structure: Sink(Drop) -> Select -> Scan(Parquet)
+        match plan {
+            DeclarativePlanNode::Sink { child, node: sink_node } => {
+                // 1. Verify Drop sink (side effects only)
+                assert_eq!(sink_node.sink_type, SinkType::Drop, "Manifest must have Drop sink");
+                
+                match *child {
+                    DeclarativePlanNode::Select { child: scan_box, node: select_node } => {
+                        // 2. Verify output schema has path and sizeInBytes
+                        assert!(select_node.output_schema.field("path").is_some());
+                        assert!(select_node.output_schema.field("sizeInBytes").is_some());
+                        
+                        match *scan_box {
+                            DeclarativePlanNode::Scan(scan_node) => {
+                                // 3. Verify Parquet file type
+                                assert_eq!(scan_node.file_type, FileType::Parquet);
+                                
+                                // 4. Verify schema has sidecar field
+                                assert!(
+                                    scan_node.schema.field("sidecar").is_some(),
+                                    "Manifest schema should have 'sidecar' field"
+                                );
+                            }
+                            _ => panic!("Expected Scan at leaf"),
+                        }
+                    }
+                    _ => panic!("Expected Select after Sink"),
+                }
+            }
+            _ => panic!("Expected Sink at root"),
+        }
+    }
+
+    #[test]
+    fn test_schema_query_phase_plan_contents() {
+        let file_path = "file:///test/table/_delta_log/00000000000000000005.checkpoint.parquet";
+        
+        let schema_plan = SchemaQueryPhasePlan {
+            schema_query: SchemaQueryNode::schema_store(file_path),
+            sink: SinkNode::drop(),
+        };
+        
+        let plan = schema_plan.as_query_plan();
+        
+        // SchemaQuery produces Sink(Drop) -> SchemaQuery
+        match plan {
+            DeclarativePlanNode::Sink { child, node } => {
+                assert!(matches!(node.sink_type, SinkType::Drop), "Should be Drop sink");
+                match child.as_ref() {
+                    DeclarativePlanNode::SchemaQuery(schema_node) => {
+                        // 1. Verify file path
+                        assert_eq!(schema_node.file_path, file_path, "File path should match");
+                        
+                        // 2. Verify it's a SchemaStore state
+                        match &schema_node.state {
+                            SchemaReaderState::SchemaStore(store) => {
+                                // State should be empty initially (no schema stored yet)
+                                assert!(store.get().is_none(), "Initial schema store should be empty");
+                            }
+                        }
+                    }
+                    _ => panic!("Expected SchemaQuery inside Sink"),
+                }
+            }
+            _ => panic!("Expected Sink at root"),
+        }
+    }
+
+    #[test]
+    fn test_scan_state_machine_phase_transition_creates_correct_plans() {
+        use crate::FileMeta;
+        use crate::plans::state_machines::AdvanceResult;
+        
+        let table_url = Url::parse("file:///test/table").unwrap();
+        let schema = Arc::new(StructType::new_unchecked(vec![]));
+        
+        let checkpoint_file = FileMeta {
+            location: Url::parse("file:///test/table/_delta_log/00000000000000000001.checkpoint.parquet").unwrap(),
+            last_modified: 0,
+            size: 100,
+        };
+        
+        let mut sm = ScanStateMachine::from_scan_config(
+            table_url.clone(),
+            table_url.join("_delta_log/").unwrap(),
+            schema.clone(),
+            schema,
+            vec![], // no commit files
+            vec![checkpoint_file.clone()],
+        ).unwrap();
+        
+        // Phase 1: Commit
+        assert_eq!(sm.phase_name(), "Commit");
+        let commit_plan = sm.get_plan().unwrap();
+        
+        // Verify Commit plan has Results sink
+        assert!(commit_plan.is_results_sink());
+        
+        // Extract and verify the scan node uses JSON (for commit files)
+        fn extract_scan_file_type(plan: &DeclarativePlanNode) -> Option<FileType> {
+            match plan {
+                DeclarativePlanNode::Scan(s) => Some(s.file_type),
+                DeclarativePlanNode::Sink { child, .. }
+                | DeclarativePlanNode::Select { child, .. }
+                | DeclarativePlanNode::FilterByKDF { child, .. }
+                | DeclarativePlanNode::FilterByExpression { child, .. }
+                | DeclarativePlanNode::ParseJson { child, .. }
+                | DeclarativePlanNode::FirstNonNull { child, .. }
+                | DeclarativePlanNode::ConsumeByKDF { child, .. } => extract_scan_file_type(child),
+                _ => None,
+            }
+        }
+        
+        assert_eq!(
+            extract_scan_file_type(&commit_plan),
+            Some(FileType::Json),
+            "Commit phase should scan JSON files"
+        );
+        
+        // Advance to SchemaQuery (since we have checkpoint files)
+        let result = sm.advance(Ok(commit_plan));
+        assert!(matches!(result, Ok(AdvanceResult::Continue)));
+        
+        // Phase 2: SchemaQuery
+        assert_eq!(sm.phase_name(), "SchemaQuery");
+        let schema_plan = sm.get_plan().unwrap();
+        
+        // Verify SchemaQuery plan has Drop sink
+        assert!(schema_plan.is_drop_sink());
+        
+        // Advance to CheckpointLeaf (simulating schema query found no sidecar column)
+        let result = sm.advance(Ok(schema_plan));
+        assert!(matches!(result, Ok(AdvanceResult::Continue)));
+        
+        // Phase 3: CheckpointLeaf
+        assert_eq!(sm.phase_name(), "CheckpointLeaf");
+        let leaf_plan = sm.get_plan().unwrap();
+        
+        // Verify CheckpointLeaf has Results sink
+        assert!(leaf_plan.is_results_sink());
+        
+        // Verify it scans Parquet files
+        assert_eq!(
+            extract_scan_file_type(&leaf_plan),
+            Some(FileType::Parquet),
+            "CheckpointLeaf should scan Parquet files"
+        );
+        
+        // Verify it uses CheckpointDedup filter
+        fn has_checkpoint_dedup_filter(plan: &DeclarativePlanNode) -> bool {
+            match plan {
+                DeclarativePlanNode::FilterByKDF { node, .. } => {
+                    matches!(&node.state, FilterKdfState::CheckpointDedup(_))
+                }
+                DeclarativePlanNode::Sink { child, .. }
+                | DeclarativePlanNode::Select { child, .. }
+                | DeclarativePlanNode::ConsumeByKDF { child, .. } => has_checkpoint_dedup_filter(child),
+                _ => false,
+            }
+        }
+        
+        assert!(
+            has_checkpoint_dedup_filter(&leaf_plan),
+            "CheckpointLeaf should use CheckpointDedup filter"
+        );
+        
+        // Advance to Complete
+        let result = sm.advance(Ok(leaf_plan));
+        assert!(matches!(result, Ok(AdvanceResult::Done(_))));
+        assert!(sm.is_terminal());
+    }
+
+    #[test]
+    fn test_commit_plan_includes_all_provided_files() {
+        use crate::FileMeta;
+        
+        let table_url = Url::parse("file:///test/table").unwrap();
+        let schema = Arc::new(StructType::new_unchecked(vec![]));
+        
+        // Create multiple commit files
+        let commit_files = vec![
+            FileMeta {
+                location: Url::parse("file:///test/table/_delta_log/00000000000000000000.json").unwrap(),
+                last_modified: 100,
+                size: 500,
+            },
+            FileMeta {
+                location: Url::parse("file:///test/table/_delta_log/00000000000000000001.json").unwrap(),
+                last_modified: 200,
+                size: 600,
+            },
+            FileMeta {
+                location: Url::parse("file:///test/table/_delta_log/00000000000000000002.json").unwrap(),
+                last_modified: 300,
+                size: 700,
+            },
+        ];
+        
+        let sm = ScanStateMachine::from_scan_config(
+            table_url.clone(),
+            table_url.join("_delta_log/").unwrap(),
+            schema.clone(),
+            schema,
+            commit_files.clone(),
+            vec![],
+        ).unwrap();
+        
+        let plan = sm.get_plan().unwrap();
+        
+        // Extract files from the scan node
+        fn extract_scan_files(plan: &DeclarativePlanNode) -> Vec<&FileMeta> {
+            match plan {
+                DeclarativePlanNode::Scan(s) => s.files.iter().collect(),
+                DeclarativePlanNode::Sink { child, .. }
+                | DeclarativePlanNode::Select { child, .. }
+                | DeclarativePlanNode::FilterByKDF { child, .. } => extract_scan_files(child),
+                _ => vec![],
+            }
+        }
+        
+        let scan_files = extract_scan_files(&plan);
+        
+        // Verify all files are included
+        assert_eq!(scan_files.len(), 3, "All commit files should be included");
+        
+        for (i, file) in scan_files.iter().enumerate() {
+            assert_eq!(
+                file.location.as_str(),
+                commit_files[i].location.as_str(),
+                "File {} should match", i
+            );
+            assert_eq!(file.size, commit_files[i].size, "File {} size should match", i);
+        }
+    }
+}
+
+// =============================================================================
+// Integration Tests with Real Tables - Plan Execution
+// =============================================================================
+
+/// Tests that EXECUTE ScanStateMachine plans and verify the results against static expected data.
+#[cfg(test)]
+mod real_table_execution_tests {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    
+    use crate::arrow::array::{Array, AsArray};
+    use crate::engine::sync::SyncEngine;
+    use crate::plans::executor::{DeclarativePlanExecutor, FilteredEngineData, ResultsDriver};
+    use crate::plans::state_machines::{AdvanceResult, ScanStateMachine};
+    use crate::plans::*;
+    use crate::schema::StructType;
+    use crate::Engine;
+    use crate::FileMeta;
+    use crate::Snapshot;
+
+    fn create_test_engine() -> Arc<dyn Engine> {
+        Arc::new(SyncEngine::new())
+    }
+
+    fn get_test_table_path(table_name: &str) -> Option<(PathBuf, url::Url)> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(table_name);
+        if path.exists() {
+            let url = url::Url::from_directory_path(&path).unwrap();
+            Some((path, url))
+        } else {
+            None
+        }
+    }
+
+    /// Helper to extract files from a scan node in a plan
+    fn extract_scan_files(plan: &DeclarativePlanNode) -> Vec<FileMeta> {
+        match plan {
+            DeclarativePlanNode::Scan(s) => s.files.clone(),
+            DeclarativePlanNode::Sink { child, .. }
+            | DeclarativePlanNode::Select { child, .. }
+            | DeclarativePlanNode::FilterByKDF { child, .. }
+            | DeclarativePlanNode::ConsumeByKDF { child, .. }
+            | DeclarativePlanNode::FilterByExpression { child, .. }
+            | DeclarativePlanNode::ParseJson { child, .. }
+            | DeclarativePlanNode::FirstNonNull { child, .. } => extract_scan_files(child),
+            DeclarativePlanNode::FileListing(_) | DeclarativePlanNode::SchemaQuery(_) => vec![],
+        }
+    }
+
+    // =========================================================================
+    // Static Expected Data - Hardcoded from Delta Log Files
+    // =========================================================================
+    
+    /// Static expected data for table-without-dv-small
+    /// From: 00000000000000000000.json containing 1 add action
+    mod expected_table_without_dv_small {
+        /// Expected data file path from the add action
+        pub(super) const EXPECTED_DATA_FILE: &str = 
+            "part-00000-517f5d32-9c95-48e8-82b4-0229cc194867-c000.snappy.parquet";
+        
+        /// Expected number of rows in the commit log (commitInfo, protocol, metaData, add)
+        #[allow(dead_code)]
+        pub(super) const EXPECTED_COMMIT_ROWS: usize = 4;
+    }
+    
+    /// Static expected data for basic_partitioned table
+    /// From: 00000000000000000000.json (3 adds) + 00000000000000000001.json (3 adds)
+    mod expected_basic_partitioned {
+        /// Expected data file paths from all add actions across both versions
+        pub(super) const EXPECTED_DATA_FILES: [&str; 6] = [
+            // Version 0 adds:
+            "letter=a/part-00000-a08d296a-d2c5-4a99-bea9-afcea42ba2e9.c000.snappy.parquet",
+            "letter=b/part-00000-41954fb0-ef91-47e5-bd41-b75169c41c17.c000.snappy.parquet",
+            "letter=c/part-00000-27a17b8f-be68-485c-9c49-70c742be30c0.c000.snappy.parquet",
+            // Version 1 adds:
+            "letter=__HIVE_DEFAULT_PARTITION__/part-00000-8eb7f29a-e6a1-436e-a638-bbf0a7953f09.c000.snappy.parquet",
+            "letter=a/part-00000-0dbe0cc5-e3bf-4fb0-b36a-b5fdd67fe843.c000.snappy.parquet",
+            "letter=e/part-00000-847cf2d1-1247-4aa0-89ef-2f90c68ea51e.c000.snappy.parquet",
+        ];
+        
+        /// Expected number of rows in version 0 commit (protocol, metaData, 3 adds, commitInfo)
+        pub(super) const EXPECTED_VERSION_0_ROWS: usize = 6;
+        
+        /// Expected number of rows in version 1 commit (3 adds, commitInfo)  
+        pub(super) const EXPECTED_VERSION_1_ROWS: usize = 4;
+        
+        /// Total expected rows across both commits
+        pub(super) const EXPECTED_TOTAL_COMMIT_ROWS: usize = 10;
+    }
+    
+    // =========================================================================
+    // Helper Functions for Extracting Data from Execution Results
+    // =========================================================================
+    
+    /// Extract the 'path' column values from add actions in executed batches.
+    /// The path field can be at:
+    /// - Top level "path" (after transform using SCAN_ROW_SCHEMA)
+    /// - Nested "add.path" (before transform, raw commit data)
+    fn extract_add_paths_from_batches(batches: &[FilteredEngineData]) -> Vec<String> {
+        use crate::engine::arrow_data::extract_record_batch;
+        
+        let mut paths = Vec::new();
+        
+        for batch in batches {
+            // Use the helper to extract the RecordBatch from the Arc<dyn EngineData>
+            let record_batch = extract_record_batch(batch.engine_data.as_ref())
+                .expect("Should be ArrowEngineData");
+            
+            // First try top-level "path" column (after transform)
+            if let Some(path_idx) = record_batch.schema().index_of("path").ok() {
+                let path_column = record_batch.column(path_idx);
+                if let Some(string_array) = path_column.as_string_opt::<i32>() {
+                    for i in 0..string_array.len() {
+                        // Only include rows that are selected
+                        if batch.selection_vector.get(i).copied().unwrap_or(false) && !string_array.is_null(i) {
+                            paths.push(string_array.value(i).to_string());
+                        }
+                    }
+                    continue; // Found top-level path, skip nested check
+                }
+            }
+            
+            // Fallback: Look for the "add" struct column, then extract "path" from it
+            if let Some(add_idx) = record_batch.schema().index_of("add").ok() {
+                let add_column = record_batch.column(add_idx);
+                if let Some(add_struct) = add_column.as_struct_opt() {
+                    if let Some(path_col) = add_struct.column_by_name("path") {
+                        if let Some(string_array) = path_col.as_string_opt::<i32>() {
+                            for i in 0..string_array.len() {
+                                // Only include rows that are selected
+                                if batch.selection_vector.get(i).copied().unwrap_or(false) && !string_array.is_null(i) {
+                                    paths.push(string_array.value(i).to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        paths
+    }
+    
+    // =========================================================================
+    // Plan Execution Tests with Static Expected Data Comparison
+    // =========================================================================
+
+    #[test]
+    fn test_execute_and_verify_table_without_dv_small() {
+        // Execute raw scan on table-without-dv-small and compare against static expected data
+        let Some((_, table_url)) = get_test_table_path("table-without-dv-small") else {
+            println!("Skipping test: table-without-dv-small not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        let log_segment = snapshot.log_segment();
+        let commit_files: Vec<FileMeta> = log_segment
+            .ascending_commit_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+
+        // Verify we have exactly 1 commit file
+        assert_eq!(commit_files.len(), 1, "Expected exactly 1 commit file");
+        assert!(
+            commit_files[0].location.path().ends_with("00000000000000000000.json"),
+            "Expected version 0 commit file"
+        );
+        
+        // Execute raw scan plan
+        let plan = create_raw_scan_plan(commit_files);
+        let executor = DeclarativePlanExecutor::new(engine);
+        let results = executor.execute(plan).expect("Execution should succeed");
+        let batches: Vec<FilteredEngineData> = results
+            .filter_map(|r| r.ok())
+            .collect();
+        
+        // STATIC ASSERTION 1: Verify row count (4 lines in the commit file)
+        let total_rows: usize = batches.iter().map(|b| b.engine_data.len()).sum();
+        assert_eq!(total_rows, 4, "Raw scan should have 4 rows from the commit file");
+        
+        // STATIC ASSERTION 2: Verify the add action path
+        let add_paths = extract_add_paths_from_batches(&batches);
+        assert_eq!(add_paths.len(), 1, "Expected exactly 1 add action");
+        assert_eq!(
+            add_paths[0],
+            expected_table_without_dv_small::EXPECTED_DATA_FILE,
+            "Add path mismatch: expected '{}', got '{}'",
+            expected_table_without_dv_small::EXPECTED_DATA_FILE,
+            add_paths[0]
+        );
+    }
+
+    /// Helper to create a simple Scan -> Sink plan for reading commit files
+    fn create_raw_scan_plan(commit_files: Vec<FileMeta>) -> DeclarativePlanNode {
+        use crate::schema::{DataType, MapType, StructField, StructType};
+        use crate::plans::nodes::{FileType, ScanNode, SinkNode};
+        
+        let partition_values_type: DataType =
+            MapType::new(DataType::STRING, DataType::STRING, true).into();
+        let add_schema = DataType::struct_type_unchecked(vec![
+            StructField::not_null("path", DataType::STRING),
+            StructField::nullable("partitionValues", partition_values_type),
+            StructField::not_null("size", DataType::LONG),
+            StructField::nullable("modificationTime", DataType::LONG),
+            StructField::nullable("dataChange", DataType::BOOLEAN),
+            StructField::nullable("stats", DataType::STRING),
+        ]);
+
+        let remove_schema = DataType::struct_type_unchecked(vec![
+            StructField::not_null("path", DataType::STRING),
+            StructField::nullable("deletionTimestamp", DataType::LONG),
+            StructField::nullable("dataChange", DataType::BOOLEAN),
+        ]);
+
+        let schema = Arc::new(StructType::new_unchecked(vec![
+            StructField::nullable("add", add_schema),
+            StructField::nullable("remove", remove_schema),
+        ]));
+        
+        let raw_scan = DeclarativePlanNode::Scan(ScanNode {
+            file_type: FileType::Json,
+            files: commit_files,
+            schema,
+        });
+        
+        DeclarativePlanNode::Sink {
+            child: Box::new(raw_scan),
+            node: SinkNode::results(),
+        }
+    }
+
+    #[test]
+    fn test_execute_and_verify_basic_partitioned() {
+        // Execute raw scan on basic_partitioned and compare against static expected data
+        let Some((_, table_url)) = get_test_table_path("basic_partitioned") else {
+            println!("Skipping test: basic_partitioned not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        let log_segment = snapshot.log_segment();
+        let commit_files: Vec<FileMeta> = log_segment
+            .ascending_commit_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+
+        // Verify we have exactly 2 commit files
+        assert_eq!(commit_files.len(), 2, "Expected exactly 2 commit files");
+
+        // Execute raw scan plan
+        let plan = create_raw_scan_plan(commit_files);
+        let executor = DeclarativePlanExecutor::new(engine);
+        let results = executor.execute(plan).expect("Execution should succeed");
+        let batches: Vec<FilteredEngineData> = results
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // STATIC ASSERTION 1: Verify total row count matches expected
+        let total_rows: usize = batches.iter().map(|b| b.engine_data.len()).sum();
+        assert_eq!(
+            total_rows, 
+            expected_basic_partitioned::EXPECTED_TOTAL_COMMIT_ROWS,
+            "Expected {} total commit rows, got {}",
+            expected_basic_partitioned::EXPECTED_TOTAL_COMMIT_ROWS,
+            total_rows
+        );
+
+        // STATIC ASSERTION 2: Verify all add action paths match expected
+        let add_paths = extract_add_paths_from_batches(&batches);
+        let add_paths_set: HashSet<&str> = add_paths.iter().map(|s| s.as_str()).collect();
+        let expected_set: HashSet<&str> = expected_basic_partitioned::EXPECTED_DATA_FILES
+            .iter()
+            .copied()
+            .collect();
+        
+        assert_eq!(
+            add_paths.len(), 
+            expected_basic_partitioned::EXPECTED_DATA_FILES.len(),
+            "Expected {} add actions, got {}",
+            expected_basic_partitioned::EXPECTED_DATA_FILES.len(),
+            add_paths.len()
+        );
+        
+        assert_eq!(
+            add_paths_set, 
+            expected_set,
+            "Add paths mismatch.\nExpected: {:?}\nGot: {:?}",
+            expected_set,
+            add_paths_set
+        );
+    }
+
+    #[test]
+    fn test_execute_verifies_exact_row_count() {
+        // Verify execution produces exactly the expected number of rows
+        let Some((_, table_url)) = get_test_table_path("table-without-dv-small") else {
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        let log_segment = snapshot.log_segment();
+        let commit_files: Vec<FileMeta> = log_segment
+            .ascending_commit_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+
+        // Execute raw scan plan
+        let plan = create_raw_scan_plan(commit_files);
+        let executor = DeclarativePlanExecutor::new(engine);
+        let results = executor.execute(plan).expect("Execution should succeed");
+        
+        let batches: Vec<FilteredEngineData> = results
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // EXACT static assertion - the commit has exactly 4 lines
+        let total_rows: usize = batches.iter().map(|b| b.engine_data.len()).sum();
+        assert_eq!(
+            total_rows, 
+            4,  // Static: commitInfo, protocol, metaData, add
+            "Delta log 00000000000000000000.json must have exactly 4 rows"
+        );
+    }
+
+    #[test]
+    fn test_execute_add_path_exact_match() {
+        // Verify the exact add.path value matches our static expectation
+        let Some((_, table_url)) = get_test_table_path("table-without-dv-small") else {
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        let log_segment = snapshot.log_segment();
+        let commit_files: Vec<FileMeta> = log_segment
+            .ascending_commit_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+
+        // Execute raw scan plan
+        let plan = create_raw_scan_plan(commit_files);
+        let executor = DeclarativePlanExecutor::new(engine);
+        let results = executor.execute(plan).expect("Execution should succeed");
+        let batches: Vec<FilteredEngineData> = results
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let add_paths = extract_add_paths_from_batches(&batches);
+        
+        // EXACT STRING MATCH against static expected value
+        const EXPECTED_PATH: &str = "part-00000-517f5d32-9c95-48e8-82b4-0229cc194867-c000.snappy.parquet";
+        
+        assert_eq!(add_paths.len(), 1, "Must have exactly 1 add action");
+        assert_eq!(
+            add_paths[0], 
+            EXPECTED_PATH,
+            "Add path must exactly match: expected '{}', got '{}'",
+            EXPECTED_PATH,
+            add_paths[0]
+        );
+    }
+
+    #[test]
+    fn test_execute_basic_partitioned_all_paths_match() {
+        // Verify all 6 add paths from basic_partitioned match static expectations exactly
+        let Some((_, table_url)) = get_test_table_path("basic_partitioned") else {
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        let log_segment = snapshot.log_segment();
+        let commit_files: Vec<FileMeta> = log_segment
+            .ascending_commit_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+
+        // Execute raw scan plan
+        let plan = create_raw_scan_plan(commit_files);
+        let executor = DeclarativePlanExecutor::new(engine);
+        let results = executor.execute(plan).expect("Execution should succeed");
+        let batches: Vec<FilteredEngineData> = results
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let add_paths = extract_add_paths_from_batches(&batches);
+        
+        // Static expected paths - every single path must be present
+        const EXPECTED_PATHS: [&str; 6] = [
+            "letter=a/part-00000-a08d296a-d2c5-4a99-bea9-afcea42ba2e9.c000.snappy.parquet",
+            "letter=b/part-00000-41954fb0-ef91-47e5-bd41-b75169c41c17.c000.snappy.parquet",
+            "letter=c/part-00000-27a17b8f-be68-485c-9c49-70c742be30c0.c000.snappy.parquet",
+            "letter=__HIVE_DEFAULT_PARTITION__/part-00000-8eb7f29a-e6a1-436e-a638-bbf0a7953f09.c000.snappy.parquet",
+            "letter=a/part-00000-0dbe0cc5-e3bf-4fb0-b36a-b5fdd67fe843.c000.snappy.parquet",
+            "letter=e/part-00000-847cf2d1-1247-4aa0-89ef-2f90c68ea51e.c000.snappy.parquet",
+        ];
+        
+        assert_eq!(add_paths.len(), 6, "Must have exactly 6 add actions");
+        
+        let add_set: HashSet<String> = add_paths.into_iter().collect();
+        for expected in EXPECTED_PATHS {
+            assert!(
+                add_set.contains(expected),
+                "Missing expected path: '{}'",
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_commit_file_produces_correct_action_count() {
+        // Test that each commit file produces the correct number of actions
+        let Some((_, table_url)) = get_test_table_path("basic_partitioned") else {
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        let log_segment = snapshot.log_segment();
+        let commit_files: Vec<FileMeta> = log_segment
+            .ascending_commit_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+
+        // Test version 0 only (should have 6 lines: protocol, metadata, 3 adds, commitInfo)
+        let plan = create_raw_scan_plan(vec![commit_files[0].clone()]);
+        let executor = DeclarativePlanExecutor::new(engine.clone());
+        let results = executor.execute(plan).expect("Execution should succeed");
+        let batches: Vec<FilteredEngineData> = results
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let total_rows: usize = batches.iter().map(|b| b.engine_data.len()).sum();
+        
+        // Static assertion: version 0 has exactly 6 lines
+        assert_eq!(
+            total_rows, 
+            expected_basic_partitioned::EXPECTED_VERSION_0_ROWS,
+            "Version 0 must have exactly {} rows (protocol, metadata, 3 adds, commitInfo)",
+            expected_basic_partitioned::EXPECTED_VERSION_0_ROWS
+        );
+
+        // Test version 1 only (should have 4 lines: 3 adds, commitInfo)
+        let plan = create_raw_scan_plan(vec![commit_files[1].clone()]);
+        let executor = DeclarativePlanExecutor::new(engine);
+        let results = executor.execute(plan).expect("Execution should succeed");
+        let batches: Vec<FilteredEngineData> = results
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let total_rows: usize = batches.iter().map(|b| b.engine_data.len()).sum();
+        
+        // Static assertion: version 1 has exactly 4 lines
+        assert_eq!(
+            total_rows, 
+            expected_basic_partitioned::EXPECTED_VERSION_1_ROWS,
+            "Version 1 must have exactly {} rows (3 adds, commitInfo)",
+            expected_basic_partitioned::EXPECTED_VERSION_1_ROWS
+        );
+    }
+
+    // =========================================================================
+    // Full State Machine Execution Tests (via ResultsDriver)
+    // =========================================================================
+
+    #[test]
+    fn test_state_machine_execution_simple_table() {
+        // Execute the full ScanStateMachine via ResultsDriver on a simple table
+        let Some((_, table_url)) = get_test_table_path("table-without-dv-small") else {
+            println!("Skipping test: table-without-dv-small not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        let log_segment = snapshot.log_segment();
+        let commit_files: Vec<FileMeta> = log_segment
+            .ascending_commit_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+
+        // Create ScanStateMachine with full plan (includes FilterByKDF)
+        let mut sm = ScanStateMachine::from_scan_config(
+            table_url.clone(),
+            table_url.join("_delta_log/").unwrap(),
+            snapshot.schema().clone(),
+            snapshot.schema().clone(),
+            commit_files,
+            vec![],
+        ).expect("Should create ScanStateMachine");
+        
+        // Execute the plan directly
+        let plan = sm.get_plan().expect("Should get plan");
+        assert!(plan.is_results_sink(), "Commit phase should have Results sink");
+        
+        let executor = DeclarativePlanExecutor::new(engine.clone());
+        let results = executor.execute(plan.clone()).expect("Direct execution should succeed");
+        let direct_batches: Vec<FilteredEngineData> = results
+            .filter_map(|r| r.ok())
+            .collect();
+        let direct_rows: usize = direct_batches.iter().map(|b| b.engine_data.len()).sum();
+        
+        // Manually advance the state machine
+        let advance_result = sm.advance(Ok(plan)).expect("Advance should succeed");
+        assert!(sm.is_terminal(), "State machine should complete after Commit phase (no checkpoints)");
+        assert!(matches!(advance_result, AdvanceResult::Done(_)), "Should be done");
+        
+        // Verify the path values from execution
+        let add_paths = extract_add_paths_from_batches(&direct_batches);
+        
+        // Verify the content
+        assert!(direct_rows > 0, "Direct execution should produce rows");
+        assert_eq!(add_paths.len(), 1, "Should have exactly 1 add action");
+        assert_eq!(
+            add_paths[0],
+            expected_table_without_dv_small::EXPECTED_DATA_FILE,
+            "Add path should match expected"
+        );
+    }
+
+    #[test]
+    fn test_state_machine_execution_partitioned_table() {
+        // Execute the full ScanStateMachine on a partitioned table with multiple commits
+        let Some((_, table_url)) = get_test_table_path("basic_partitioned") else {
+            println!("Skipping test: basic_partitioned not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        let log_segment = snapshot.log_segment();
+        let commit_files: Vec<FileMeta> = log_segment
+            .ascending_commit_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+
+        // Create ScanStateMachine
+        let sm = ScanStateMachine::from_scan_config(
+            table_url.clone(),
+            table_url.join("_delta_log/").unwrap(),
+            snapshot.schema().clone(),
+            snapshot.schema().clone(),
+            commit_files,
+            vec![],
+        ).expect("Should create ScanStateMachine");
+
+        // Execute via ResultsDriver
+        let mut driver = ResultsDriver::new(engine, sm);
+        let batches: Vec<FilteredEngineData> = driver
+            .by_ref()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Extract add.path values
+        let add_paths = extract_add_paths_from_batches(&batches);
+        
+        // Should have exactly 6 add actions (3 from version 0, 3 from version 1)
+        assert_eq!(add_paths.len(), 6, "Should have 6 add actions after dedup");
+
+        // Verify all expected paths are present
+        let add_set: HashSet<String> = add_paths.into_iter().collect();
+        for expected in expected_basic_partitioned::EXPECTED_DATA_FILES {
+            assert!(
+                add_set.contains(expected),
+                "Missing expected path: '{}'",
+                expected
+            );
+        }
+
+        assert!(driver.is_done(), "Driver should complete");
+        assert!(driver.into_result().is_some(), "Should have final result");
+    }
+
+    #[test]
+    fn test_state_machine_execution_with_checkpoint() {
+        // Execute the full ScanStateMachine on a table with checkpoint
+        let Some((_, table_url)) = get_test_table_path("with_checkpoint_no_last_checkpoint") else {
+            println!("Skipping test: with_checkpoint_no_last_checkpoint not found");
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        let log_segment = snapshot.log_segment();
+        let commit_files: Vec<FileMeta> = log_segment
+            .ascending_commit_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+        let checkpoint_files: Vec<FileMeta> = log_segment
+            .checkpoint_parts
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+
+        // Skip if no checkpoint
+        if checkpoint_files.is_empty() {
+            println!("Skipping: table has no checkpoint files");
+            return;
+        }
+
+        // Create ScanStateMachine with checkpoint files
+        let sm = ScanStateMachine::from_scan_config(
+            table_url.clone(),
+            table_url.join("_delta_log/").unwrap(),
+            snapshot.schema().clone(),
+            snapshot.schema().clone(),
+            commit_files,
+            checkpoint_files,
+        ).expect("Should create ScanStateMachine");
+
+        // Execute via ResultsDriver
+        let mut driver = ResultsDriver::new(engine, sm);
+        let batches: Vec<FilteredEngineData> = driver
+            .by_ref()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Should produce results from both commit and checkpoint phases
+        let total_rows: usize = batches.iter().map(|b| b.engine_data.len()).sum();
+        assert!(total_rows > 0, "State machine with checkpoint should produce rows");
+
+        // Extract add.path values
+        let add_paths = extract_add_paths_from_batches(&batches);
+        assert!(!add_paths.is_empty(), "Should have add actions from commits and/or checkpoints");
+
+        assert!(driver.is_done(), "Driver should complete all phases");
+        assert!(driver.into_result().is_some(), "Should have final result");
+    }
+
+    #[test]
+    fn test_state_machine_produces_correct_deduped_results() {
+        // Verify that the dedup filter correctly removes duplicate add actions
+        // When reading from both commits and checkpoints, duplicates should be filtered
+        let Some((_, table_url)) = get_test_table_path("basic_partitioned") else {
+            return;
+        };
+
+        let engine = create_test_engine();
+        let snapshot = Snapshot::builder_for(table_url.clone())
+            .build(engine.as_ref())
+            .expect("Should build snapshot");
+
+        let log_segment = snapshot.log_segment();
+        let commit_files: Vec<FileMeta> = log_segment
+            .ascending_commit_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
+
+        // Create ScanStateMachine
+        let sm = ScanStateMachine::from_scan_config(
+            table_url.clone(),
+            table_url.join("_delta_log/").unwrap(),
+            snapshot.schema().clone(),
+            snapshot.schema().clone(),
+            commit_files,
+            vec![],
+        ).expect("Should create ScanStateMachine");
+
+        // Execute and collect results
+        let mut driver = ResultsDriver::new(engine, sm);
+        let batches: Vec<FilteredEngineData> = driver
+            .by_ref()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let add_paths = extract_add_paths_from_batches(&batches);
+        
+        // Verify no duplicates - all paths should be unique
+        let unique_paths: HashSet<&str> = add_paths.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            add_paths.len(),
+            unique_paths.len(),
+            "Dedup filter should remove duplicate paths"
+        );
+
+        // Verify exact expected paths
+        assert_eq!(unique_paths.len(), 6, "Should have exactly 6 unique add paths");
     }
 }

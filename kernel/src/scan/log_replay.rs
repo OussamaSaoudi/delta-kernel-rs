@@ -309,7 +309,7 @@ pub(crate) static SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| 
 pub(crate) static SCAN_ROW_DATATYPE: LazyLock<DataType> =
     LazyLock::new(|| SCAN_ROW_SCHEMA.clone().into());
 
-fn get_add_transform_expr() -> ExpressionRef {
+pub(crate) fn get_add_transform_expr() -> ExpressionRef {
     use crate::expressions::column_expr_ref;
     static EXPR: LazyLock<ExpressionRef> = LazyLock::new(|| {
         Arc::new(Expression::Struct(vec![

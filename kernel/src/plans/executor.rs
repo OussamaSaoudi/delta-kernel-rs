@@ -263,15 +263,34 @@ impl DeclarativePlanExecutor {
     }
 
     /// Execute a SchemaQuery node - reads parquet file schema (footer only).
+    /// 
+    /// This reads only the parquet footer to extract the schema, without reading data.
+    /// The schema is stored in the node's state for later retrieval.
     fn execute_schema_query(&self, node: SchemaQueryNode) -> DeltaResult<FilteredDataIter> {
-        let SchemaQueryNode {
-            file_path: _,
-            state: _,
-        } = node;
-
-        // For now, return error - schema query not yet implemented
-        // In a full implementation, this would read the parquet footer and return schema info
-        Err(Error::generic("SchemaQuery node not yet fully implemented"))
+        let file_path = &node.file_path;
+        
+        // Read the schema from the parquet footer
+        let parquet_handler = self.engine.parquet_handler();
+        let url = url::Url::parse(file_path).map_err(|e| Error::generic(format!("Invalid file path: {}", e)))?;
+        let file_meta = crate::FileMeta {
+            location: url,
+            last_modified: 0,
+            size: 0,
+        };
+        
+        // Get the parquet footer which contains the schema
+        let footer = parquet_handler.read_parquet_footer(&file_meta)?;
+        let schema = footer.schema;
+        
+        // Store the schema in the node's state
+        match &node.state {
+            super::kdf_state::SchemaReaderState::SchemaStore(store) => {
+                store.store(schema);
+            }
+        }
+        
+        // SchemaQuery produces no data rows - return empty iterator
+        Ok(Box::new(std::iter::empty()))
     }
 
     /// Execute a FilterByKDF node using a kernel-defined function (KDF).
@@ -1794,25 +1813,33 @@ mod tests {
         let plan = sm.get_plan();
         assert!(plan.is_ok(), "Should be able to get plan");
 
-        // The commit phase should produce a Select -> Filter -> Scan plan
+        // The commit phase should produce a Sink -> Select -> Filter -> Scan plan
+        // with a Results sink (for streaming file actions)
         let plan = plan.unwrap();
         match plan {
-            DeclarativePlanNode::Select { child, .. } => {
+            DeclarativePlanNode::Sink { child, node } => {
+                // Commit phase should have Results sink
+                assert_eq!(node.sink_type, super::SinkType::Results, "Commit phase should have Results sink");
                 match child.as_ref() {
-                    DeclarativePlanNode::FilterByKDF { child: inner, node } => {
-                        // Verify it's an AddRemoveDedup filter (state variant IS the identity)
-                        assert!(matches!(&node.state, FilterKdfState::AddRemoveDedup(_)));
-                        match inner.as_ref() {
-                            DeclarativePlanNode::Scan(scan) => {
-                                assert_eq!(scan.file_type, super::FileType::Json);
+                    DeclarativePlanNode::Select { child: select_child, .. } => {
+                        match select_child.as_ref() {
+                            DeclarativePlanNode::FilterByKDF { child: inner, node: filter_node } => {
+                                // Verify it's an AddRemoveDedup filter (state variant IS the identity)
+                                assert!(matches!(&filter_node.state, FilterKdfState::AddRemoveDedup(_)));
+                                match inner.as_ref() {
+                                    DeclarativePlanNode::Scan(scan) => {
+                                        assert_eq!(scan.file_type, super::FileType::Json);
+                                    }
+                                    _ => panic!("Expected Scan at the bottom"),
+                                }
                             }
-                            _ => panic!("Expected Scan at the bottom"),
+                            _ => panic!("Expected Filter after Select"),
                         }
                     }
-                    _ => panic!("Expected Filter after Select"),
+                    _ => panic!("Expected Select after Sink"),
                 }
             }
-            _ => panic!("Expected Select plan for Commit phase"),
+            _ => panic!("Expected Sink plan for Commit phase"),
         }
     }
 
@@ -1927,9 +1954,9 @@ mod tests {
         // Initial phase
         assert_eq!(sm.phase_name(), "Commit");
 
-        // Get plan
+        // Get plan - should be a Sink wrapping the plan
         let plan = sm.get_plan().unwrap();
-        assert!(matches!(plan, DeclarativePlanNode::Select { .. }));
+        assert!(matches!(plan, DeclarativePlanNode::Sink { .. }), "Commit phase should produce Sink-wrapped plan");
 
         // Advance - since no checkpoint files, should go straight to Complete
         let result = sm.advance(Ok(plan));

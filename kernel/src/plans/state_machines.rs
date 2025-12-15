@@ -720,30 +720,50 @@ impl From<SnapshotStateMachine> for AnyStateMachine {
 // Scan State Machine
 // =============================================================================
 
-/// Phase of the scan state machine.
+/// Phase of the scan state machine with embedded typed plans.
+///
+/// Each variant contains the compile-time typed plan struct for that phase.
+/// Use `as_query_plan()` to convert to runtime `DeclarativePlanNode`.
 #[derive(Debug, Clone)]
 pub enum ScanPhase {
-    /// Process commit files (JSON log)
-    Commit,
-    /// Query checkpoint schema to detect V2 checkpoints with sidecars
-    SchemaQuery,
-    /// Read checkpoint manifest (v2 checkpoints)
-    CheckpointManifest,
-    /// Read checkpoint leaf/sidecar files
-    CheckpointLeaf,
+    /// Process commit files (JSON log) - Result sink
+    Commit(CommitPhasePlan),
+    /// Query checkpoint schema to detect V2 checkpoints - no sink (schema only)
+    SchemaQuery(SchemaQueryPhasePlan),
+    /// Read checkpoint manifest (v2 checkpoints) - Drop sink
+    CheckpointManifest(CheckpointManifestPlan),
+    /// Read checkpoint leaf/sidecar files - Result sink
+    CheckpointLeaf(CheckpointLeafPlan),
     /// Scan is complete
     Complete,
 }
 
 impl ScanPhase {
-    fn phase_name(&self) -> &'static str {
+    /// Get the phase name for debugging/logging.
+    pub fn phase_name(&self) -> &'static str {
         match self {
-            Self::Commit => "Commit",
-            Self::SchemaQuery => "SchemaQuery",
-            Self::CheckpointManifest => "CheckpointManifest",
-            Self::CheckpointLeaf => "CheckpointLeaf",
+            Self::Commit(_) => "Commit",
+            Self::SchemaQuery(_) => "SchemaQuery",
+            Self::CheckpointManifest(_) => "CheckpointManifest",
+            Self::CheckpointLeaf(_) => "CheckpointLeaf",
             Self::Complete => "Complete",
         }
+    }
+
+    /// Get the query plan for the current phase (if not complete).
+    pub fn as_query_plan(&self) -> Option<DeclarativePlanNode> {
+        match self {
+            Self::Commit(p) => Some(p.as_query_plan()),
+            Self::SchemaQuery(p) => Some(p.as_query_plan()),
+            Self::CheckpointManifest(p) => Some(p.as_query_plan()),
+            Self::CheckpointLeaf(p) => Some(p.as_query_plan()),
+            Self::Complete => None,
+        }
+    }
+
+    /// Check if this is a terminal state.
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
     }
 }
 
@@ -838,8 +858,9 @@ impl ScanStateMachine {
         logical_schema: SchemaRef,
     ) -> DeltaResult<Self> {
         let state = ScanBuildState::new(table_root, physical_schema, logical_schema)?;
+        let initial_plan = Self::create_commit_plan_static(&state)?;
         Ok(Self {
-            phase: ScanPhase::Commit,
+            phase: ScanPhase::Commit(initial_plan),
             state,
         })
     }
@@ -853,19 +874,21 @@ impl ScanStateMachine {
         commit_files: Vec<FileMeta>,
         checkpoint_files: Vec<FileMeta>,
     ) -> DeltaResult<Self> {
+        let state = ScanBuildState {
+            table_root,
+            log_root,
+            physical_schema,
+            logical_schema,
+            dedup_state: FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new()),
+            commit_files,
+            checkpoint_files,
+            sidecar_files: Vec::new(),
+            checkpoint_type: None,
+        };
+        let initial_plan = Self::create_commit_plan_static(&state)?;
         Ok(Self {
-            phase: ScanPhase::Commit,
-            state: ScanBuildState {
-                table_root,
-                log_root,
-                physical_schema,
-                logical_schema,
-                dedup_state: FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new()),
-                commit_files,
-                checkpoint_files,
-                sidecar_files: Vec::new(),
-                checkpoint_type: None,
-            },
+            phase: ScanPhase::Commit(initial_plan),
+            state,
         })
     }
 
@@ -876,18 +899,14 @@ impl ScanStateMachine {
 
     /// Check if terminal.
     pub fn is_terminal(&self) -> bool {
-        matches!(self.phase, ScanPhase::Complete)
+        self.phase.is_complete()
     }
 
     /// Get the plan for the current phase.
     pub fn get_plan(&self) -> DeltaResult<DeclarativePlanNode> {
-        match &self.phase {
-            ScanPhase::Commit => self.create_commit_plan(),
-            ScanPhase::SchemaQuery => self.create_schema_query_plan(),
-            ScanPhase::CheckpointManifest => self.create_checkpoint_manifest_plan(),
-            ScanPhase::CheckpointLeaf => self.create_checkpoint_leaf_plan(),
-            ScanPhase::Complete => Err(Error::generic("Cannot get plan from Complete state")),
-        }
+        self.phase
+            .as_query_plan()
+            .ok_or_else(|| Error::generic("Cannot get plan from Complete state"))
     }
 
     /// Advance the state machine with the result of plan execution.
@@ -902,7 +921,7 @@ impl ScanStateMachine {
         self.extract_kdf_state(&executed_plan)?;
 
         match &self.phase {
-            ScanPhase::Commit => {
+            ScanPhase::Commit(_) => {
                 // Check if we have checkpoint files
                 if self.state.checkpoint_files.is_empty() {
                     // No checkpoint - we're done
@@ -914,40 +933,46 @@ impl ScanStateMachine {
                 match self.state.checkpoint_type {
                     Some(CheckpointType::V2) => {
                         // V2 checkpoint (already known) - read manifest first
-                        self.phase = ScanPhase::CheckpointManifest;
+                        let manifest_plan = self.create_checkpoint_manifest_plan()?;
+                        self.phase = ScanPhase::CheckpointManifest(manifest_plan);
                     }
                     Some(CheckpointType::MultiPart) => {
                         // Multi-part checkpoint - go directly to leaf phase
-                        self.phase = ScanPhase::CheckpointLeaf;
+                        let leaf_plan = self.create_checkpoint_leaf_plan()?;
+                        self.phase = ScanPhase::CheckpointLeaf(leaf_plan);
                     }
                     Some(CheckpointType::Classic) | None => {
                         // Single-part checkpoint - query schema to detect V2
-                        self.phase = ScanPhase::SchemaQuery;
+                        let schema_plan = self.create_schema_query_plan()?;
+                        self.phase = ScanPhase::SchemaQuery(schema_plan);
                     }
                 }
                 Ok(AdvanceResult::Continue)
             }
-            ScanPhase::SchemaQuery => {
+            ScanPhase::SchemaQuery(_) => {
                 // After schema query, check if schema has 'sidecar' column
                 let has_sidecar = self.check_schema_has_sidecar(&executed_plan);
                 if has_sidecar {
                     // V2 checkpoint with sidecars - read manifest first
                     self.state.checkpoint_type = Some(CheckpointType::V2);
-                    self.phase = ScanPhase::CheckpointManifest;
+                    let manifest_plan = self.create_checkpoint_manifest_plan()?;
+                    self.phase = ScanPhase::CheckpointManifest(manifest_plan);
                 } else {
                     // Classic single-part checkpoint - read directly
                     self.state.checkpoint_type = Some(CheckpointType::Classic);
-                    self.phase = ScanPhase::CheckpointLeaf;
+                    let leaf_plan = self.create_checkpoint_leaf_plan()?;
+                    self.phase = ScanPhase::CheckpointLeaf(leaf_plan);
                 }
                 Ok(AdvanceResult::Continue)
             }
-            ScanPhase::CheckpointManifest => {
+            ScanPhase::CheckpointManifest(_) => {
                 // After manifest, extract sidecar files and read the checkpoint + sidecars
                 self.extract_sidecar_files(&executed_plan)?;
-                self.phase = ScanPhase::CheckpointLeaf;
+                let leaf_plan = self.create_checkpoint_leaf_plan()?;
+                self.phase = ScanPhase::CheckpointLeaf(leaf_plan);
                 Ok(AdvanceResult::Continue)
             }
-            ScanPhase::CheckpointLeaf => {
+            ScanPhase::CheckpointLeaf(_) => {
                 // Complete
                 self.phase = ScanPhase::Complete;
                 Ok(AdvanceResult::Done(self.build_result()))
@@ -1006,61 +1031,40 @@ impl ScanStateMachine {
     // Plan Creation Helpers
     // =========================================================================
 
-    fn create_commit_plan(&self) -> DeltaResult<DeclarativePlanNode> {
-        use crate::schema::{DataType, MapType, StructField, StructType};
+    /// Static version of create_commit_plan for use in constructors.
+    fn create_commit_plan_static(state: &ScanBuildState) -> DeltaResult<CommitPhasePlan> {
+        use crate::actions::{get_commit_schema, ADD_NAME, REMOVE_NAME};
+        use crate::scan::log_replay::{get_add_transform_expr, SCAN_ROW_SCHEMA};
 
         // Schema for reading add/remove actions from commit files
-        let partition_values_type: DataType =
-            MapType::new(DataType::STRING, DataType::STRING, true).into();
-        let add_schema = DataType::struct_type_unchecked(vec![
-            StructField::not_null("path", DataType::STRING),
-            StructField::nullable("partitionValues", partition_values_type),
-            StructField::not_null("size", DataType::LONG),
-            StructField::nullable("modificationTime", DataType::LONG),
-            StructField::nullable("dataChange", DataType::BOOLEAN),
-            StructField::nullable("stats", DataType::STRING),
-        ]);
+        // Use the standard schema from actions module which includes all required fields
+        let schema = get_commit_schema().project(&[ADD_NAME, REMOVE_NAME])?;
 
-        let remove_schema = DataType::struct_type_unchecked(vec![
-            StructField::not_null("path", DataType::STRING),
-            StructField::nullable("deletionTimestamp", DataType::LONG),
-            StructField::nullable("dataChange", DataType::BOOLEAN),
-        ]);
+        // Use the standard scan row schema and transform expression from log_replay
+        let output_schema = SCAN_ROW_SCHEMA.clone();
+        let transform_expr = get_add_transform_expr();
 
-        let schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::nullable("add", add_schema),
-            StructField::nullable("remove", remove_schema),
-        ]));
-
-        // Create scan node
-        let scan = DeclarativePlanNode::Scan(ScanNode {
-            file_type: FileType::Json,
-            files: self.state.commit_files.clone(),
-            schema: schema.clone(),
-        });
-
-        // Add dedup KDF filter with typed state
-        let filter = DeclarativePlanNode::FilterByKDF {
-            child: Box::new(scan),
-            node: FilterByKDF::with_state(self.state.dedup_state.clone()),
-        };
-
-        // Project to output schema
-        let output_schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::nullable("path", DataType::STRING),
-            StructField::nullable("size", DataType::LONG),
-        ]));
-
-        Ok(DeclarativePlanNode::Select {
-            child: Box::new(filter),
-            node: SelectNode {
-                columns: vec![],
+        Ok(CommitPhasePlan {
+            scan: ScanNode {
+                file_type: FileType::Json,
+                files: state.commit_files.clone(),
+                schema,
+            },
+            data_skipping: None,
+            dedup_filter: FilterByKDF::with_state(state.dedup_state.clone()),
+            project: SelectNode {
+                columns: vec![transform_expr],
                 output_schema,
             },
+            sink: SinkNode::results(), // Result sink - streams file actions
         })
     }
 
-    fn create_checkpoint_manifest_plan(&self) -> DeltaResult<DeclarativePlanNode> {
+    fn create_commit_plan(&self) -> DeltaResult<CommitPhasePlan> {
+        Self::create_commit_plan_static(&self.state)
+    }
+
+    fn create_checkpoint_manifest_plan(&self) -> DeltaResult<CheckpointManifestPlan> {
         use crate::schema::{DataType, StructField, StructType};
 
         // Schema for v2 checkpoint manifest
@@ -1072,14 +1076,27 @@ impl ScanStateMachine {
             ]),
         )]));
 
-        Ok(DeclarativePlanNode::Scan(ScanNode {
-            file_type: FileType::Parquet,
-            files: vec![], // Would be populated with manifest file
-            schema,
-        }))
+        // Output schema for sidecar file paths
+        let output_schema = Arc::new(StructType::new_unchecked(vec![
+            StructField::not_null("path", DataType::STRING),
+            StructField::not_null("sizeInBytes", DataType::LONG),
+        ]));
+
+        Ok(CheckpointManifestPlan {
+            scan: ScanNode {
+                file_type: FileType::Parquet,
+                files: vec![], // Would be populated with manifest file
+                schema,
+            },
+            project: SelectNode {
+                columns: vec![],
+                output_schema,
+            },
+            sink: SinkNode::drop(), // Drop sink - side effect only (collects sidecar paths)
+        })
     }
 
-    fn create_checkpoint_leaf_plan(&self) -> DeltaResult<DeclarativePlanNode> {
+    fn create_checkpoint_leaf_plan(&self) -> DeltaResult<CheckpointLeafPlan> {
         use crate::schema::{DataType, StructField, StructType};
 
         // Schema for reading add actions from checkpoint files
@@ -1091,34 +1108,28 @@ impl ScanStateMachine {
             ]),
         )]));
 
-        let scan = DeclarativePlanNode::Scan(ScanNode {
-            file_type: FileType::Parquet,
-            files: self.state.checkpoint_files.clone(),
-            schema: schema.clone(),
-        });
-
-        // Add checkpoint dedup KDF filter with typed state
-        let filter = DeclarativePlanNode::FilterByKDF {
-            child: Box::new(scan),
-            node: FilterByKDF::checkpoint_dedup(),
-        };
-
-        // Project
+        // Project to output schema
         let output_schema = Arc::new(StructType::new_unchecked(vec![
             StructField::nullable("path", DataType::STRING),
             StructField::nullable("size", DataType::LONG),
         ]));
 
-        Ok(DeclarativePlanNode::Select {
-            child: Box::new(filter),
-            node: SelectNode {
+        Ok(CheckpointLeafPlan {
+            scan: ScanNode {
+                file_type: FileType::Parquet,
+                files: self.state.checkpoint_files.clone(),
+                schema,
+            },
+            dedup_filter: FilterByKDF::checkpoint_dedup(),
+            project: SelectNode {
                 columns: vec![],
                 output_schema,
             },
+            sink: SinkNode::results(), // Result sink - streams file actions
         })
     }
 
-    fn create_schema_query_plan(&self) -> DeltaResult<DeclarativePlanNode> {
+    fn create_schema_query_plan(&self) -> DeltaResult<SchemaQueryPhasePlan> {
         // Get the first checkpoint file path for schema query
         let file_path = self
             .state
@@ -1127,9 +1138,10 @@ impl ScanStateMachine {
             .map(|f| f.location.to_string())
             .unwrap_or_default();
 
-        Ok(DeclarativePlanNode::SchemaQuery(
-            SchemaQueryNode::schema_store(file_path),
-        ))
+        Ok(SchemaQueryPhasePlan {
+            schema_query: SchemaQueryNode::schema_store(file_path),
+            sink: SinkNode::drop(), // Drop sink - schema query produces no user-facing data
+        })
     }
 
     /// Check if the executed schema query plan's schema contains a 'sidecar' column.

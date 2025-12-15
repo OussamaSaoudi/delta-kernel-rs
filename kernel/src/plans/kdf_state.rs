@@ -152,7 +152,7 @@ impl AddRemoveDedupState {
         batch: &dyn EngineData,
         selection: BooleanArray,
     ) -> DeltaResult<BooleanArray> {
-        use crate::arrow::array::{Array, StringArray};
+        use crate::arrow::array::{Array, AsArray, StringArray};
         use crate::engine::arrow_data::ArrowEngineData;
         use crate::AsAny;
 
@@ -165,26 +165,28 @@ impl AddRemoveDedupState {
         let record_batch = arrow_data.record_batch();
         let num_rows = record_batch.num_rows();
 
-        // Get the path column - try "path" or "add.path"
+        // Get the path column from nested add.path struct
         let path_col = record_batch
-            .column_by_name("path")
-            .or_else(|| record_batch.column_by_name("add.path"));
+            .column_by_name("add")
+            .and_then(|col| col.as_struct_opt())
+            .and_then(|s| s.column_by_name("path"));
 
         let path_array = match path_col {
             Some(col) => col
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| Error::generic("path column is not a string array"))?,
+                .ok_or_else(|| Error::generic("add.path column is not a string array"))?,
             None => {
-                // No path column - return selection unchanged
+                // No add.path column - return selection unchanged (row has no add action)
                 return Ok(selection);
             }
         };
 
-        // Get optional deletion vector column for unique ID
+        // Get optional deletion vector column from nested add.deletionVector struct
         let dv_col = record_batch
-            .column_by_name("deletionVector")
-            .or_else(|| record_batch.column_by_name("add.deletionVector"));
+            .column_by_name("add")
+            .and_then(|col| col.as_struct_opt())
+            .and_then(|s| s.column_by_name("deletionVector"));
 
         let dv_array = dv_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
 
@@ -316,7 +318,7 @@ impl CheckpointDedupState {
         batch: &dyn EngineData,
         selection: BooleanArray,
     ) -> DeltaResult<BooleanArray> {
-        use crate::arrow::array::{Array, StringArray};
+        use crate::arrow::array::{Array, AsArray, StringArray};
         use crate::engine::arrow_data::ArrowEngineData;
         use crate::AsAny;
 
@@ -329,26 +331,28 @@ impl CheckpointDedupState {
         let record_batch = arrow_data.record_batch();
         let num_rows = record_batch.num_rows();
 
-        // Get the path column - try "path" or "add.path"
+        // Get the path column from nested add.path struct
         let path_col = record_batch
-            .column_by_name("path")
-            .or_else(|| record_batch.column_by_name("add.path"));
+            .column_by_name("add")
+            .and_then(|col| col.as_struct_opt())
+            .and_then(|s| s.column_by_name("path"));
 
         let path_array = match path_col {
             Some(col) => col
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| Error::generic("path column is not a string array"))?,
+                .ok_or_else(|| Error::generic("add.path column is not a string array"))?,
             None => {
-                // No path column - return selection unchanged
+                // No add.path column - return selection unchanged
                 return Ok(selection);
             }
         };
 
-        // Get optional deletion vector column for unique ID
+        // Get optional deletion vector column from nested add.deletionVector
         let dv_col = record_batch
-            .column_by_name("deletionVector")
-            .or_else(|| record_batch.column_by_name("add.deletionVector"));
+            .column_by_name("add")
+            .and_then(|col| col.as_struct_opt())
+            .and_then(|s| s.column_by_name("deletionVector"));
 
         let dv_array = dv_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
 
@@ -434,9 +438,18 @@ impl CheckpointDedupState {
 ///
 /// Used for schema query operations where we need to capture schema from
 /// parquet file footers.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SchemaStoreState {
-    schema: Option<SchemaRef>,
+    /// Uses OnceLock for thread-safe, one-time initialization during execution
+    schema: std::sync::OnceLock<SchemaRef>,
+}
+
+impl Default for SchemaStoreState {
+    fn default() -> Self {
+        Self {
+            schema: std::sync::OnceLock::new(),
+        }
+    }
 }
 
 impl SchemaStoreState {
@@ -445,19 +458,14 @@ impl SchemaStoreState {
         Self::default()
     }
 
-    /// Store a schema.
-    pub fn store(&mut self, schema: SchemaRef) {
-        self.schema = Some(schema);
+    /// Store a schema. Can only be called once; subsequent calls are ignored.
+    pub fn store(&self, schema: SchemaRef) {
+        let _ = self.schema.set(schema);
     }
 
     /// Get the stored schema, if any.
     pub fn get(&self) -> Option<&SchemaRef> {
-        self.schema.as_ref()
-    }
-
-    /// Take the stored schema, leaving None.
-    pub fn take(&mut self) -> Option<SchemaRef> {
-        self.schema.take()
+        self.schema.get()
     }
 }
 
@@ -1762,9 +1770,19 @@ mod tests {
     use std::sync::Arc;
 
     fn create_test_batch(paths: &[&str]) -> ArrowEngineData {
-        let schema = Schema::new(vec![Field::new("path", DataType::Utf8, false)]);
+        use crate::arrow::array::StructArray;
+        use crate::arrow::datatypes::Fields;
+        
         let path_array = StringArray::from(paths.to_vec());
-        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(path_array)]).unwrap();
+        let add_fields = Fields::from(vec![Field::new("path", DataType::Utf8, true)]);
+        let add_struct = StructArray::from(vec![(
+            Arc::new(Field::new("path", DataType::Utf8, true)),
+            Arc::new(path_array) as Arc<dyn crate::arrow::array::Array>,
+        )]);
+        let schema = Schema::new(vec![
+            Field::new("add", DataType::Struct(add_fields), true),
+        ]);
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(add_struct)]).unwrap();
         ArrowEngineData::new(batch)
     }
 
