@@ -272,6 +272,14 @@ impl From<&MetadataLoadPlan> for proto::MetadataLoadPlan {
     }
 }
 
+impl From<&SchemaQueryPhasePlan> for proto::SchemaQueryPhasePlan {
+    fn from(plan: &SchemaQueryPhasePlan) -> Self {
+        proto::SchemaQueryPhasePlan {
+            schema_query: Some((&plan.schema_query).into()),
+        }
+    }
+}
+
 // =============================================================================
 // Snapshot Phase Conversion: Rust -> Proto
 // =============================================================================

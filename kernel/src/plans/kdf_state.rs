@@ -16,7 +16,9 @@ use std::sync::Arc;
 use url::Url;
 
 use crate::arrow::array::BooleanArray;
+use crate::listed_log_files::ListedLogFiles;
 use crate::log_replay::FileActionKey;
+use crate::log_segment::LogSegment;
 use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::schema::SchemaRef;
 use crate::{DeltaResult, EngineData, Error, FileMeta, Version};
@@ -780,6 +782,32 @@ impl LogSegmentBuilderState {
     pub fn take_error(&mut self) -> Option<String> {
         self.error.take()
     }
+
+    /// Convert the accumulated state into a LogSegment.
+    ///
+    /// This finalizes the state and builds a LogSegment from the accumulated files.
+    /// Returns an error if there was a processing error or if the log segment is invalid.
+    pub fn into_log_segment(mut self) -> DeltaResult<LogSegment> {
+        // Check for errors first
+        if let Some(error) = self.error.take() {
+            return Err(Error::generic(error));
+        }
+
+        // Finalize the state
+        self.finalize();
+
+        // Build ListedLogFiles
+        let listed_files = ListedLogFiles::try_new(
+            self.ascending_commit_files,
+            self.ascending_compaction_files,
+            self.checkpoint_parts,
+            self.latest_crc_file,
+            self.latest_commit_file,
+        )?;
+
+        // Build LogSegment
+        LogSegment::try_new(listed_files, self.log_root, self.end_version)
+    }
 }
 
 // =============================================================================
@@ -1092,6 +1120,171 @@ impl MetadataProtocolReaderState {
 }
 
 // =============================================================================
+// SidecarCollectorState - Collects sidecar file paths from manifest scan
+// =============================================================================
+
+/// State for SidecarCollector consumer KDF - collects sidecar file paths from V2 checkpoint manifest.
+///
+/// This is a **Consumer KDF** that processes the scan results of a V2 checkpoint manifest
+/// and accumulates the sidecar file paths for subsequent checkpoint leaf reading.
+///
+/// # Usage Pattern
+///
+/// 1. Create state with `log_root` URL
+/// 2. Feed scanned rows from the checkpoint manifest through `apply()`
+/// 3. `apply()` returns `Ok(true)` to continue processing more rows
+/// 4. After completion, extract the sidecar files via `take_sidecar_files()`
+#[derive(Debug, Clone)]
+pub struct SidecarCollectorState {
+    /// Log directory root URL (used to construct full sidecar file paths)
+    pub log_root: Url,
+    /// Collected sidecar files
+    pub sidecar_files: Vec<FileMeta>,
+    /// Stored error to surface during advance()
+    pub error: Option<String>,
+}
+
+impl SidecarCollectorState {
+    /// Create new state for collecting sidecar files.
+    ///
+    /// # Arguments
+    /// * `log_root` - The log directory root URL
+    pub fn new(log_root: Url) -> Self {
+        Self {
+            log_root,
+            sidecar_files: Vec::new(),
+            error: None,
+        }
+    }
+
+    /// Apply consumer to a batch of manifest data.
+    ///
+    /// Returns:
+    /// - `Ok(true)` = Continue (keep feeding data)
+    /// - `Ok(false)` = Break (stop iteration, possibly due to error)
+    ///
+    /// The batch is expected to contain sidecar action data with columns:
+    /// - `sidecar.path`: String - relative path to sidecar file
+    /// - `sidecar.sizeInBytes`: Long - size of sidecar file in bytes
+    #[inline]
+    pub fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<bool> {
+        use crate::arrow::array::{Array, Int64Array, StringArray};
+        use crate::engine::arrow_data::ArrowEngineData;
+        use crate::AsAny;
+
+        // If we already have an error, stop processing
+        if self.error.is_some() {
+            return Ok(false);
+        }
+
+        // Try to get the batch as ArrowEngineData
+        let arrow_data = batch
+            .any_ref()
+            .downcast_ref::<ArrowEngineData>()
+            .ok_or_else(|| Error::generic("Expected ArrowEngineData for SidecarCollector"))?;
+
+        let record_batch = arrow_data.record_batch();
+        let num_rows = record_batch.num_rows();
+
+        if num_rows == 0 {
+            return Ok(true); // Continue with empty batch
+        }
+
+        // Get the sidecar path column - try "sidecar.path" or nested "path" under "sidecar"
+        let path_col = record_batch
+            .column_by_name("sidecar.path")
+            .or_else(|| record_batch.column_by_name("path"));
+
+        let path_array = match path_col {
+            Some(col) => col
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| Error::generic("sidecar.path column is not a StringArray"))?,
+            None => {
+                // No path column found - this shouldn't happen for valid manifest data
+                self.error = Some("Missing sidecar.path column in manifest batch".to_string());
+                return Ok(false);
+            }
+        };
+
+        // Get the sidecar size column (optional but useful)
+        let size_col = record_batch
+            .column_by_name("sidecar.sizeInBytes")
+            .or_else(|| record_batch.column_by_name("sizeInBytes"));
+
+        let size_array = size_col.and_then(|col| col.as_any().downcast_ref::<Int64Array>());
+
+        // Process each row
+        for i in 0..num_rows {
+            if path_array.is_null(i) {
+                continue;
+            }
+
+            let path_str = path_array.value(i);
+            let size = size_array
+                .and_then(|arr| if arr.is_null(i) { None } else { Some(arr.value(i) as u64) })
+                .unwrap_or(0);
+
+            // Construct full URL for the sidecar file
+            // Sidecar files are in _delta_log/_sidecars/ directory
+            let sidecar_url = match self.log_root.join("_sidecars/").and_then(|u| u.join(path_str)) {
+                Ok(url) => url,
+                Err(e) => {
+                    self.error = Some(format!("Failed to construct sidecar URL for '{}': {}", path_str, e));
+                    return Ok(false);
+                }
+            };
+
+            // Create FileMeta for the sidecar
+            let file_meta = FileMeta {
+                location: sidecar_url,
+                last_modified: 0, // Not available from manifest
+                size,
+            };
+
+            self.sidecar_files.push(file_meta);
+        }
+
+        Ok(true) // Continue processing
+    }
+
+    /// Finalize the state after iteration completes.
+    pub fn finalize(&mut self) {
+        // Nothing special needed for finalization
+    }
+
+    /// Check if any sidecar files were collected.
+    pub fn has_sidecars(&self) -> bool {
+        !self.sidecar_files.is_empty()
+    }
+
+    /// Get the number of collected sidecar files.
+    pub fn sidecar_count(&self) -> usize {
+        self.sidecar_files.len()
+    }
+
+    /// Check if an error occurred during processing.
+    pub fn has_error(&self) -> bool {
+        self.error.is_some()
+    }
+
+    /// Take the error, if any.
+    pub fn take_error(&mut self) -> Option<String> {
+        self.error.take()
+    }
+
+    /// Take the collected sidecar files.
+    pub fn take_sidecar_files(&mut self) -> Vec<FileMeta> {
+        std::mem::take(&mut self.sidecar_files)
+    }
+
+    /// Get a reference to the collected sidecar files.
+    pub fn get_sidecar_files(&self) -> &[FileMeta] {
+        &self.sidecar_files
+    }
+}
+
+// =============================================================================
 // ConsumerKdfState - Wrapper enum for consumer KDFs
 // =============================================================================
 
@@ -1111,6 +1304,8 @@ pub enum ConsumerKdfState {
     CheckpointHintReader(CheckpointHintReaderState),
     /// Extracts metadata and protocol from log files
     MetadataProtocolReader(MetadataProtocolReaderState),
+    /// Collects sidecar file paths from V2 checkpoint manifest
+    SidecarCollector(SidecarCollectorState),
 }
 
 impl ConsumerKdfState {
@@ -1125,6 +1320,7 @@ impl ConsumerKdfState {
             Self::LogSegmentBuilder(state) => state.apply(batch),
             Self::CheckpointHintReader(state) => state.apply(batch),
             Self::MetadataProtocolReader(state) => state.apply(batch),
+            Self::SidecarCollector(state) => state.apply(batch),
         }
     }
 
@@ -1134,6 +1330,7 @@ impl ConsumerKdfState {
             Self::LogSegmentBuilder(state) => state.finalize(),
             Self::CheckpointHintReader(state) => state.finalize(),
             Self::MetadataProtocolReader(state) => state.finalize(),
+            Self::SidecarCollector(state) => state.finalize(),
         }
     }
 
@@ -1143,6 +1340,7 @@ impl ConsumerKdfState {
             Self::LogSegmentBuilder(state) => state.has_error(),
             Self::CheckpointHintReader(state) => state.has_error(),
             Self::MetadataProtocolReader(state) => state.has_error(),
+            Self::SidecarCollector(state) => state.has_error(),
         }
     }
 
@@ -1156,6 +1354,9 @@ impl ConsumerKdfState {
                 state.take_error().map(Error::generic)
             }
             Self::MetadataProtocolReader(state) => {
+                state.take_error().map(Error::generic)
+            }
+            Self::SidecarCollector(state) => {
                 state.take_error().map(Error::generic)
             }
         }
@@ -2136,6 +2337,9 @@ mod tests {
                 assert!(!s.has_error());
             }
             ConsumerKdfState::MetadataProtocolReader(s) => {
+                assert!(!s.has_error());
+            }
+            ConsumerKdfState::SidecarCollector(s) => {
                 assert!(!s.has_error());
             }
         }

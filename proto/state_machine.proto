@@ -59,6 +59,12 @@ message CheckpointHintPlan {
   ConsumeByKDF hint_reader = 2;           // Consumer to extract checkpoint hint
 }
 
+// Plan for querying checkpoint schema to detect V2 checkpoints
+// Uses SchemaStoreState to capture the parquet footer schema
+message SchemaQueryPhasePlan {
+  SchemaQueryNode schema_query = 1;       // Query parquet file schema (footer only)
+}
+
 // =============================================================================
 // PHASE DATA (Dual Representation: struct + tree)
 // =============================================================================
@@ -94,6 +100,11 @@ message CheckpointHintData {
   DeclarativePlanNode query_plan = 2;
 }
 
+message SchemaQueryPhaseData {
+  SchemaQueryPhasePlan plan = 1;
+  DeclarativePlanNode query_plan = 2;
+}
+
 // =============================================================================
 // STATE MACHINE ENUMS (Per-operation)
 // =============================================================================
@@ -102,9 +113,10 @@ message CheckpointHintData {
 message LogReplayPhase {
   oneof phase {
     CommitPhaseData commit = 1;
-    CheckpointManifestData checkpoint_manifest = 2;
-    CheckpointLeafData checkpoint_leaf = 3;
-    LogReplayComplete complete = 4;
+    SchemaQueryPhaseData schema_query = 2;
+    CheckpointManifestData checkpoint_manifest = 3;
+    CheckpointLeafData checkpoint_leaf = 4;
+    LogReplayComplete complete = 5;
   }
 }
 
@@ -145,13 +157,14 @@ enum OperationType {
 enum PhaseType {
   PHASE_TYPE_UNSPECIFIED = 0;
   COMMIT = 1;
-  CHECKPOINT_MANIFEST = 2;
-  CHECKPOINT_LEAF = 3;
-  LIST_FILES = 4;
-  LOAD_METADATA = 5;
-  COMPLETE = 6;
-  READY = 7;
-  CHECKPOINT_HINT = 8;
+  SCHEMA_QUERY = 2;
+  CHECKPOINT_MANIFEST = 3;
+  CHECKPOINT_LEAF = 4;
+  LIST_FILES = 5;
+  LOAD_METADATA = 6;
+  COMPLETE = 7;
+  READY = 8;
+  CHECKPOINT_HINT = 9;
 }
 
 // Abstract representation of any state machine phase

@@ -104,6 +104,18 @@ pub struct CheckpointHintPlan {
     pub hint_reader: ConsumeByKDF,
 }
 
+/// Plan for querying checkpoint schema to detect V2 checkpoints.
+///
+/// Structure: SchemaQuery (parquet footer read only)
+///
+/// Used to determine if a single-part checkpoint is a V2 checkpoint with sidecars
+/// by checking if the schema contains a 'sidecar' column.
+#[derive(Debug, Clone)]
+pub struct SchemaQueryPhasePlan {
+    /// Query the parquet file schema (footer read only)
+    pub schema_query: SchemaQueryNode,
+}
+
 // =============================================================================
 // AsQueryPlan Implementations
 // =============================================================================
@@ -192,4 +204,8 @@ impl AsQueryPlan for CheckpointHintPlan {
     }
 }
 
-
+impl AsQueryPlan for SchemaQueryPhasePlan {
+    fn as_query_plan(&self) -> DeclarativePlanNode {
+        DeclarativePlanNode::SchemaQuery(self.schema_query.clone())
+    }
+}

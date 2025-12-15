@@ -1476,21 +1476,8 @@ mod tests {
             plan
         );
 
-        // Advance to LoadMetadata
-        let result = sm.advance(Ok(plan));
-        assert!(matches!(result, Ok(AdvanceResult::Continue)));
-        assert_eq!(sm.phase_name(), "LoadMetadata");
-
-        // Get final plan - LoadMetadata returns ConsumeByKDF (MetadataProtocolReader) wrapping a Scan
-        let plan = sm.get_plan().unwrap();
-        assert!(
-            matches!(plan, DeclarativePlanNode::ConsumeByKDF { .. }),
-            "Expected ConsumeByKDF, got {:?}",
-            plan
-        );
-
-        // Advance to Complete - this will fail without real data because we need
-        // actual log files to construct a Snapshot. This is expected behavior.
+        // Advance to LoadMetadata - this will fail without real data because we need
+        // actual log files to construct a LogSegment. This is expected behavior.
         // The state machine is designed to be driven by an executor that provides real data.
         let result = sm.advance(Ok(plan));
         // Without real data, we expect an error (no log files in segment)

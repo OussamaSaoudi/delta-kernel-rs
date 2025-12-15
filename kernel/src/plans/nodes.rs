@@ -11,7 +11,7 @@ use crate::FileMeta;
 
 use crate::Version;
 
-use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState, MetadataProtocolReaderState, SchemaReaderState, SchemaStoreState};
+use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState, MetadataProtocolReaderState, SchemaReaderState, SchemaStoreState, SidecarCollectorState};
 
 // =============================================================================
 // Kernel-Defined Function (KDF) Type System
@@ -159,6 +159,19 @@ impl ConsumeByKDF {
     pub fn metadata_protocol_reader() -> Self {
         Self {
             state: ConsumerKdfState::MetadataProtocolReader(MetadataProtocolReaderState::new()),
+        }
+    }
+
+    /// Create a new SidecarCollector consumer.
+    ///
+    /// This consumer collects sidecar file paths from V2 checkpoint manifest scan results.
+    /// Used during log replay to gather sidecar files for V2 checkpoints.
+    ///
+    /// # Arguments
+    /// * `log_root` - The log directory root URL (used to construct full sidecar paths)
+    pub fn sidecar_collector(log_root: url::Url) -> Self {
+        Self {
+            state: ConsumerKdfState::SidecarCollector(SidecarCollectorState::new(log_root)),
         }
     }
 
