@@ -39,16 +39,21 @@ message CheckpointLeafPlan {
 }
 
 // Plan for listing log files
+// Optionally includes a consumer KDF to build LogSegment from listing results
 message FileListingPhasePlan {
-  FileListingNode listing = 1;            // List files from _delta_log
-  FilterByExpressionNode filter = 2;      // Filter by version/type
-  FirstNonNullNode extract_hint = 3;      // Extract checkpoint hint if present
+  FileListingNode listing = 1;                        // List files from _delta_log
+  optional ConsumeByKDF log_segment_builder = 2;      // Optional consumer to build LogSegment
 }
 
 // Plan for loading table metadata
 message MetadataLoadPlan {
   ScanNode scan = 1;                      // Scan protocol/metadata files
   FirstNonNullNode extract = 2;           // Extract first non-null values
+}
+
+// Plan for reading checkpoint hint file (_last_checkpoint)
+message CheckpointHintPlan {
+  ScanNode scan = 1;                      // Scan _last_checkpoint JSON file
 }
 
 // =============================================================================
@@ -81,6 +86,11 @@ message MetadataLoadData {
   DeclarativePlanNode query_plan = 2;
 }
 
+message CheckpointHintData {
+  CheckpointHintPlan plan = 1;
+  DeclarativePlanNode query_plan = 2;
+}
+
 // =============================================================================
 // STATE MACHINE ENUMS (Per-operation)
 // =============================================================================
@@ -102,9 +112,10 @@ message LogReplayComplete {
 // Snapshot building state machine phases
 message SnapshotBuildPhase {
   oneof phase {
-    FileListingPhaseData list_files = 1;
-    MetadataLoadData load_metadata = 2;
-    SnapshotReady ready = 3;
+    CheckpointHintData checkpoint_hint = 1;
+    FileListingPhaseData list_files = 2;
+    MetadataLoadData load_metadata = 3;
+    SnapshotReady ready = 4;
   }
 }
 
@@ -137,6 +148,7 @@ enum PhaseType {
   LOAD_METADATA = 5;
   COMPLETE = 6;
   READY = 7;
+  CHECKPOINT_HINT = 8;
 }
 
 // Abstract representation of any state machine phase

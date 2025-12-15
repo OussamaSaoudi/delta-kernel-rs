@@ -12,6 +12,8 @@ use crate::{DeltaResult, Error};
 use super::nodes::*;
 use super::declarative::DeclarativePlanNode;
 use super::composite::*;
+use super::state_machines::SnapshotPhase;
+use super::AsQueryPlan;
 
 // =============================================================================
 // FileType Conversion
@@ -97,6 +99,16 @@ impl From<&FilterByKDF> for proto::FilterByKdf {
     }
 }
 
+impl From<&ConsumeByKDF> for proto::ConsumeByKdf {
+    fn from(node: &ConsumeByKDF) -> Self {
+        // Convert typed state to raw pointer for FFI
+        // Clone the state since we're taking ownership for the raw pointer
+        proto::ConsumeByKdf {
+            state_ptr: node.state.clone().into_raw(),
+        }
+    }
+}
+
 impl From<&SchemaQueryNode> for proto::SchemaQueryNode {
     fn from(node: &SchemaQueryNode) -> Self {
         // Convert typed state to raw pointer for FFI
@@ -156,6 +168,12 @@ impl From<&DeclarativePlanNode> for proto::DeclarativePlanNode {
             DeclarativePlanNode::SchemaQuery(n) => Node::SchemaQuery(n.into()),
             DeclarativePlanNode::FilterByKDF { child, node: n } => {
                 Node::FilterByKdf(Box::new(proto::FilterByKdfPlan {
+                    child: Some(Box::new(child.as_ref().into())),
+                    node: Some(n.into()),
+                }))
+            }
+            DeclarativePlanNode::ConsumeByKDF { child, node: n } => {
+                Node::ConsumeByKdf(Box::new(proto::ConsumeByKdfPlan {
                     child: Some(Box::new(child.as_ref().into())),
                     node: Some(n.into()),
                 }))
@@ -223,6 +241,65 @@ impl From<&CheckpointLeafPlan> for proto::CheckpointLeafPlan {
             scan: Some((&plan.scan).into()),
             dedup_filter: plan.dedup_filter.as_ref().map(|f| f.into()),
             project: Some((&plan.project).into()),
+        }
+    }
+}
+
+impl From<&CheckpointHintPlan> for proto::CheckpointHintPlan {
+    fn from(plan: &CheckpointHintPlan) -> Self {
+        proto::CheckpointHintPlan {
+            scan: Some((&plan.scan).into()),
+        }
+    }
+}
+
+impl From<&FileListingPhasePlan> for proto::FileListingPhasePlan {
+    fn from(plan: &FileListingPhasePlan) -> Self {
+        proto::FileListingPhasePlan {
+            listing: Some((&plan.listing).into()),
+            log_segment_builder: plan.log_segment_builder.as_ref().map(|c| c.into()),
+        }
+    }
+}
+
+impl From<&MetadataLoadPlan> for proto::MetadataLoadPlan {
+    fn from(plan: &MetadataLoadPlan) -> Self {
+        proto::MetadataLoadPlan {
+            scan: Some((&plan.scan).into()),
+            extract: Some((&plan.extract).into()),
+        }
+    }
+}
+
+// =============================================================================
+// Snapshot Phase Conversion: Rust -> Proto
+// =============================================================================
+
+impl From<&SnapshotPhase> for proto::SnapshotBuildPhase {
+    fn from(phase: &SnapshotPhase) -> Self {
+        use proto::snapshot_build_phase::Phase;
+
+        let phase_variant = match phase {
+            SnapshotPhase::CheckpointHint(p) => Phase::CheckpointHint(proto::CheckpointHintData {
+                plan: Some(p.into()),
+                query_plan: Some((&p.as_query_plan()).into()),
+            }),
+            SnapshotPhase::ListFiles(p) => Phase::ListFiles(proto::FileListingPhaseData {
+                plan: Some(p.into()),
+                query_plan: Some((&p.as_query_plan()).into()),
+            }),
+            SnapshotPhase::LoadMetadata(p) => Phase::LoadMetadata(proto::MetadataLoadData {
+                plan: Some(p.into()),
+                query_plan: Some((&p.as_query_plan()).into()),
+            }),
+            SnapshotPhase::Complete => Phase::Ready(proto::SnapshotReady {
+                version: 0, // TODO: populate from actual snapshot data
+                table_schema: None,
+            }),
+        };
+
+        proto::SnapshotBuildPhase {
+            phase: Some(phase_variant),
         }
     }
 }

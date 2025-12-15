@@ -60,6 +60,9 @@ impl DeclarativePlanExecutor {
             DeclarativePlanNode::FilterByKDF { child, node } => {
                 self.execute_filter_by_kdf(*child, node)
             }
+            DeclarativePlanNode::ConsumeByKDF { child, node } => {
+                self.execute_consume_by_kdf(*child, node)
+            }
             DeclarativePlanNode::FilterByExpression { child, node } => {
                 self.execute_filter_by_expr(*child, node)
             }
@@ -168,6 +171,47 @@ impl DeclarativePlanExecutor {
                 selection_vector: new_selection_vec,
             })
         })))
+    }
+
+    /// Execute a ConsumeByKDF node using a consumer kernel-defined function.
+    ///
+    /// Unlike FilterByKDF which returns per-row selection vectors, ConsumeByKDF
+    /// processes batches and returns Continue/Break control flow:
+    /// - `true` (Continue): Keep feeding data
+    /// - `false` (Break): Stop iteration
+    ///
+    /// Consumer KDFs accumulate state across batches but don't produce output data.
+    /// Any error stored in the consumer state is surfaced after iteration completes.
+    fn execute_consume_by_kdf(
+        &self,
+        child: DeclarativePlanNode,
+        mut node: ConsumeByKDF,
+    ) -> DeltaResult<FilteredDataIter> {
+        let child_iter = self.execute(child)?;
+
+        // Process batches until Break or error
+        for result in child_iter {
+            let FilteredEngineData { engine_data, .. } = result?;
+
+            // Apply the Consumer KDF
+            match node.state.apply(engine_data.as_ref()) {
+                Ok(true) => continue,  // Continue
+                Ok(false) => break,    // Break
+                Err(e) => return Err(e), // Error surfaces immediately
+            }
+        }
+
+        // Finalize the consumer state
+        node.state.finalize();
+
+        // Check for any error that occurred during consumption
+        if let Some(err) = node.state.take_error() {
+            return Err(err);
+        }
+
+        // Consumer KDFs don't produce output data - return empty iterator
+        // The accumulated state is accessed through the node reference
+        Ok(Box::new(std::iter::empty()))
     }
 
     /// Execute a FilterByExpression node - evaluates a predicate expression.
@@ -1417,18 +1461,27 @@ mod tests {
         assert!(matches!(result, Ok(AdvanceResult::Continue)));
         assert_eq!(sm.phase_name(), "ListFiles");
 
-        // Get next plan
+        // Get next plan - now wrapped in ConsumeByKDF for LogSegmentBuilder
         let plan = sm.get_plan().unwrap();
-        assert!(matches!(plan, DeclarativePlanNode::FileListing(_)));
+        assert!(
+            matches!(plan, DeclarativePlanNode::ConsumeByKDF { .. })
+                || matches!(plan, DeclarativePlanNode::FileListing(_)),
+            "Expected ConsumeByKDF or FileListing, got {:?}",
+            plan
+        );
 
         // Advance to LoadMetadata
         let result = sm.advance(Ok(plan));
         assert!(matches!(result, Ok(AdvanceResult::Continue)));
         assert_eq!(sm.phase_name(), "LoadMetadata");
 
-        // Get final plan
+        // Get final plan - LoadMetadata returns FirstNonNull wrapping a Scan
         let plan = sm.get_plan().unwrap();
-        assert!(matches!(plan, DeclarativePlanNode::Scan(_)));
+        assert!(
+            matches!(plan, DeclarativePlanNode::FirstNonNull { .. }),
+            "Expected FirstNonNull, got {:?}",
+            plan
+        );
 
         // Advance to Complete - this will fail without real data because we need
         // actual log files to construct a Snapshot. This is expected behavior.

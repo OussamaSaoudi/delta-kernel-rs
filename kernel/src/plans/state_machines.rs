@@ -59,8 +59,8 @@ use crate::{DeltaResult, Error};
 
 use super::composite::*;
 use super::declarative::DeclarativePlanNode;
-use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, FilterKdfState};
-use super::nodes::{FileType, FilterByKDF, ScanNode, SelectNode};
+use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState};
+use super::nodes::{ConsumeByKDF, FileListingNode, FileType, FilterByKDF, FirstNonNullNode, ScanNode, SelectNode};
 use super::AsQueryPlan;
 
 // =============================================================================
@@ -470,6 +470,10 @@ impl LogReplayStateMachine {
                 // Recurse into child
                 self.extract_kdf_state_recursive(child)
             }
+            // ConsumeByKDF state is handled separately (it's a consumer, not a filter)
+            DeclarativePlanNode::ConsumeByKDF { child, .. } => {
+                self.extract_kdf_state_recursive(child)
+            }
             // Recursively check children
             DeclarativePlanNode::FilterByExpression { child, .. }
             | DeclarativePlanNode::Select { child, .. }
@@ -590,26 +594,76 @@ impl StateMachine for LogReplayStateMachine {
 // Snapshot State Machine
 // =============================================================================
 
-/// Phase of the snapshot state machine.
+/// Phase of the snapshot state machine with embedded typed plans.
+///
+/// Each variant contains the compile-time typed plan struct for that phase.
+/// Use `as_query_plan()` to convert to runtime `DeclarativePlanNode`.
 #[derive(Debug, Clone)]
 pub enum SnapshotPhase {
     /// Read _last_checkpoint hint file
-    CheckpointHint,
+    CheckpointHint(CheckpointHintPlan),
     /// List files in _delta_log directory
-    ListFiles,
+    ListFiles(FileListingPhasePlan),
     /// Read protocol and metadata from log files
-    LoadMetadata,
+    LoadMetadata(MetadataLoadPlan),
     /// Snapshot is ready
     Complete,
 }
 
 impl SnapshotPhase {
-    fn phase_name(&self) -> &'static str {
+    /// Get the query plan for the current phase (if not complete).
+    pub fn as_query_plan(&self) -> Option<DeclarativePlanNode> {
         match self {
-            Self::CheckpointHint => "CheckpointHint",
-            Self::ListFiles => "ListFiles",
-            Self::LoadMetadata => "LoadMetadata",
+            Self::CheckpointHint(p) => Some(p.as_query_plan()),
+            Self::ListFiles(p) => Some(p.as_query_plan()),
+            Self::LoadMetadata(p) => Some(p.as_query_plan()),
+            Self::Complete => None,
+        }
+    }
+
+    /// Check if this is a terminal state.
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    /// Get the phase name for debugging/logging.
+    pub fn phase_name(&self) -> &'static str {
+        match self {
+            Self::CheckpointHint(_) => "CheckpointHint",
+            Self::ListFiles(_) => "ListFiles",
+            Self::LoadMetadata(_) => "LoadMetadata",
             Self::Complete => "Complete",
+        }
+    }
+}
+
+impl AsDeclarativePhase for SnapshotPhase {
+    fn as_declarative_phase(&self) -> DeclarativePhase {
+        match self {
+            Self::CheckpointHint(plan) => DeclarativePhase {
+                operation: OperationType::SnapshotBuild,
+                phase_type: PhaseType::CheckpointHint,
+                query_plan: Some(plan.as_query_plan()),
+                terminal_data: None,
+            },
+            Self::ListFiles(plan) => DeclarativePhase {
+                operation: OperationType::SnapshotBuild,
+                phase_type: PhaseType::ListFiles,
+                query_plan: Some(plan.as_query_plan()),
+                terminal_data: None,
+            },
+            Self::LoadMetadata(plan) => DeclarativePhase {
+                operation: OperationType::SnapshotBuild,
+                phase_type: PhaseType::LoadMetadata,
+                query_plan: Some(plan.as_query_plan()),
+                terminal_data: None,
+            },
+            Self::Complete => DeclarativePhase {
+                operation: OperationType::SnapshotBuild,
+                phase_type: PhaseType::Complete,
+                query_plan: None,
+                terminal_data: None,
+            },
         }
     }
 }
@@ -684,7 +738,7 @@ impl SnapshotBuildState {
 /// ```
 #[derive(Debug)]
 pub struct SnapshotStateMachine {
-    /// Current phase
+    /// Current phase 
     phase: SnapshotPhase,
     /// Accumulated state
     state: SnapshotBuildState,
@@ -694,8 +748,9 @@ impl SnapshotStateMachine {
     /// Create a new snapshot state machine for a table.
     pub fn new(table_root: Url) -> DeltaResult<Self> {
         let state = SnapshotBuildState::new(table_root)?;
+        let initial_plan = Self::create_checkpoint_hint_plan(&state)?;
         Ok(Self {
-            phase: SnapshotPhase::CheckpointHint,
+            phase: SnapshotPhase::CheckpointHint(initial_plan),
             state,
         })
     }
@@ -719,12 +774,14 @@ impl SnapshotStateMachine {
 
     /// Get the plan for the current phase.
     pub fn get_plan(&self) -> DeltaResult<DeclarativePlanNode> {
-        match &self.phase {
-            SnapshotPhase::CheckpointHint => self.create_checkpoint_hint_plan(),
-            SnapshotPhase::ListFiles => self.create_list_files_plan(),
-            SnapshotPhase::LoadMetadata => self.create_load_metadata_plan(),
-            SnapshotPhase::Complete => Err(Error::generic("Cannot get plan from Complete state")),
-        }
+        self.phase
+            .as_query_plan()
+            .ok_or_else(|| Error::generic("Cannot get plan from Complete state"))
+    }
+
+    /// Get the declarative phase (for runtime inspection).
+    pub fn as_declarative_phase(&self) -> DeclarativePhase {
+        self.phase.as_declarative_phase()
     }
 
     /// Advance the state machine with the result of plan execution.
@@ -733,20 +790,25 @@ impl SnapshotStateMachine {
         result: DeltaResult<DeclarativePlanNode>,
     ) -> DeltaResult<AdvanceResult<Snapshot>> {
         // Propagate execution errors
-        let _executed_plan = result?;
+        let executed_plan = result?;
 
         match &self.phase {
-            SnapshotPhase::CheckpointHint => {
-                // Move to ListFiles phase
-                self.phase = SnapshotPhase::ListFiles;
+            SnapshotPhase::CheckpointHint(_) => {
+                // Move to ListFiles phase with its plan
+                let list_files_plan = Self::create_list_files_plan(&self.state)?;
+                self.phase = SnapshotPhase::ListFiles(list_files_plan);
                 Ok(AdvanceResult::Continue)
             }
-            SnapshotPhase::ListFiles => {
-                // Move to LoadMetadata phase
-                self.phase = SnapshotPhase::LoadMetadata;
+            SnapshotPhase::ListFiles(_) => {
+                // Extract consumer KDF state from the executed plan
+                self.extract_consumer_kdf_state(&executed_plan)?;
+                
+                // Move to LoadMetadata phase with its plan
+                let load_metadata_plan = Self::create_load_metadata_plan(&self.state)?;
+                self.phase = SnapshotPhase::LoadMetadata(load_metadata_plan);
                 Ok(AdvanceResult::Continue)
             }
-            SnapshotPhase::LoadMetadata => {
+            SnapshotPhase::LoadMetadata(_) => {
                 // Complete - build the full Snapshot
                 self.phase = SnapshotPhase::Complete;
 
@@ -797,10 +859,10 @@ impl SnapshotStateMachine {
     // Plan Creation Helpers
     // =========================================================================
 
-    fn create_checkpoint_hint_plan(&self) -> DeltaResult<DeclarativePlanNode> {
+    fn create_checkpoint_hint_plan(state: &SnapshotBuildState) -> DeltaResult<CheckpointHintPlan> {
         use crate::schema::{DataType, StructField, StructType};
 
-        let checkpoint_path = self.state.log_root.join("_last_checkpoint")?;
+        let checkpoint_path = state.log_root.join("_last_checkpoint")?;
         let file_meta = FileMeta {
             location: checkpoint_path,
             last_modified: 0,
@@ -816,27 +878,32 @@ impl SnapshotStateMachine {
             StructField::nullable("numOfAddFiles", DataType::LONG),
         ]));
 
-        Ok(DeclarativePlanNode::Scan(ScanNode {
-            file_type: FileType::Json,
-            files: vec![file_meta],
-            schema: checkpoint_schema,
-        }))
+        Ok(CheckpointHintPlan {
+            scan: ScanNode {
+                file_type: FileType::Json,
+                files: vec![file_meta],
+                schema: checkpoint_schema,
+            },
+        })
     }
 
-    fn create_list_files_plan(&self) -> DeltaResult<DeclarativePlanNode> {
-        use super::nodes::FileListingNode;
-
-        // List files in the _delta_log directory
-        Ok(DeclarativePlanNode::FileListing(FileListingNode {
-            path: self.state.log_root.clone(),
-        }))
+    fn create_list_files_plan(state: &SnapshotBuildState) -> DeltaResult<FileListingPhasePlan> {
+        // List files in the _delta_log directory with LogSegmentBuilder consumer
+        Ok(FileListingPhasePlan {
+            listing: FileListingNode {
+                path: state.log_root.clone(),
+            },
+            log_segment_builder: Some(ConsumeByKDF::log_segment_builder(
+                state.log_root.clone(),
+                state.version.map(|v| v as u64),
+            )),
+        })
     }
 
-    fn create_load_metadata_plan(&self) -> DeltaResult<DeclarativePlanNode> {
+    fn create_load_metadata_plan(state: &SnapshotBuildState) -> DeltaResult<MetadataLoadPlan> {
         use crate::schema::{DataType, StructField, StructType};
 
-        // For now, create an empty scan - the actual implementation
-        // would scan the appropriate commit/checkpoint files
+        // Schema for reading protocol/metadata from log files
         let schema = Arc::new(StructType::new_unchecked(vec![
             StructField::nullable(
                 "protocol",
@@ -854,11 +921,63 @@ impl SnapshotStateMachine {
             ),
         ]));
 
-        Ok(DeclarativePlanNode::Scan(ScanNode {
-            file_type: FileType::Json,
-            files: vec![], // Would be populated with actual log files
-            schema,
-        }))
+        Ok(MetadataLoadPlan {
+            scan: ScanNode {
+                file_type: FileType::Json,
+                files: vec![], // Would be populated with actual log files from state
+                schema,
+            },
+            extract: FirstNonNullNode {
+                columns: vec!["protocol".to_string(), "metaData".to_string()],
+            },
+        })
+    }
+
+    /// Extract consumer KDF state from the executed plan and update snapshot build state.
+    ///
+    /// Walks the plan tree to find ConsumeByKDF nodes and extracts the accumulated
+    /// file listing data (commit files, checkpoint parts, etc.) into the snapshot state.
+    fn extract_consumer_kdf_state(&mut self, plan: &DeclarativePlanNode) -> DeltaResult<()> {
+        match plan {
+            DeclarativePlanNode::ConsumeByKDF { child: _, node } => {
+                // Extract LogSegmentBuilder state
+                match &node.state {
+                    ConsumerKdfState::LogSegmentBuilder(builder_state) => {
+                        // Check for errors first
+                        if let Some(ref error) = builder_state.error {
+                            return Err(Error::generic(error.clone()));
+                        }
+
+                        // Copy accumulated file data to snapshot state
+                        self.state.ascending_commit_files = builder_state.ascending_commit_files.clone();
+                        self.state.ascending_compaction_files = builder_state.ascending_compaction_files.clone();
+                        self.state.checkpoint_parts = builder_state.checkpoint_parts.clone();
+                        self.state.latest_crc_file = builder_state.latest_crc_file.clone();
+                        self.state.latest_commit_file = builder_state.latest_commit_file.clone();
+
+                        // Derive final version from the accumulated files
+                        if let Some(commit) = &builder_state.latest_commit_file {
+                            self.state.final_version = Some(commit.version as i64);
+                        } else if let Some(checkpoint) = builder_state.checkpoint_parts.first() {
+                            self.state.final_version = Some(checkpoint.version as i64);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            // Recursively check children
+            DeclarativePlanNode::FilterByKDF { child, .. }
+            | DeclarativePlanNode::FilterByExpression { child, .. }
+            | DeclarativePlanNode::Select { child, .. }
+            | DeclarativePlanNode::ParseJson { child, .. }
+            | DeclarativePlanNode::FirstNonNull { child, .. } => {
+                self.extract_consumer_kdf_state(child)
+            }
+            // Leaf nodes have no consumer state
+            DeclarativePlanNode::Scan(_)
+            | DeclarativePlanNode::FileListing(_)
+            | DeclarativePlanNode::SchemaQuery(_) => Ok(()),
+        }
     }
 }
 
@@ -1128,6 +1247,10 @@ impl ScanStateMachine {
                 }
                 self.extract_kdf_state_recursive(child)
             }
+            // ConsumeByKDF state is handled separately (it's a consumer, not a filter)
+            DeclarativePlanNode::ConsumeByKDF { child, .. } => {
+                self.extract_kdf_state_recursive(child)
+            }
             DeclarativePlanNode::FilterByExpression { child, .. }
             | DeclarativePlanNode::Select { child, .. }
             | DeclarativePlanNode::ParseJson { child, .. }
@@ -1322,6 +1445,8 @@ pub enum PhaseType {
     Complete,
     /// Snapshot/Scan ready - terminal state with data
     Ready,
+    /// Reading checkpoint hint file (_last_checkpoint)
+    CheckpointHint,
 }
 
 /// Declarative state machine phase - abstract representation for runtime interpretation.
@@ -1385,6 +1510,7 @@ impl DeclarativePhase {
             PhaseType::LoadMetadata => "LoadMetadata",
             PhaseType::Complete => "Complete",
             PhaseType::Ready => "Ready",
+            PhaseType::CheckpointHint => "CheckpointHint",
         }
     }
 
@@ -1485,6 +1611,8 @@ impl LogReplayPhase {
         // Walk the plan tree to find FilterByKDF nodes with state
         match plan {
             DeclarativePlanNode::FilterByKDF { child: _, node } => Ok(Some(node.state.clone())),
+            // ConsumeByKDF has different state type, recurse into child
+            DeclarativePlanNode::ConsumeByKDF { child, .. } => self.extract_kdf_state(child),
             // Recursively check children
             DeclarativePlanNode::FilterByExpression { child, .. }
             | DeclarativePlanNode::Select { child, .. }
@@ -1721,6 +1849,7 @@ impl From<PhaseType> for i32 {
             PhaseType::LoadMetadata => proto::PhaseType::LoadMetadata as i32,
             PhaseType::Complete => proto::PhaseType::Complete as i32,
             PhaseType::Ready => proto::PhaseType::Ready as i32,
+            PhaseType::CheckpointHint => proto::PhaseType::CheckpointHint as i32,
         }
     }
 }

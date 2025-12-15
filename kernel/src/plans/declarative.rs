@@ -50,6 +50,17 @@ pub enum DeclarativePlanNode {
         node: FilterByKDF,
     },
     
+    /// Consume using kernel-defined function (KDF) - returns Continue/Break
+    ///
+    /// Unlike FilterByKDF which returns a per-row selection vector, ConsumeByKDF
+    /// processes batches and returns a single boolean for control flow:
+    /// - `true` = Continue (keep feeding data)
+    /// - `false` = Break (stop iteration)
+    ConsumeByKDF {
+        child: Box<DeclarativePlanNode>,
+        node: ConsumeByKDF,
+    },
+    
     /// Filter using predicate expression
     FilterByExpression {
         child: Box<DeclarativePlanNode>,
@@ -122,6 +133,28 @@ impl DeclarativePlanNode {
         }
     }
 
+    /// Add a consumer KDF with LogSegmentBuilder state.
+    ///
+    /// The consumer will accumulate file listing results into a LogSegment.
+    pub fn consume_by_log_segment_builder(
+        self,
+        log_root: url::Url,
+        end_version: Option<crate::Version>,
+    ) -> Self {
+        Self::ConsumeByKDF {
+            child: Box::new(self),
+            node: ConsumeByKDF::log_segment_builder(log_root, end_version),
+        }
+    }
+
+    /// Add a consumer KDF with existing typed state.
+    pub fn consume_by_kdf_with_state(self, state: super::kdf_state::ConsumerKdfState) -> Self {
+        Self::ConsumeByKDF {
+            child: Box::new(self),
+            node: ConsumeByKDF::with_state(state),
+        }
+    }
+
     /// Add a predicate filter to this plan.
     pub fn filter_by_expr(self, predicate: std::sync::Arc<crate::Expression>) -> Self {
         Self::FilterByExpression {
@@ -181,6 +214,7 @@ impl DeclarativePlanNode {
             Self::Scan(_) | Self::FileListing(_) | Self::SchemaQuery(_) => vec![],
             // Unary nodes
             Self::FilterByKDF { child, .. }
+            | Self::ConsumeByKDF { child, .. }
             | Self::FilterByExpression { child, .. }
             | Self::Select { child, .. }
             | Self::ParseJson { child, .. }

@@ -37,7 +37,16 @@ message FileListingNode {
 
 // Filter using kernel-defined function (KDF) (e.g., AddRemoveDedup)
 // KDFs contain Delta-specific logic that engines must use via kernel FFI.
+// Returns per-row selection vector (BooleanArray).
 message FilterByKDF {
+  uint64 state_ptr = 1;  // Opaque handle to typed Rust state
+}
+
+// Consume using kernel-defined function (KDF) (e.g., LogSegmentBuilder)
+// Unlike FilterByKDF which returns per-row selection, ConsumeByKDF returns
+// a single boolean for the entire batch: true = Continue, false = Break.
+// Used for operations that accumulate state across batches.
+message ConsumeByKDF {
   uint64 state_ptr = 1;  // Opaque handle to typed Rust state
 }
 
@@ -85,10 +94,11 @@ message DeclarativePlanNode {
 
     // Unary nodes (one child)
     FilterByKDFPlan filter_by_kdf = 10;
-    FilterByExpressionPlan filter_by_expression = 11;
-    SelectPlan select = 12;
-    ParseJsonPlan parse_json = 13;
-    FirstNonNullPlan first_non_null = 14;
+    ConsumeByKDFPlan consume_by_kdf = 11;
+    FilterByExpressionPlan filter_by_expression = 12;
+    SelectPlan select = 13;
+    ParseJsonPlan parse_json = 14;
+    FirstNonNullPlan first_non_null = 15;
   }
 }
 
@@ -99,6 +109,11 @@ message DeclarativePlanNode {
 message FilterByKDFPlan {
   DeclarativePlanNode child = 1;
   FilterByKDF node = 2;
+}
+
+message ConsumeByKDFPlan {
+  DeclarativePlanNode child = 1;
+  ConsumeByKDF node = 2;
 }
 
 message FilterByExpressionPlan {

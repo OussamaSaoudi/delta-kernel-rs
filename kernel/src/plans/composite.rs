@@ -66,15 +66,16 @@ pub struct CheckpointLeafPlan {
 
 /// Plan for listing log files.
 ///
-/// Structure: FileListing → Filter → FirstNonNull
+/// Structure: FileListing → [ConsumeByKDF (LogSegmentBuilder)]
+///
+/// The optional consumer KDF processes file listing results to build a LogSegment.
+/// When present, the plan becomes: FileListing → ConsumeByKDF
 #[derive(Debug, Clone)]
 pub struct FileListingPhasePlan {
     /// List files from _delta_log
     pub listing: FileListingNode,
-    /// Filter by version/file type
-    pub filter: FilterByExpressionNode,
-    /// Extract checkpoint hint if present
-    pub extract_hint: FirstNonNullNode,
+    /// Optional consumer KDF to build LogSegment from listing results
+    pub log_segment_builder: Option<ConsumeByKDF>,
 }
 
 /// Plan for loading table metadata.
@@ -86,6 +87,15 @@ pub struct MetadataLoadPlan {
     pub scan: ScanNode,
     /// Extract first non-null protocol/metadata
     pub extract: FirstNonNullNode,
+}
+
+/// Plan for reading checkpoint hint file (_last_checkpoint).
+///
+/// Structure: Scan (JSON)
+#[derive(Debug, Clone)]
+pub struct CheckpointHintPlan {
+    /// Scan the _last_checkpoint JSON file
+    pub scan: ScanNode,
 }
 
 // =============================================================================
@@ -152,15 +162,17 @@ impl AsQueryPlan for CheckpointLeafPlan {
 
 impl AsQueryPlan for FileListingPhasePlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
-        let listing = DeclarativePlanNode::FileListing(self.listing.clone());
-        let filtered = DeclarativePlanNode::FilterByExpression {
-            child: Box::new(listing),
-            node: self.filter.clone(),
-        };
-        DeclarativePlanNode::FirstNonNull {
-            child: Box::new(filtered),
-            node: self.extract_hint.clone(),
+        let mut plan = DeclarativePlanNode::FileListing(self.listing.clone());
+
+        // Add consumer KDF if present
+        if let Some(consumer) = &self.log_segment_builder {
+            plan = DeclarativePlanNode::ConsumeByKDF {
+                child: Box::new(plan),
+                node: consumer.clone(),
+            };
         }
+
+        plan
     }
 }
 
@@ -171,6 +183,12 @@ impl AsQueryPlan for MetadataLoadPlan {
             child: Box::new(scan),
             node: self.extract.clone(),
         }
+    }
+}
+
+impl AsQueryPlan for CheckpointHintPlan {
+    fn as_query_plan(&self) -> DeclarativePlanNode {
+        DeclarativePlanNode::Scan(self.scan.clone())
     }
 }
 

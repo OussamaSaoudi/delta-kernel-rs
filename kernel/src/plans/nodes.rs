@@ -9,7 +9,9 @@ use crate::expressions::Expression;
 use crate::schema::SchemaRef;
 use crate::FileMeta;
 
-use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, FilterKdfState, SchemaReaderState, SchemaStoreState};
+use crate::Version;
+
+use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState, SchemaReaderState, SchemaStoreState};
 
 // =============================================================================
 // Kernel-Defined Function (KDF) Type System
@@ -96,6 +98,41 @@ impl FilterByKDF {
 
     /// Create from existing state.
     pub fn with_state(state: FilterKdfState) -> Self {
+        Self { state }
+    }
+}
+
+/// Consume rows using a kernel-defined function (KDF).
+///
+/// Unlike `FilterByKDF` which returns a per-row selection vector, `ConsumeByKDF`
+/// processes the entire batch and returns a single boolean:
+/// - `true` = Continue (keep feeding data, equivalent to `ControlFlow::Continue`)
+/// - `false` = Break (stop iteration, equivalent to `ControlFlow::Break`)
+///
+/// Consumer KDFs are used for operations that accumulate state across batches,
+/// such as building a LogSegment from file listing results.
+#[derive(Debug, Clone)]
+pub struct ConsumeByKDF {
+    /// Typed state - the variant encodes which function to apply
+    pub state: ConsumerKdfState,
+}
+
+impl ConsumeByKDF {
+    /// Create a new LogSegmentBuilder consumer.
+    ///
+    /// This consumer builds a LogSegment from file listing results by accumulating
+    /// commit files, checkpoint parts, and compaction files.
+    pub fn log_segment_builder(log_root: url::Url, end_version: Option<Version>) -> Self {
+        Self {
+            state: ConsumerKdfState::LogSegmentBuilder(LogSegmentBuilderState::new(
+                log_root,
+                end_version,
+            )),
+        }
+    }
+
+    /// Create from existing state.
+    pub fn with_state(state: ConsumerKdfState) -> Self {
         Self { state }
     }
 }
