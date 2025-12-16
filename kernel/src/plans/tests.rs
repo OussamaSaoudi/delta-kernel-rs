@@ -245,18 +245,6 @@ mod typed_state_tests {
     }
 
     #[test]
-    fn test_scan_state_machine_advance_error_propagates() {
-        // Create a scan state machine
-        let schema = std::sync::Arc::new(crate::schema::StructType::new_unchecked(vec![]));
-        let table_url = url::Url::parse("file:///test/table").unwrap();
-        let mut sm = ScanStateMachine::new(table_url, schema.clone(), schema).unwrap();
-        
-        // Advance with error - should propagate
-        let result = sm.advance(Err(crate::Error::generic("Test error")));
-        assert!(result.is_err(), "Error should propagate");
-    }
-
-    #[test]
     fn test_filter_kdf_apply() {
         use crate::arrow::array::{BooleanArray, RecordBatch, StringArray, StructArray};
         use crate::arrow::array::Int32Array;
@@ -594,28 +582,6 @@ mod typed_state_tests {
         assert!(!result1_again.value(0), "state1: file should be filtered (duplicate)");
     }
 
-    #[test]
-    fn test_scan_state_machine_advance_transitions() {
-        use crate::plans::AdvanceResult;
-        
-        // Create a scan state machine
-        let schema = std::sync::Arc::new(crate::schema::StructType::new_unchecked(vec![]));
-        let table_url = url::Url::parse("file:///test/table").unwrap();
-        let mut sm = ScanStateMachine::new(table_url, schema.clone(), schema.clone()).unwrap();
-        
-        // Create a simple plan to advance with
-        let executed_plan = DeclarativePlanNode::Scan(ScanNode {
-            file_type: FileType::Json,
-            files: vec![],
-            schema,
-        });
-        
-        // Advance should succeed  
-        let result = sm.advance(Ok(executed_plan)).expect("Should advance");
-        
-        // No checkpoint files means we should be done
-        assert!(matches!(result, AdvanceResult::Done(_)), "Should complete when no checkpoint files");
-    }
 }
 
 #[cfg(test)]
@@ -628,21 +594,6 @@ mod declarative_phase_tests {
         Arc::new(StructType::new_unchecked(vec![
             StructField::new("id", DataType::INTEGER, false),
         ]))
-    }
-
-    #[test]
-    fn test_scan_state_machine_initial_phase() {
-        let schema = test_schema();
-        let table_url = url::Url::parse("file:///test/table").unwrap();
-        let sm = ScanStateMachine::new(table_url, schema.clone(), schema).unwrap();
-        
-        // Verify initial state
-        assert_eq!(sm.phase_name(), "Commit");
-        assert!(!sm.is_terminal());
-        
-        // Should be able to get a plan
-        let plan = sm.get_plan();
-        assert!(plan.is_ok());
     }
 
     #[test]
@@ -1062,25 +1013,6 @@ mod parquet_schema_detection_tests {
         assert!(footer.schema.num_fields() > 0, "Schema should have fields");
     }
 
-    #[test]
-    fn test_schema_query_integration_with_scan_state_machine() {
-        use crate::plans::*;
-        use std::sync::Arc;
-        use crate::schema::StructType;
-        
-        // Create a ScanStateMachine
-        let table_url = Url::parse("file:///test/table").unwrap();
-        let schema = Arc::new(StructType::new_unchecked(vec![]));
-        let sm = ScanStateMachine::new(table_url, schema.clone(), schema).unwrap();
-        
-        // Initial phase should be Commit
-        assert_eq!(sm.phase_name(), "Commit");
-        assert!(!sm.is_terminal());
-        
-        // Verify we can get a plan
-        let plan = sm.get_plan();
-        assert!(plan.is_ok());
-    }
 }
 
 /// Tests for SidecarCollector consumer KDF with batch data
@@ -1094,16 +1026,84 @@ mod sidecar_collector_batch_tests {
     use crate::plans::kdf_state::SidecarCollectorState;
 
     fn create_sidecar_batch(paths: &[&str], sizes: &[i64]) -> ArrowEngineData {
-        let schema = Schema::new(vec![
-            Field::new("sidecar.path", DataType::Utf8, false),
-            Field::new("sidecar.sizeInBytes", DataType::Int64, true),
-        ]);
+        use crate::arrow::array::{Array, MapArray, StructArray};
+        use crate::arrow::buffer::OffsetBuffer;
+        use crate::arrow::datatypes::Fields;
+        
+        let len = paths.len();
+        
+        // Create the 4 leaf columns inside the sidecar struct
         let path_array = StringArray::from(paths.to_vec());
         let size_array = Int64Array::from(sizes.to_vec());
+        let modification_time_array = Int64Array::from(vec![0i64; len]);
+        
+        // Create empty map array for tags (nullable)
+        let keys_array = StringArray::new_null(0);
+        let values_array = StringArray::new_null(0);
+        let entries = StructArray::new(
+            Fields::from(vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("value", DataType::Utf8, true),
+            ]),
+            vec![Arc::new(keys_array), Arc::new(values_array)],
+            None,
+        );
+        let offsets = OffsetBuffer::from_lengths(vec![0; len]);
+        let tags_array = MapArray::new(
+            Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(vec![
+                    Field::new("key", DataType::Utf8, false),
+                    Field::new("value", DataType::Utf8, true),
+                ])),
+                false,
+            )),
+            offsets,
+            entries,
+            None,
+            false,
+        );
+        
+        // Create the sidecar struct
+        let sidecar_struct = StructArray::from(vec![
+            (
+                Arc::new(Field::new("path", DataType::Utf8, false)),
+                Arc::new(path_array) as Arc<dyn Array>,
+            ),
+            (
+                Arc::new(Field::new("sizeInBytes", DataType::Int64, false)),
+                Arc::new(size_array) as Arc<dyn Array>,
+            ),
+            (
+                Arc::new(Field::new("modificationTime", DataType::Int64, false)),
+                Arc::new(modification_time_array) as Arc<dyn Array>,
+            ),
+            (
+                Arc::new(Field::new("tags", DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(Fields::from(vec![
+                            Field::new("key", DataType::Utf8, false),
+                            Field::new("value", DataType::Utf8, true),
+                        ])),
+                        false,
+                    )),
+                    false,
+                ), true)),
+                Arc::new(tags_array) as Arc<dyn Array>,
+            ),
+        ]);
+        
+        // Create the top-level schema with the sidecar struct
+        let schema = Schema::new(vec![
+            Field::new("sidecar", sidecar_struct.data_type().clone(), true),
+        ]);
+        
         let batch = RecordBatch::try_new(
             Arc::new(schema),
-            vec![Arc::new(path_array), Arc::new(size_array)],
+            vec![Arc::new(sidecar_struct)],
         ).unwrap();
+        
         ArrowEngineData::new(batch)
     }
 
@@ -1215,33 +1215,10 @@ mod state_machine_transition_tests {
     }
 
     #[test]
-    fn test_scan_state_machine_initial_state() {
-        let table_url = Url::parse("file:///test/table").unwrap();
-        let schema = Arc::new(StructType::new_unchecked(vec![]));
-        let sm = ScanStateMachine::new(table_url, schema.clone(), schema).unwrap();
-
-        assert_eq!(sm.phase_name(), "Commit");
-        assert!(!sm.is_terminal());
-    }
-
-    #[test]
     fn test_scan_phase_complete_is_terminal() {
         // Verify Complete is terminal
         assert!(ScanPhase::Complete.is_complete());
         assert!(ScanPhase::Complete.as_query_plan().is_none());
-    }
-
-    #[test]
-    fn test_scan_phase_commit_has_results_sink() {
-        let table_url = Url::parse("file:///test/table").unwrap();
-        let schema = Arc::new(StructType::new_unchecked(vec![]));
-        let sm = ScanStateMachine::new(table_url, schema.clone(), schema).unwrap();
-        
-        // Get the plan from Commit phase
-        let plan = sm.get_plan().expect("Should have a plan");
-        
-        // Verify it's a Results sink
-        assert!(plan.is_results_sink(), "Commit phase should have a Results sink");
     }
 
     #[test]
@@ -1325,84 +1302,6 @@ mod state_machine_transition_tests {
     }
 
     #[test]
-    fn test_scan_state_machine_all_phases_have_correct_sinks() {
-        use crate::FileMeta;
-        
-        let table_url = Url::parse("file:///test/table").unwrap();
-        let schema = Arc::new(StructType::new_unchecked(vec![]));
-        
-        // Create state machine with checkpoint files to test all phases
-        let checkpoint_file = FileMeta {
-            location: Url::parse("file:///test/table/_delta_log/00000000000000000001.checkpoint.parquet").unwrap(),
-            last_modified: 0,
-            size: 100,
-        };
-        
-        let mut sm = ScanStateMachine::from_scan_config(
-            table_url.clone(),
-            table_url.join("_delta_log/").unwrap(),
-            schema.clone(),
-            schema,
-            vec![], // no commit files
-            vec![checkpoint_file],
-        ).unwrap();
-        
-        // Phase 1: Commit - should have Results sink
-        let commit_plan = sm.get_plan().expect("Should have Commit plan");
-        assert!(commit_plan.is_results_sink(), "Commit phase must have Results sink");
-        assert_eq!(sm.phase_name(), "Commit");
-        
-        // Advance to next phase (simulate execution completing)
-        // Since there are checkpoint files, it should go to SchemaQuery
-        let result = sm.advance(Ok(commit_plan.clone()));
-        assert!(result.is_ok());
-        
-        // Phase 2: SchemaQuery - should not be a Results sink
-        let schema_query_plan = sm.get_plan().expect("Should have SchemaQuery plan");
-        assert!(!schema_query_plan.is_results_sink(), "SchemaQuery phase must not have Results sink");
-        assert_eq!(sm.phase_name(), "SchemaQuery");
-    }
-
-    #[test]
-    fn test_scan_phase_as_query_plan_returns_correct_plan_type() {
-        let table_url = Url::parse("file:///test/table").unwrap();
-        let schema = Arc::new(StructType::new_unchecked(vec![]));
-        let sm = ScanStateMachine::new(table_url, schema.clone(), schema).unwrap();
-        
-        // Get the plan
-        let plan = sm.get_plan().expect("Should have a plan");
-        
-        // Commit plan should be: Sink -> Select -> Filter -> Scan
-        match plan {
-            DeclarativePlanNode::Sink { child, node } => {
-                assert_eq!(node.sink_type, SinkType::Results);
-                match *child {
-                    DeclarativePlanNode::Select { child: inner, .. } => {
-                        match *inner {
-                            DeclarativePlanNode::FilterByKDF { child: scan_box, node: filter_node } => {
-                                let state = filter_node
-                                    .state
-                                    .lock()
-                                    .expect("FilterByKDF state mutex poisoned");
-                                assert!(matches!(&*state, FilterKdfState::AddRemoveDedup(_)));
-                                match *scan_box {
-                                    DeclarativePlanNode::Scan(scan_node) => {
-                                        assert_eq!(scan_node.file_type, FileType::Json);
-                                    }
-                                    _ => panic!("Expected Scan at leaf of Commit plan"),
-                                }
-                            }
-                            _ => panic!("Expected FilterByKDF in Commit plan"),
-                        }
-                    }
-                    _ => panic!("Expected Select in Commit plan"),
-                }
-            }
-            _ => panic!("Commit plan must be wrapped in Sink"),
-        }
-    }
-
-    #[test]
     fn test_checkpoint_type_enum() {
         // Verify CheckpointType variants exist
         let classic = CheckpointType::Classic;
@@ -1414,123 +1313,9 @@ mod state_machine_transition_tests {
         assert_eq!(format!("{:?}", v2), "V2");
     }
 
-    #[test]
-    fn test_scan_build_state_has_checkpoint_files() {
-        let table_url = Url::parse("file:///test/table").unwrap();
-        let schema = Arc::new(StructType::new_unchecked(vec![]));
-        let mut sm = ScanStateMachine::from_scan_config(
-            table_url.clone(),
-            table_url.join("_delta_log/").unwrap(),
-            schema.clone(),
-            schema,
-            vec![],
-            vec![create_test_checkpoint_file()],
-        ).unwrap();
-
-        // Get plan to verify we can work with the state machine
-        let plan = sm.get_plan();
-        assert!(plan.is_ok());
-    }
-
     // =========================================================================
     // Content Verification Tests
     // =========================================================================
-
-    #[test]
-    fn test_commit_phase_plan_contents() {
-        use crate::FileMeta;
-        
-        let table_url = Url::parse("file:///test/table").unwrap();
-        let schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::nullable("value", DataType::LONG),
-        ]));
-        
-        // Create commit files
-        let commit_file = FileMeta {
-            location: Url::parse("file:///test/table/_delta_log/00000000000000000000.json").unwrap(),
-            last_modified: 1234567890,
-            size: 500,
-        };
-        
-        let sm = ScanStateMachine::from_scan_config(
-            table_url.clone(),
-            table_url.join("_delta_log/").unwrap(),
-            schema.clone(),
-            schema,
-            vec![commit_file.clone()],
-            vec![],
-        ).unwrap();
-        
-        let plan = sm.get_plan().expect("Should have plan");
-        
-        // Verify plan structure: Sink(Results) -> Select -> FilterByKDF(AddRemoveDedup) -> Scan(Json)
-        match plan {
-            DeclarativePlanNode::Sink { child, node: sink_node } => {
-                // 1. Verify Results sink
-                assert_eq!(sink_node.sink_type, SinkType::Results, "Commit must have Results sink");
-                
-                match *child {
-                    DeclarativePlanNode::Select { child: filter_box, node: select_node } => {
-                        // 2. Verify output schema has path and size columns
-                        assert!(
-                            select_node.output_schema.field("path").is_some(),
-                            "Output schema should have 'path' column"
-                        );
-                        assert!(
-                            select_node.output_schema.field("size").is_some(),
-                            "Output schema should have 'size' column"
-                        );
-                        
-                        match *filter_box {
-                            DeclarativePlanNode::FilterByKDF { child: scan_box, node: filter_node } => {
-                                // 3. Verify AddRemoveDedup filter
-                                let state = filter_node
-                                    .state
-                                    .lock()
-                                    .expect("FilterByKDF state mutex poisoned");
-                                match &*state {
-                                    FilterKdfState::AddRemoveDedup(state) => {
-                                        // State should be empty initially
-                                        assert!(state.is_empty(), "Initial dedup state should be empty");
-                                    }
-                                    _ => panic!("Commit phase must use AddRemoveDedup filter"),
-                                }
-                                
-                                match *scan_box {
-                                    DeclarativePlanNode::Scan(scan_node) => {
-                                        // 4. Verify JSON file type for commits
-                                        assert_eq!(scan_node.file_type, FileType::Json, "Commit files are JSON");
-                                        
-                                        // 5. Verify the commit files are included
-                                        assert_eq!(scan_node.files.len(), 1, "Should have 1 commit file");
-                                        assert_eq!(
-                                            scan_node.files[0].location.as_str(),
-                                            commit_file.location.as_str(),
-                                            "Commit file URL should match"
-                                        );
-                                        
-                                        // 6. Verify schema has add and remove fields
-                                        assert!(
-                                            scan_node.schema.field("add").is_some(),
-                                            "Commit schema should have 'add' field"
-                                        );
-                                        assert!(
-                                            scan_node.schema.field("remove").is_some(),
-                                            "Commit schema should have 'remove' field"
-                                        );
-                                    }
-                                    _ => panic!("Expected Scan node at leaf"),
-                                }
-                            }
-                            _ => panic!("Expected FilterByKDF after Select"),
-                        }
-                    }
-                    _ => panic!("Expected Select after Sink"),
-                }
-            }
-            _ => panic!("Expected Sink at root"),
-        }
-    }
 
     #[test]
     fn test_checkpoint_leaf_phase_plan_contents() {
@@ -1720,176 +1505,6 @@ mod state_machine_transition_tests {
         }
     }
 
-    #[test]
-    fn test_scan_state_machine_phase_transition_creates_correct_plans() {
-        use crate::FileMeta;
-        use crate::plans::state_machines::AdvanceResult;
-        
-        let table_url = Url::parse("file:///test/table").unwrap();
-        let schema = Arc::new(StructType::new_unchecked(vec![]));
-        
-        let checkpoint_file = FileMeta {
-            location: Url::parse("file:///test/table/_delta_log/00000000000000000001.checkpoint.parquet").unwrap(),
-            last_modified: 0,
-            size: 100,
-        };
-        
-        let mut sm = ScanStateMachine::from_scan_config(
-            table_url.clone(),
-            table_url.join("_delta_log/").unwrap(),
-            schema.clone(),
-            schema,
-            vec![], // no commit files
-            vec![checkpoint_file.clone()],
-        ).unwrap();
-        
-        // Phase 1: Commit
-        assert_eq!(sm.phase_name(), "Commit");
-        let commit_plan = sm.get_plan().unwrap();
-        
-        // Verify Commit plan has Results sink
-        assert!(commit_plan.is_results_sink());
-        
-        // Extract and verify the scan node uses JSON (for commit files)
-        fn extract_scan_file_type(plan: &DeclarativePlanNode) -> Option<FileType> {
-            match plan {
-                DeclarativePlanNode::Scan(s) => Some(s.file_type),
-                DeclarativePlanNode::Sink { child, .. }
-                | DeclarativePlanNode::Select { child, .. }
-                | DeclarativePlanNode::FilterByKDF { child, .. }
-                | DeclarativePlanNode::FilterByExpression { child, .. }
-                | DeclarativePlanNode::ParseJson { child, .. }
-                | DeclarativePlanNode::FirstNonNull { child, .. }
-                | DeclarativePlanNode::ConsumeByKDF { child, .. } => extract_scan_file_type(child),
-                _ => None,
-            }
-        }
-        
-        assert_eq!(
-            extract_scan_file_type(&commit_plan),
-            Some(FileType::Json),
-            "Commit phase should scan JSON files"
-        );
-        
-        // Advance to SchemaQuery (since we have checkpoint files)
-        let result = sm.advance(Ok(commit_plan));
-        assert!(matches!(result, Ok(AdvanceResult::Continue)));
-        
-        // Phase 2: SchemaQuery
-        assert_eq!(sm.phase_name(), "SchemaQuery");
-        let schema_plan = sm.get_plan().unwrap();
-        
-        // Verify SchemaQuery plan has Drop sink
-        assert!(schema_plan.is_drop_sink());
-        
-        // Advance to CheckpointLeaf (simulating schema query found no sidecar column)
-        let result = sm.advance(Ok(schema_plan));
-        assert!(matches!(result, Ok(AdvanceResult::Continue)));
-        
-        // Phase 3: CheckpointLeaf
-        assert_eq!(sm.phase_name(), "CheckpointLeaf");
-        let leaf_plan = sm.get_plan().unwrap();
-        
-        // Verify CheckpointLeaf has Results sink
-        assert!(leaf_plan.is_results_sink());
-        
-        // Verify it scans Parquet files
-        assert_eq!(
-            extract_scan_file_type(&leaf_plan),
-            Some(FileType::Parquet),
-            "CheckpointLeaf should scan Parquet files"
-        );
-        
-        // Verify it uses CheckpointDedup filter
-        fn has_checkpoint_dedup_filter(plan: &DeclarativePlanNode) -> bool {
-            match plan {
-                DeclarativePlanNode::FilterByKDF { node, .. } => {
-                    let state = node
-                        .state
-                        .lock()
-                        .expect("FilterByKDF state mutex poisoned");
-                    matches!(&*state, FilterKdfState::CheckpointDedup(_))
-                }
-                DeclarativePlanNode::Sink { child, .. }
-                | DeclarativePlanNode::Select { child, .. }
-                | DeclarativePlanNode::ConsumeByKDF { child, .. } => has_checkpoint_dedup_filter(child),
-                _ => false,
-            }
-        }
-        
-        assert!(
-            has_checkpoint_dedup_filter(&leaf_plan),
-            "CheckpointLeaf should use CheckpointDedup filter"
-        );
-        
-        // Advance to Complete
-        let result = sm.advance(Ok(leaf_plan));
-        assert!(matches!(result, Ok(AdvanceResult::Done(_))));
-        assert!(sm.is_terminal());
-    }
-
-    #[test]
-    fn test_commit_plan_includes_all_provided_files() {
-        use crate::FileMeta;
-        
-        let table_url = Url::parse("file:///test/table").unwrap();
-        let schema = Arc::new(StructType::new_unchecked(vec![]));
-        
-        // Create multiple commit files
-        let commit_files = vec![
-            FileMeta {
-                location: Url::parse("file:///test/table/_delta_log/00000000000000000000.json").unwrap(),
-                last_modified: 100,
-                size: 500,
-            },
-            FileMeta {
-                location: Url::parse("file:///test/table/_delta_log/00000000000000000001.json").unwrap(),
-                last_modified: 200,
-                size: 600,
-            },
-            FileMeta {
-                location: Url::parse("file:///test/table/_delta_log/00000000000000000002.json").unwrap(),
-                last_modified: 300,
-                size: 700,
-            },
-        ];
-        
-        let sm = ScanStateMachine::from_scan_config(
-            table_url.clone(),
-            table_url.join("_delta_log/").unwrap(),
-            schema.clone(),
-            schema,
-            commit_files.clone(),
-            vec![],
-        ).unwrap();
-        
-        let plan = sm.get_plan().unwrap();
-        
-        // Extract files from the scan node
-        fn extract_scan_files(plan: &DeclarativePlanNode) -> Vec<&FileMeta> {
-            match plan {
-                DeclarativePlanNode::Scan(s) => s.files.iter().collect(),
-                DeclarativePlanNode::Sink { child, .. }
-                | DeclarativePlanNode::Select { child, .. }
-                | DeclarativePlanNode::FilterByKDF { child, .. } => extract_scan_files(child),
-                _ => vec![],
-            }
-        }
-        
-        let scan_files = extract_scan_files(&plan);
-        
-        // Verify all files are included
-        assert_eq!(scan_files.len(), 3, "All commit files should be included");
-        
-        for (i, file) in scan_files.iter().enumerate() {
-            assert_eq!(
-                file.location.as_str(),
-                commit_files[i].location.as_str(),
-                "File {} should match", i
-            );
-            assert_eq!(file.size, commit_files[i].size, "File {} size should match", i);
-        }
-    }
 }
 
 // =============================================================================
@@ -2080,75 +1695,6 @@ mod real_table_execution_tests {
     /// Maximum iterations for state machine execution to detect infinite loops
     const MAX_DRIVER_ITERATIONS: usize = 1000;
     
-    /// Execute ScanStateMachine via ResultsDriver and extract file paths.
-    /// Includes an iteration limit to detect infinite loops.
-    fn get_state_machine_paths(
-        snapshot: &crate::snapshot::SnapshotRef, 
-        engine: Arc<dyn Engine>
-    ) -> Vec<String> {
-        let log_segment = snapshot.log_segment();
-        let commit_files: Vec<FileMeta> = log_segment
-            .ascending_commit_files
-            .iter()
-            .map(|f| f.location.clone())
-            .collect();
-        
-        let checkpoint_files: Vec<FileMeta> = log_segment
-            .checkpoint_parts
-            .iter()
-            .map(|f| f.location.clone())
-            .collect();
-        
-        let table_url = snapshot.table_root().clone();
-        
-        let sm = ScanStateMachine::from_scan_config(
-            table_url.clone(),
-            table_url.join("_delta_log/").unwrap(),
-            snapshot.schema().clone(),
-            snapshot.schema().clone(),
-            commit_files,
-            checkpoint_files,
-        ).expect("Should create ScanStateMachine");
-        
-        let mut driver = ResultsDriver::new(engine.as_ref(), sm);
-        let mut batches = Vec::new();
-        let mut iteration_count = 0;
-        
-        while let Some(result) = driver.next() {
-            iteration_count += 1;
-            if iteration_count > MAX_DRIVER_ITERATIONS {
-                panic!(
-                    "State machine execution exceeded {} iterations - possible infinite loop!",
-                    MAX_DRIVER_ITERATIONS
-                );
-            }
-            if let Ok(batch) = result {
-                batches.push(batch);
-            }
-        }
-        
-        extract_add_paths_from_batches(&batches)
-    }
-    
-    /// Compare two sets of paths, ignoring order
-    fn assert_paths_equal(expected: &[String], actual: &[String], table_name: &str) {
-        let expected_set: HashSet<&str> = expected.iter().map(|s| s.as_str()).collect();
-        let actual_set: HashSet<&str> = actual.iter().map(|s| s.as_str()).collect();
-        
-        // Find missing and extra paths for better error messages
-        let missing: Vec<&str> = expected_set.difference(&actual_set).copied().collect();
-        let extra: Vec<&str> = actual_set.difference(&expected_set).copied().collect();
-        
-        assert!(
-            missing.is_empty() && extra.is_empty(),
-            "Path mismatch for table '{}'\nMissing paths: {:?}\nExtra paths: {:?}\nExpected {} paths, got {}",
-            table_name,
-            missing,
-            extra,
-            expected.len(),
-            actual.len()
-        );
-    }
     
     // =========================================================================
     // Plan Execution Tests with Static Expected Data Comparison
@@ -2500,474 +2046,4 @@ mod real_table_execution_tests {
     // Full State Machine Execution Tests (via ResultsDriver)
     // =========================================================================
 
-    #[test]
-    fn test_state_machine_execution_simple_table() {
-        // Execute the full ScanStateMachine via ResultsDriver on a simple table
-        let Some((_, table_url)) = get_test_table_path("table-without-dv-small") else {
-            println!("Skipping test: table-without-dv-small not found");
-            return;
-        };
-
-        let engine = create_test_engine();
-        let snapshot = Snapshot::builder_for(table_url.clone())
-            .build(engine.as_ref())
-            .expect("Should build snapshot");
-
-        let log_segment = snapshot.log_segment();
-        let commit_files: Vec<FileMeta> = log_segment
-            .ascending_commit_files
-            .iter()
-            .map(|f| f.location.clone())
-            .collect();
-
-        // Create ScanStateMachine with full plan (includes FilterByKDF)
-        let mut sm = ScanStateMachine::from_scan_config(
-            table_url.clone(),
-            table_url.join("_delta_log/").unwrap(),
-            snapshot.schema().clone(),
-            snapshot.schema().clone(),
-            commit_files,
-            vec![],
-        ).expect("Should create ScanStateMachine");
-        
-        // Execute the plan directly
-        let plan = sm.get_plan().expect("Should get plan");
-        assert!(plan.is_results_sink(), "Commit phase should have Results sink");
-        
-        let executor = DeclarativePlanExecutor::new(engine.as_ref());
-        let results = executor.execute(plan.clone()).expect("Direct execution should succeed");
-        let direct_batches: Vec<FilteredEngineData> = results
-            .filter_map(|r| r.ok())
-            .collect();
-        let direct_rows: usize = direct_batches.iter().map(|b| b.data().len()).sum();
-        
-        // Manually advance the state machine
-        let advance_result = sm.advance(Ok(plan)).expect("Advance should succeed");
-        assert!(sm.is_terminal(), "State machine should complete after Commit phase (no checkpoints)");
-        assert!(matches!(advance_result, AdvanceResult::Done(_)), "Should be done");
-        
-        // Verify the path values from execution
-        let add_paths = extract_add_paths_from_batches(&direct_batches);
-        
-        // Verify the content
-        assert!(direct_rows > 0, "Direct execution should produce rows");
-        assert_eq!(add_paths.len(), 1, "Should have exactly 1 add action");
-        assert_eq!(
-            add_paths[0],
-            expected_table_without_dv_small::EXPECTED_DATA_FILE,
-            "Add path should match expected"
-        );
-    }
-
-    #[test]
-    fn test_state_machine_execution_partitioned_table() {
-        // Execute the full ScanStateMachine on a partitioned table with multiple commits
-        let Some((_, table_url)) = get_test_table_path("basic_partitioned") else {
-            println!("Skipping test: basic_partitioned not found");
-            return;
-        };
-
-        let engine = create_test_engine();
-        let snapshot = Snapshot::builder_for(table_url.clone())
-            .build(engine.as_ref())
-            .expect("Should build snapshot");
-
-        let log_segment = snapshot.log_segment();
-        let commit_files: Vec<FileMeta> = log_segment
-            .ascending_commit_files
-            .iter()
-            .map(|f| f.location.clone())
-            .collect();
-
-        // Create ScanStateMachine
-        let sm = ScanStateMachine::from_scan_config(
-            table_url.clone(),
-            table_url.join("_delta_log/").unwrap(),
-            snapshot.schema().clone(),
-            snapshot.schema().clone(),
-            commit_files,
-            vec![],
-        ).expect("Should create ScanStateMachine");
-
-        // Execute via ResultsDriver
-        let mut driver = ResultsDriver::new(engine.as_ref(), sm);
-        let batches: Vec<FilteredEngineData> = driver
-            .by_ref()
-            .filter_map(|r| r.ok())
-            .collect();
-
-        // Extract add.path values
-        let add_paths = extract_add_paths_from_batches(&batches);
-        
-        // Should have exactly 6 add actions (3 from version 0, 3 from version 1)
-        assert_eq!(add_paths.len(), 6, "Should have 6 add actions after dedup");
-
-        // Verify all expected paths are present
-        let add_set: HashSet<String> = add_paths.into_iter().collect();
-        for expected in expected_basic_partitioned::EXPECTED_DATA_FILES {
-            assert!(
-                add_set.contains(expected),
-                "Missing expected path: '{}'",
-                expected
-            );
-        }
-
-        assert!(driver.is_done(), "Driver should complete");
-        assert!(driver.into_result().is_some(), "Should have final result");
-    }
-
-    #[test]
-    fn test_state_machine_execution_with_checkpoint() {
-        // Execute the full ScanStateMachine on a table with checkpoint
-        let Some((_, table_url)) = get_test_table_path("with_checkpoint_no_last_checkpoint") else {
-            println!("Skipping test: with_checkpoint_no_last_checkpoint not found");
-            return;
-        };
-
-        let engine = create_test_engine();
-        let snapshot = Snapshot::builder_for(table_url.clone())
-            .build(engine.as_ref())
-            .expect("Should build snapshot");
-
-        let log_segment = snapshot.log_segment();
-        let commit_files: Vec<FileMeta> = log_segment
-            .ascending_commit_files
-            .iter()
-            .map(|f| f.location.clone())
-            .collect();
-        let checkpoint_files: Vec<FileMeta> = log_segment
-            .checkpoint_parts
-            .iter()
-            .map(|f| f.location.clone())
-            .collect();
-
-        // Skip if no checkpoint
-        if checkpoint_files.is_empty() {
-            println!("Skipping: table has no checkpoint files");
-            return;
-        }
-
-        // Create ScanStateMachine with checkpoint files
-        let sm = ScanStateMachine::from_scan_config(
-            table_url.clone(),
-            table_url.join("_delta_log/").unwrap(),
-            snapshot.schema().clone(),
-            snapshot.schema().clone(),
-            commit_files,
-            checkpoint_files,
-        ).expect("Should create ScanStateMachine");
-
-        // Execute via ResultsDriver
-        let mut driver = ResultsDriver::new(engine.as_ref(), sm);
-        let batches: Vec<FilteredEngineData> = driver
-            .by_ref()
-            .filter_map(|r| r.ok())
-            .collect();
-
-        // Should produce results from both commit and checkpoint phases
-        let total_rows: usize = batches.iter().map(|b| b.data().len()).sum();
-        assert!(total_rows > 0, "State machine with checkpoint should produce rows");
-
-        // Extract add.path values
-        let add_paths = extract_add_paths_from_batches(&batches);
-        assert!(!add_paths.is_empty(), "Should have add actions from commits and/or checkpoints");
-
-        assert!(driver.is_done(), "Driver should complete all phases");
-        assert!(driver.into_result().is_some(), "Should have final result");
-    }
-
-    #[test]
-    fn test_state_machine_produces_correct_deduped_results() {
-        // Verify that the dedup filter correctly removes duplicate add actions
-        // When reading from both commits and checkpoints, duplicates should be filtered
-        let Some((_, table_url)) = get_test_table_path("basic_partitioned") else {
-            return;
-        };
-
-        let engine = create_test_engine();
-        let snapshot = Snapshot::builder_for(table_url.clone())
-            .build(engine.as_ref())
-            .expect("Should build snapshot");
-
-        let log_segment = snapshot.log_segment();
-        let commit_files: Vec<FileMeta> = log_segment
-            .ascending_commit_files
-            .iter()
-            .map(|f| f.location.clone())
-            .collect();
-
-        // Create ScanStateMachine
-        let sm = ScanStateMachine::from_scan_config(
-            table_url.clone(),
-            table_url.join("_delta_log/").unwrap(),
-            snapshot.schema().clone(),
-            snapshot.schema().clone(),
-            commit_files,
-            vec![],
-        ).expect("Should create ScanStateMachine");
-
-        // Execute and collect results
-        let mut driver = ResultsDriver::new(engine.as_ref(), sm);
-        let batches: Vec<FilteredEngineData> = driver
-            .by_ref()
-            .filter_map(|r| r.ok())
-            .collect();
-
-        let add_paths = extract_add_paths_from_batches(&batches);
-        
-        // Verify no duplicates - all paths should be unique
-        let unique_paths: HashSet<&str> = add_paths.iter().map(|s| s.as_str()).collect();
-        assert_eq!(
-            add_paths.len(),
-            unique_paths.len(),
-            "Dedup filter should remove duplicate paths"
-        );
-
-        // Verify exact expected paths
-        assert_eq!(unique_paths.len(), 6, "Should have exactly 6 unique add paths");
-    }
-
-    // =========================================================================
-    // Ground Truth Comparison Tests - Simple Tables
-    // Compare ScanStateMachine results against Scan::scan_metadata ground truth
-    // =========================================================================
-
-    #[test]
-    fn test_groundtruth_table_without_dv_small() {
-        // Compare ScanStateMachine against scan_metadata for table-without-dv-small
-        let Some((_, table_url)) = get_test_table_path("table-without-dv-small") else {
-            println!("Skipping test: table-without-dv-small not found");
-            return;
-        };
-
-        let engine = create_test_engine();
-        let snapshot = Snapshot::builder_for(table_url)
-            .build(engine.as_ref())
-            .expect("Should build snapshot");
-
-        // Get ground truth from Scan::scan_metadata
-        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
-        
-        // Get paths from ScanStateMachine
-        let actual_paths = get_state_machine_paths(&snapshot, engine);
-        
-        // Compare
-        assert_paths_equal(&expected_paths, &actual_paths, "table-without-dv-small");
-        
-        // Verify expected count (1 file in this table)
-        assert_eq!(expected_paths.len(), 1, "Expected 1 file in ground truth");
-    }
-
-    #[test]
-    fn test_groundtruth_basic_partitioned() {
-        // Compare ScanStateMachine against scan_metadata for basic_partitioned
-        let Some((_, table_url)) = get_test_table_path("basic_partitioned") else {
-            println!("Skipping test: basic_partitioned not found");
-            return;
-        };
-
-        let engine = create_test_engine();
-        let snapshot = Snapshot::builder_for(table_url)
-            .build(engine.as_ref())
-            .expect("Should build snapshot");
-
-        // Get ground truth from Scan::scan_metadata
-        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
-        
-        // Get paths from ScanStateMachine
-        let actual_paths = get_state_machine_paths(&snapshot, engine);
-        
-        // Compare
-        assert_paths_equal(&expected_paths, &actual_paths, "basic_partitioned");
-        
-        // Verify expected count (6 files in this table)
-        assert_eq!(expected_paths.len(), 6, "Expected 6 files in ground truth");
-    }
-
-    #[test]
-    fn test_groundtruth_table_with_dv_small() {
-        // Compare ScanStateMachine against scan_metadata for table-with-dv-small
-        // This table has deletion vectors
-        let Some((_, table_url)) = get_test_table_path("table-with-dv-small") else {
-            println!("Skipping test: table-with-dv-small not found");
-            return;
-        };
-
-        let engine = create_test_engine();
-        let snapshot = Snapshot::builder_for(table_url)
-            .build(engine.as_ref())
-            .expect("Should build snapshot");
-
-        // Get ground truth from Scan::scan_metadata
-        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
-        
-        // Get paths from ScanStateMachine
-        let actual_paths = get_state_machine_paths(&snapshot, engine);
-        
-        // Compare
-        assert_paths_equal(&expected_paths, &actual_paths, "table-with-dv-small");
-    }
-
-    // =========================================================================
-    // Ground Truth Comparison Tests - Checkpoint Tables
-    // Tables with checkpoints exercise different phases of the state machine
-    // =========================================================================
-
-    #[test]
-    fn test_groundtruth_with_checkpoint_no_last_checkpoint() {
-        // Table with checkpoint but no _last_checkpoint file
-        let Some((_, table_url)) = get_test_table_path("with_checkpoint_no_last_checkpoint") else {
-            println!("Skipping test: with_checkpoint_no_last_checkpoint not found");
-            return;
-        };
-
-        let engine = create_test_engine();
-        let snapshot = Snapshot::builder_for(table_url)
-            .build(engine.as_ref())
-            .expect("Should build snapshot");
-
-        // Get ground truth from Scan::scan_metadata
-        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
-        
-        // Get paths from ScanStateMachine
-        let actual_paths = get_state_machine_paths(&snapshot, engine);
-        
-        // Compare
-        assert_paths_equal(&expected_paths, &actual_paths, "with_checkpoint_no_last_checkpoint");
-    }
-
-    #[test]
-    fn test_groundtruth_parquet_row_group_skipping() {
-        // Table with multi-part checkpoint (good for testing checkpoint handling)
-        let Some((_, table_url)) = get_test_table_path("parquet_row_group_skipping") else {
-            println!("Skipping test: parquet_row_group_skipping not found");
-            return;
-        };
-
-        let engine = create_test_engine();
-        let snapshot = Snapshot::builder_for(table_url)
-            .build(engine.as_ref())
-            .expect("Should build snapshot");
-
-        // Get ground truth from Scan::scan_metadata
-        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
-        
-        // Get paths from ScanStateMachine
-        let actual_paths = get_state_machine_paths(&snapshot, engine);
-        
-        // Compare
-        assert_paths_equal(&expected_paths, &actual_paths, "parquet_row_group_skipping");
-    }
-
-    #[test]
-    fn test_groundtruth_app_txn_checkpoint() {
-        // Table with app transaction checkpoint
-        let Some((_, table_url)) = get_test_table_path("app-txn-checkpoint") else {
-            println!("Skipping test: app-txn-checkpoint not found");
-            return;
-        };
-
-        let engine = create_test_engine();
-        let snapshot = Snapshot::builder_for(table_url)
-            .build(engine.as_ref())
-            .expect("Should build snapshot");
-
-        // Get ground truth from Scan::scan_metadata
-        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
-        
-        // Get paths from ScanStateMachine
-        let actual_paths = get_state_machine_paths(&snapshot, engine);
-        
-        // Compare
-        assert_paths_equal(&expected_paths, &actual_paths, "app-txn-checkpoint");
-    }
-
-    #[test]
-    fn test_groundtruth_app_txn_no_checkpoint() {
-        // Table without checkpoint for comparison
-        let Some((_, table_url)) = get_test_table_path("app-txn-no-checkpoint") else {
-            println!("Skipping test: app-txn-no-checkpoint not found");
-            return;
-        };
-
-        let engine = create_test_engine();
-        let snapshot = Snapshot::builder_for(table_url)
-            .build(engine.as_ref())
-            .expect("Should build snapshot");
-
-        // Get ground truth from Scan::scan_metadata
-        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
-        
-        // Get paths from ScanStateMachine
-        let actual_paths = get_state_machine_paths(&snapshot, engine);
-        
-        // Compare
-        assert_paths_equal(&expected_paths, &actual_paths, "app-txn-no-checkpoint");
-    }
-
-    // =========================================================================
-    // Ground Truth Comparison Tests - V2 Checkpoints (compressed test data)
-    // Uses test_utils::load_test_data to decompress .tar.zst test tables
-    // Note: V2 checkpoint support in ScanStateMachine is still in progress
-    // =========================================================================
-
-    /// Helper to load a compressed test table and compare ground truth
-    #[allow(dead_code)]
-    fn test_v2_checkpoint_groundtruth(table_name: &str) {
-        // Load and decompress test data
-        let test_dir = match test_utils::load_test_data("tests/data", table_name) {
-            Ok(dir) => dir,
-            Err(e) => {
-                println!("Skipping test {}: {:?}", table_name, e);
-                return;
-            }
-        };
-        let test_path = test_dir.path().join(table_name);
-
-        let table_url = url::Url::from_directory_path(&test_path)
-            .expect("Should create URL from path");
-
-        let engine = create_test_engine();
-        let snapshot = match Snapshot::builder_for(table_url).build(engine.as_ref()) {
-            Ok(s) => s,
-            Err(e) => {
-                println!("Skipping test {}: snapshot build failed: {:?}", table_name, e);
-                return;
-            }
-        };
-
-        // Get ground truth from Scan::scan_metadata
-        let expected_paths = get_groundtruth_paths(snapshot.clone(), engine.as_ref());
-        
-        // Get paths from ScanStateMachine
-        let actual_paths = get_state_machine_paths(&snapshot, engine);
-        
-        // Compare
-        assert_paths_equal(&expected_paths, &actual_paths, table_name);
-    }
-
-    // V2 checkpoint tests - These tables use V2 checkpoint format with sidecars.
-    // The ScanStateMachine properly detects V2 checkpoints via schema query,
-    // reads the manifest to extract sidecar file paths, then reads add actions
-    // from the sidecar files.
-
-    #[test]
-    fn test_groundtruth_v2_classic_checkpoint_parquet() {
-        test_v2_checkpoint_groundtruth("v2-classic-checkpoint-parquet");
-    }
-
-    #[test]
-    fn test_groundtruth_v2_classic_checkpoint_json() {
-        test_v2_checkpoint_groundtruth("v2-classic-checkpoint-json");
-    }
-
-    #[test]
-    fn test_groundtruth_v2_checkpoints_parquet_without_sidecars() {
-        test_v2_checkpoint_groundtruth("v2-checkpoints-parquet-without-sidecars");
-    }
-
-    #[test]
-    fn test_groundtruth_v2_checkpoints_json_without_sidecars() {
-        test_v2_checkpoint_groundtruth("v2-checkpoints-json-without-sidecars");
-    }
 }

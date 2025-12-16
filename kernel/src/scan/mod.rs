@@ -443,36 +443,7 @@ impl Scan {
                 return Ok(None.into_iter().flatten());
             }
 
-            let log_segment = self.snapshot.log_segment();
-            let commit_files: Vec<FileMeta> = log_segment.find_commit_cover();
-            let checkpoint_files: Vec<FileMeta> = log_segment
-                .checkpoint_parts
-                .iter()
-                .map(|f| f.location.clone())
-                .collect();
-
-            let table_root = self.snapshot.table_root().clone();
-            let log_root = table_root.join("_delta_log/")?;
-
-            let predicate = match &self.state_info.physical_predicate {
-                PhysicalPredicate::Some(predicate, referenced_schema) => {
-                    Some((predicate.clone(), referenced_schema.clone()))
-                }
-                _ => None,
-            };
-
-            let sm = ScanStateMachine::from_scan_config_with_predicate(
-                table_root,
-                log_root,
-                self.physical_schema().clone(),
-                self.logical_schema().clone(),
-                commit_files,
-                checkpoint_files,
-                predicate,
-                self.state_info().transform_spec.clone(),
-                self.state_info().column_mapping_mode,
-                self.state_info().logical_schema.clone(),
-            )?;
+            let sm = ScanStateMachine::from_scan(self)?;
 
             let driver = ResultsDriver::new(engine, sm);
             let state_info = self.state_info();

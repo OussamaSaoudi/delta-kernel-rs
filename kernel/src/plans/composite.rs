@@ -173,6 +173,17 @@ pub struct JsonCheckpointPhasePlan {
 // AsQueryPlan Implementations
 // =============================================================================
 
+#[inline]
+fn maybe_filter_by_kdf(plan: DeclarativePlanNode, filter: Option<&FilterByKDF>) -> DeclarativePlanNode {
+    match filter {
+        Some(node) => DeclarativePlanNode::FilterByKDF {
+            child: Box::new(plan),
+            node: node.clone(),
+        },
+        None => plan,
+    }
+}
+
 impl AsQueryPlan for CommitPhasePlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
         let mut plan = DeclarativePlanNode::Scan(self.scan.clone());
@@ -189,13 +200,7 @@ impl AsQueryPlan for CommitPhasePlan {
             };
         }
 
-        // Add partition pruning if present
-        if let Some(pp) = &self.partition_prune_filter {
-            plan = DeclarativePlanNode::FilterByKDF {
-                child: Box::new(plan),
-                node: pp.clone(),
-            };
-        }
+        plan = maybe_filter_by_kdf(plan, self.partition_prune_filter.as_ref());
 
         // Add dedup KDF filter
         plan = DeclarativePlanNode::FilterByKDF {
@@ -234,13 +239,10 @@ impl AsQueryPlan for CheckpointManifestPlan {
 
 impl AsQueryPlan for CheckpointLeafPlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
-        let mut plan = DeclarativePlanNode::Scan(self.scan.clone());
-        if let Some(pp) = &self.partition_prune_filter {
-            plan = DeclarativePlanNode::FilterByKDF {
-                child: Box::new(plan),
-                node: pp.clone(),
-            };
-        }
+        let plan = maybe_filter_by_kdf(
+            DeclarativePlanNode::Scan(self.scan.clone()),
+            self.partition_prune_filter.as_ref(),
+        );
         let dedup = DeclarativePlanNode::FilterByKDF {
             child: Box::new(plan),
             node: self.dedup_filter.clone(),
@@ -313,13 +315,7 @@ impl AsQueryPlan for JsonCheckpointPhasePlan {
             child: Box::new(scan),
             node: self.sidecar_collector.clone(),
         };
-        let mut plan = consume;
-        if let Some(pp) = &self.partition_prune_filter {
-            plan = DeclarativePlanNode::FilterByKDF {
-                child: Box::new(plan),
-                node: pp.clone(),
-            };
-        }
+        let plan = maybe_filter_by_kdf(consume, self.partition_prune_filter.as_ref());
         let filter = DeclarativePlanNode::FilterByKDF {
             child: Box::new(plan),
             node: self.dedup_filter.clone(),

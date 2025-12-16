@@ -23,6 +23,27 @@ use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::schema::SchemaRef;
 use crate::{DeltaResult, EngineData, Error, FileMeta, Version};
 
+#[inline]
+fn selection_value_or_true(selection: &BooleanArray, row: usize) -> bool {
+    if row < selection.len() {
+        selection.value(row)
+    } else {
+        true
+    }
+}
+
+macro_rules! column_names_and_types {
+    ($($dt:expr => $col:expr),+ $(,)?) => {{
+        static NAMES_AND_TYPES: std::sync::LazyLock<crate::schema::ColumnNamesAndTypes> =
+            std::sync::LazyLock::new(|| {
+                let types_and_names = vec![$(($dt, $col)),+];
+                let (types, names) = types_and_names.into_iter().unzip();
+                (names, types).into()
+            });
+        NAMES_AND_TYPES.as_ref()
+    }};
+}
+
 // =============================================================================
 // Serialization Helpers for HashSet<FileActionKey>
 // =============================================================================
@@ -170,8 +191,7 @@ impl AddRemoveDedupState {
     ) -> DeltaResult<BooleanArray> {
         use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
         use crate::log_replay::FileActionDeduplicator;
-        use crate::schema::{ColumnName, ColumnNamesAndTypes, DataType};
-        use std::sync::LazyLock;
+        use crate::schema::{ColumnName, DataType};
 
         // Commit/log batch behavior (AddRemoveDedupState is only used in commit phase).
         const IS_LOG_BATCH: bool = true;
@@ -186,30 +206,24 @@ impl AddRemoveDedupState {
         impl crate::engine_data::RowVisitor for DedupVisitor<'_> {
             fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
                 // Keep ordering consistent with the indices passed to FileActionDeduplicator below.
-                static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
-                    const STRING: DataType = DataType::STRING;
-                    const INTEGER: DataType = DataType::INTEGER;
-                    let types_and_names = vec![
-                        (STRING, crate::schema::column_name!("add.path")),
-                        (STRING, crate::schema::column_name!("add.deletionVector.storageType")),
-                        (STRING, crate::schema::column_name!("add.deletionVector.pathOrInlineDv")),
-                        (INTEGER, crate::schema::column_name!("add.deletionVector.offset")),
-                        (STRING, crate::schema::column_name!("remove.path")),
-                        (STRING, crate::schema::column_name!("remove.deletionVector.storageType")),
-                        (STRING, crate::schema::column_name!("remove.deletionVector.pathOrInlineDv")),
-                        (INTEGER, crate::schema::column_name!("remove.deletionVector.offset")),
-                    ];
-                    let (types, names) = types_and_names.into_iter().unzip();
-                    (names, types).into()
-                });
-                let (names, types) = NAMES_AND_TYPES.as_ref();
-                (names, types)
+                const STRING: DataType = DataType::STRING;
+                const INTEGER: DataType = DataType::INTEGER;
+                column_names_and_types![
+                    STRING => crate::schema::column_name!("add.path"),
+                    STRING => crate::schema::column_name!("add.deletionVector.storageType"),
+                    STRING => crate::schema::column_name!("add.deletionVector.pathOrInlineDv"),
+                    INTEGER => crate::schema::column_name!("add.deletionVector.offset"),
+                    STRING => crate::schema::column_name!("remove.path"),
+                    STRING => crate::schema::column_name!("remove.deletionVector.storageType"),
+                    STRING => crate::schema::column_name!("remove.deletionVector.pathOrInlineDv"),
+                    INTEGER => crate::schema::column_name!("remove.deletionVector.offset"),
+                ]
             }
 
             fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
                 self.out_selection.resize(row_count, false);
                 for i in 0..row_count {
-                    if !self.input_selection.value(i) {
+                    if !selection_value_or_true(&self.input_selection, i) {
                         self.out_selection[i] = false;
                         continue;
                     }
@@ -343,10 +357,9 @@ impl PartitionPruneState {
     ) -> DeltaResult<BooleanArray> {
         use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
         use crate::kernel_predicates::{DefaultKernelPredicateEvaluator, KernelPredicateEvaluator as _};
-        use crate::schema::{ColumnName, ColumnNamesAndTypes, DataType, MapType};
+        use crate::schema::{ColumnName, DataType, MapType};
         use crate::transforms::parse_partition_values;
         use std::collections::HashMap;
-        use std::sync::LazyLock;
 
         struct Visitor<'a> {
             state: &'a PartitionPruneState,
@@ -356,29 +369,18 @@ impl PartitionPruneState {
 
         impl crate::engine_data::RowVisitor for Visitor<'_> {
             fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-                static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
-                    const STRING: DataType = DataType::STRING;
-                    let ss_map: DataType = MapType::new(STRING, STRING, true).into();
-                    let types_and_names = vec![
-                        (STRING, crate::schema::column_name!("add.path")),
-                        (ss_map, crate::schema::column_name!("add.partitionValues")),
-                    ];
-                    let (types, names) = types_and_names.into_iter().unzip();
-                    (names, types).into()
-                });
-                let (names, types) = NAMES_AND_TYPES.as_ref();
-                (names, types)
+                const STRING: DataType = DataType::STRING;
+                column_names_and_types![
+                    STRING => crate::schema::column_name!("add.path"),
+                    MapType::new(STRING, STRING, true).into() => crate::schema::column_name!("add.partitionValues"),
+                ]
             }
 
             fn visit<'a2>(&mut self, row_count: usize, getters: &[&'a2 dyn GetData<'a2>]) -> DeltaResult<()> {
                 self.out.resize(row_count, true);
                 for i in 0..row_count {
                     // Treat missing selection entries as true (selected) per FilteredEngineData contract.
-                    let selected = if i < self.input_selection.len() {
-                        self.input_selection.value(i)
-                    } else {
-                        true
-                    };
+                    let selected = selection_value_or_true(self.input_selection, i);
                     if !selected {
                         self.out[i] = false;
                         continue;
@@ -455,8 +457,7 @@ impl CheckpointDedupState {
     ) -> DeltaResult<BooleanArray> {
         use crate::engine_data::{GetData, RowVisitor};
         use crate::log_replay::FileActionDeduplicator;
-        use crate::schema::{ColumnName, ColumnNamesAndTypes, DataType};
-        use std::sync::LazyLock;
+        use crate::schema::{ColumnName, DataType};
 
         // Checkpoint dedup is a read-only probe. It should match legacy behavior:
         // - Only consider Add actions (checkpoint files are reconciled)
@@ -469,26 +470,20 @@ impl CheckpointDedupState {
 
         impl crate::engine_data::RowVisitor for ProbeVisitor<'_> {
             fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-                static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
-                    const STRING: DataType = DataType::STRING;
-                    const INTEGER: DataType = DataType::INTEGER;
-                    let types_and_names = vec![
-                        (STRING, crate::schema::column_name!("add.path")),
-                        (STRING, crate::schema::column_name!("add.deletionVector.storageType")),
-                        (STRING, crate::schema::column_name!("add.deletionVector.pathOrInlineDv")),
-                        (INTEGER, crate::schema::column_name!("add.deletionVector.offset")),
-                    ];
-                    let (types, names) = types_and_names.into_iter().unzip();
-                    (names, types).into()
-                });
-                let (names, types) = NAMES_AND_TYPES.as_ref();
-                (names, types)
+                const STRING: DataType = DataType::STRING;
+                const INTEGER: DataType = DataType::INTEGER;
+                column_names_and_types![
+                    STRING => crate::schema::column_name!("add.path"),
+                    STRING => crate::schema::column_name!("add.deletionVector.storageType"),
+                    STRING => crate::schema::column_name!("add.deletionVector.pathOrInlineDv"),
+                    INTEGER => crate::schema::column_name!("add.deletionVector.offset"),
+                ]
             }
 
             fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
                 self.out_selection.resize(row_count, false);
                 for i in 0..row_count {
-                    if !self.input_selection.value(i) {
+                    if !selection_value_or_true(&self.input_selection, i) {
                         self.out_selection[i] = false;
                         continue;
                     }
@@ -1475,9 +1470,8 @@ impl SidecarCollectorState {
     /// - `sidecar.sizeInBytes`: Long - size of sidecar file in bytes
     #[inline]
     pub fn apply(&self, batch: &dyn EngineData) -> DeltaResult<bool> {
-        use crate::arrow::array::{Array, AsArray, Int64Array, StringArray};
-        use crate::engine::arrow_data::ArrowEngineData;
-        use crate::AsAny;
+        use crate::actions::visitors::SidecarVisitor;
+        use crate::engine_data::RowVisitor as _;
 
         let mut inner = self.inner.lock().unwrap();
 
@@ -1486,86 +1480,14 @@ impl SidecarCollectorState {
             return Ok(false);
         }
 
-        // Try to get the batch as ArrowEngineData
-        let arrow_data = batch
-            .any_ref()
-            .downcast_ref::<ArrowEngineData>()
-            .ok_or_else(|| Error::generic("Expected ArrowEngineData for SidecarCollector"))?;
+        // Reuse the canonical sidecar extractor used elsewhere in the kernel.
+        let mut visitor = SidecarVisitor::default();
+        visitor.visit_rows_of(batch)?;
 
-        let record_batch = arrow_data.record_batch();
-        let num_rows = record_batch.num_rows();
-
-        if num_rows == 0 {
-            return Ok(true); // Continue with empty batch
-        }
-
-        // Get the sidecar path column
-        // Try multiple strategies:
-        // 1. Nested struct: sidecar.path from JSON checkpoints
-        // 2. Literal column name: "sidecar.path" from projected parquet data
-        // 3. Top-level "path" column
-        let path_col = record_batch
-            .column_by_name("sidecar")
-            .and_then(|col| col.as_struct_opt())
-            .and_then(|s| s.column_by_name("path"))
-            .or_else(|| record_batch.column_by_name("sidecar.path"))
-            .or_else(|| record_batch.column_by_name("path"));
-
-        let path_array = match path_col {
-            Some(col) => match col.as_any().downcast_ref::<StringArray>() {
-                Some(arr) => arr,
-                None => {
-                    // Column exists but isn't a string array - skip this batch
-                    return Ok(true);
-                }
-            },
-            None => {
-                // No sidecar path column found - this is OK for non-sidecar rows
-                // Just continue processing
-                return Ok(true);
-            }
-        };
-
-        // Get the sidecar size column (optional)
-        // Same strategy: nested struct, literal name, or plain name
-        let size_col = record_batch
-            .column_by_name("sidecar")
-            .and_then(|col| col.as_struct_opt())
-            .and_then(|s| s.column_by_name("sizeInBytes"))
-            .or_else(|| record_batch.column_by_name("sidecar.sizeInBytes"))
-            .or_else(|| record_batch.column_by_name("sizeInBytes"));
-
-        let size_array = size_col.and_then(|col| col.as_any().downcast_ref::<Int64Array>());
-
-        // Process each row
-        for i in 0..num_rows {
-            if path_array.is_null(i) {
-                continue;
-            }
-
-            let path_str = path_array.value(i);
-            let size = size_array
-                .and_then(|arr| if arr.is_null(i) { None } else { Some(arr.value(i) as u64) })
-                .unwrap_or(0);
-
-            // Construct full URL for the sidecar file
-            // Sidecar files are in _delta_log/_sidecars/ directory
-            let sidecar_url = match inner.log_root.join("_sidecars/").and_then(|u| u.join(path_str)) {
-                Ok(url) => url,
-                Err(e) => {
-                    inner.error = Some(format!("Failed to construct sidecar URL for '{}': {}", path_str, e));
-                    return Ok(false);
-                }
-            };
-
-            // Create FileMeta for the sidecar
-            let file_meta = FileMeta {
-                location: sidecar_url,
-                last_modified: 0, // Not available from manifest
-                size,
-            };
-
-            inner.sidecar_files.push(file_meta);
+        // Clone log_root before the loop to avoid borrow conflicts
+        let log_root = inner.log_root.clone();
+        for sidecar in visitor.sidecars {
+            inner.sidecar_files.push(sidecar.to_filemeta(&log_root)?);
         }
 
         Ok(true) // Continue processing

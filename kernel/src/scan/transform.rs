@@ -19,14 +19,26 @@
 //! [`ScanStateMachine`]: crate::plans::state_machines::ScanStateMachine
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_name, ColumnName, Scalar};
 use crate::scan::state_info::StateInfo;
-use crate::schema::{ColumnNamesAndTypes, DataType, MapType};
+use crate::schema::{DataType, MapType};
 use crate::transforms::{get_transform_expr, parse_partition_values, TransformSpec};
 use crate::{DeltaResult, EngineData, ExpressionRef};
+
+macro_rules! column_names_and_types {
+    ($($dt:expr => $col:expr),+ $(,)?) => {{
+        static NAMES_AND_TYPES: std::sync::LazyLock<crate::schema::ColumnNamesAndTypes> =
+            std::sync::LazyLock::new(|| {
+                let types_and_names = vec![$(($dt, $col)),+];
+                let (types, names) = types_and_names.into_iter().unzip();
+                (names, types).into()
+            });
+        NAMES_AND_TYPES.as_ref()
+    }};
+}
 
 /// Computes row-level transform expressions from scan batches.
 ///
@@ -132,22 +144,12 @@ impl TransformVisitor {
 
 impl RowVisitor for TransformVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
-            const STRING: DataType = DataType::STRING;
-            const LONG: DataType = DataType::LONG;
-            let ss_map: DataType = MapType::new(STRING, STRING, true).into();
-
-            // We need partition values and base row ID from SCAN_ROW_SCHEMA.
-            // These are nested under "fileConstantValues" struct.
-            let types_and_names = vec![
-                (ss_map, column_name!("fileConstantValues.partitionValues")),
-                (LONG, column_name!("fileConstantValues.baseRowId")),
-            ];
-            let (types, names): (Vec<DataType>, Vec<ColumnName>) =
-                types_and_names.into_iter().unzip();
-            (names, types).into()
-        });
-        NAMES_AND_TYPES.as_ref()
+        const STRING: DataType = DataType::STRING;
+        const LONG: DataType = DataType::LONG;
+        column_names_and_types![
+            MapType::new(STRING, STRING, true).into() => column_name!("fileConstantValues.partitionValues"),
+            LONG => column_name!("fileConstantValues.baseRowId"),
+        ]
     }
 
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
@@ -377,7 +379,6 @@ mod state_machine_comparison_tests {
     use crate::snapshot::Snapshot;
     use crate::Engine;
     use crate::ExpressionRef;
-    use crate::FileMeta;
 
     fn create_test_engine() -> Arc<dyn Engine> {
         Arc::new(SyncEngine::new())
@@ -439,18 +440,6 @@ mod state_machine_comparison_tests {
     ) -> Vec<(String, bool)> {
         use crate::arrow::array::AsArray;
 
-        // Get files from log segment (do this before consuming snapshot)
-        // Use find_commit_cover() to handle compacted log files correctly
-        let log_segment = snapshot.log_segment();
-        let commit_files: Vec<FileMeta> = log_segment.find_commit_cover();
-        let checkpoint_files: Vec<FileMeta> = log_segment
-            .checkpoint_parts
-            .iter()
-            .map(|f| f.location.clone())
-            .collect();
-        let table_url = snapshot.table_root().clone();
-        let schema = snapshot.schema().clone();
-
         // Get the state_info from a Scan (so we use the same transform logic)
         // Note: scan_builder consumes the Arc<Snapshot>
         let scan = snapshot
@@ -459,16 +448,9 @@ mod state_machine_comparison_tests {
             .expect("Should build scan");
         let state_info = scan.state_info();
 
-        // Create state machine
-        let sm = ScanStateMachine::from_scan_config(
-            table_url.clone(),
-            table_url.join("_delta_log/").unwrap(),
-            schema.clone(),
-            schema,
-            commit_files,
-            checkpoint_files,
-        )
-        .expect("Should create state machine");
+        // Create state machine from the Scan (single canonical construction path)
+        let sm =
+            ScanStateMachine::from_scan(&scan).expect("Should create state machine");
 
         // Execute via ResultsDriver
         let driver = ResultsDriver::new(engine.as_ref(), sm);
@@ -822,16 +804,6 @@ mod state_machine_comparison_tests {
     ) -> Vec<(String, bool)> {
         use crate::arrow::array::AsArray;
 
-        let log_segment = snapshot.log_segment();
-        let commit_files: Vec<FileMeta> = log_segment.find_commit_cover();
-        let checkpoint_files: Vec<FileMeta> = log_segment
-            .checkpoint_parts
-            .iter()
-            .map(|f| f.location.clone())
-            .collect();
-        let table_url = snapshot.table_root().clone();
-        let schema = snapshot.schema().clone();
-
         // Build scan with predicate to get the state_info
         let mut scan_builder = snapshot.scan_builder();
         if let Some((pred, _)) = &predicate {
@@ -840,20 +812,10 @@ mod state_machine_comparison_tests {
         let scan = scan_builder.build().expect("Should build scan");
         let state_info = scan.state_info();
 
-        // Create state machine with predicate
-        let sm = crate::plans::state_machines::ScanStateMachine::from_scan_config_with_predicate(
-            table_url.clone(),
-            table_url.join("_delta_log/").unwrap(),
-            schema.clone(),
-            schema,
-            commit_files,
-            checkpoint_files,
-            predicate,
-            state_info.transform_spec.clone(),
-            state_info.column_mapping_mode,
-            state_info.logical_schema.clone(),
-        )
-        .expect("Should create state machine");
+        // Create state machine from the Scan (single canonical construction path)
+        let sm =
+            crate::plans::state_machines::ScanStateMachine::from_scan(&scan)
+                .expect("Should create state machine");
 
         // Execute via ResultsDriver
         let driver = ResultsDriver::new(engine.as_ref(), sm);

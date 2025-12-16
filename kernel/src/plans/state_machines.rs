@@ -51,8 +51,7 @@ use crate::proto_generated as proto;
 use crate::schema::SchemaRef;
 use crate::snapshot::Snapshot;
 use crate::table_configuration::TableConfiguration;
-use crate::FileMeta;
-use crate::{DeltaResult, Error};
+use crate::{DeltaResult, Error, FileMeta, SnapshotRef};
 
 use super::composite::*;
 use super::declarative::DeclarativePlanNode;
@@ -776,14 +775,10 @@ impl ScanPhase {
 /// Internal state accumulated during scan execution.
 #[derive(Debug)]
 pub struct ScanBuildState {
-    /// Table root URL
-    pub table_root: Url,
-    /// Log directory URL
-    pub log_root: Url,
-    /// Physical schema for reading data files
-    pub physical_schema: SchemaRef,
-    /// Logical schema (output schema)
-    pub logical_schema: SchemaRef,
+    /// Reference to the snapshot being scanned
+    snapshot: SnapshotRef,
+    /// Reference to the scan state info (contains schemas, predicate, column mapping, etc.)
+    state_info: Arc<crate::scan::state_info::StateInfo>,
     /// Typed dedup state for AddRemoveDedup KDF
     pub dedup_state: FilterKdfState,
     /// Optional partition pruning state (built from predicate + transform spec)
@@ -796,97 +791,77 @@ pub struct ScanBuildState {
     pub sidecar_files: Vec<FileMeta>,
     /// Checkpoint type (determined from schema query)
     pub checkpoint_type: Option<CheckpointType>,
-    /// Optional predicate for data skipping (predicate and its referenced schema)
-    pub predicate: Option<(PredicateRef, SchemaRef)>,
-    /// Column mapping mode (needed for parsing partition values)
-    pub column_mapping_mode: crate::table_features::ColumnMappingMode,
-    /// Stats schema for data skipping (computed from predicate's referenced schema)
-    pub stats_schema: Option<SchemaRef>,
 }
 
 impl ScanBuildState {
-    fn new(
-        table_root: Url,
-        physical_schema: SchemaRef,
-        logical_schema: SchemaRef,
-    ) -> DeltaResult<Self> {
-        Self::with_predicate(table_root, physical_schema, logical_schema, None)
+    /// Get the log root URL from the snapshot
+    fn log_root(&self) -> &Url {
+        &self.snapshot.log_segment().log_root
     }
 
-    fn with_predicate(
-        table_root: Url,
-        physical_schema: SchemaRef,
-        logical_schema: SchemaRef,
-        predicate: Option<(PredicateRef, SchemaRef)>,
+    /// Get the table root URL from the snapshot
+    fn table_root(&self) -> &Url {
+        self.snapshot.table_root()
+    }
+
+    /// Get the physical schema from state_info
+    fn physical_schema(&self) -> &SchemaRef {
+        &self.state_info.physical_schema
+    }
+
+    /// Get the logical schema from state_info
+    fn logical_schema(&self) -> &SchemaRef {
+        &self.state_info.logical_schema
+    }
+
+    /// Get the column mapping mode from state_info
+    fn column_mapping_mode(&self) -> crate::table_features::ColumnMappingMode {
+        self.state_info.column_mapping_mode
+    }
+
+    /// Get the predicate from state_info (if present)
+    fn predicate(&self) -> Option<(PredicateRef, SchemaRef)> {
+        use crate::scan::PhysicalPredicate;
+        match &self.state_info.physical_predicate {
+            PhysicalPredicate::Some(pred, schema) => Some((pred.clone(), schema.clone())),
+            PhysicalPredicate::None | PhysicalPredicate::StaticSkipAll => None,
+        }
+    }
+
+    /// Compute stats schema from predicate's referenced schema (delegates to DataSkippingFilter).
+    /// This is computed on-demand to avoid duplication.
+    fn stats_schema(&self) -> Option<SchemaRef> {
+        use crate::scan::data_skipping::DataSkippingFilter;
+        use crate::scan::PhysicalPredicate;
+
+        let referenced_schema = match &self.state_info.physical_predicate {
+            PhysicalPredicate::Some(_, schema) => schema,
+            PhysicalPredicate::None | PhysicalPredicate::StaticSkipAll => return None,
+        };
+
+        DataSkippingFilter::compute_stats_schema(referenced_schema)
+    }
+
+    #[inline]
+    fn partition_prune_filter(&self) -> Option<FilterByKDF> {
+        self.partition_prune_state
+            .as_ref()
+            .map(|s| FilterByKDF::with_state(s.clone()))
+    }
+
+    fn new(
+        snapshot: SnapshotRef,
+        state_info: Arc<crate::scan::state_info::StateInfo>,
     ) -> DeltaResult<Self> {
-        use std::borrow::Cow;
-        use crate::schema::{DataType, PrimitiveType, SchemaTransform, StructField, StructType};
-
-        let log_root = table_root.join("_delta_log/")?;
-
-        // Compute stats schema from predicate's referenced schema if present
-        let stats_schema = predicate.as_ref().and_then(|(_, referenced_schema)| {
-            // Convert all fields into nullable, as stats may not be available for all columns
-            struct NullableStatsTransform;
-            impl<'a> SchemaTransform<'a> for NullableStatsTransform {
-                fn transform_struct_field(
-                    &mut self,
-                    field: &'a StructField,
-                ) -> Option<Cow<'a, StructField>> {
-                    let field = match self.transform(&field.data_type)? {
-                        Cow::Borrowed(_) if field.is_nullable() => Cow::Borrowed(field),
-                        data_type => Cow::Owned(StructField {
-                            name: field.name.clone(),
-                            data_type: data_type.into_owned(),
-                            nullable: true,
-                            metadata: field.metadata.clone(),
-                        }),
-                    };
-                    Some(field)
-                }
-            }
-
-            // Convert a min/max stats schema into a nullcount schema (all leaf fields are LONG)
-            struct NullCountStatsTransform;
-            impl<'a> SchemaTransform<'a> for NullCountStatsTransform {
-                fn transform_primitive(
-                    &mut self,
-                    _ptype: &'a PrimitiveType,
-                ) -> Option<Cow<'a, PrimitiveType>> {
-                    Some(Cow::Owned(PrimitiveType::Long))
-                }
-            }
-
-            let nullable_schema = NullableStatsTransform
-                .transform_struct(referenced_schema)?
-                .into_owned();
-
-            let nullcount_schema = NullCountStatsTransform
-                .transform_struct(&nullable_schema)?
-                .into_owned();
-
-            Some(Arc::new(StructType::new_unchecked([
-                StructField::nullable("numRecords", DataType::LONG),
-                StructField::nullable("nullCount", nullcount_schema),
-                StructField::nullable("minValues", nullable_schema.clone()),
-                StructField::nullable("maxValues", nullable_schema),
-            ])))
-        });
-
         Ok(Self {
-            table_root,
-            log_root,
-            physical_schema,
-            logical_schema,
+            snapshot,
+            state_info,
             dedup_state: FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new()),
             partition_prune_state: None,
             commit_files: Vec::new(),
             checkpoint_files: Vec::new(),
             sidecar_files: Vec::new(),
             checkpoint_type: None,
-            predicate,
-            column_mapping_mode: crate::table_features::ColumnMappingMode::None,
-            stats_schema,
         })
     }
 }
@@ -917,7 +892,10 @@ pub struct ScanMetadataResult {
 /// # Example
 ///
 /// ```ignore
-/// let sm = ScanStateMachine::new(table_root, physical_schema, logical_schema)?;
+/// let scan = ScanBuilder::new(snapshot)
+///     .with_schema(schema)
+///     .build()?;
+/// let sm = ScanStateMachine::from_scan(&scan)?;
 /// let result = executor.execute_state_machine(sm)?;
 /// // result.files contains the files to scan
 /// ```
@@ -930,136 +908,59 @@ pub struct ScanStateMachine {
 }
 
 impl ScanStateMachine {
-    /// Create a new scan state machine.
-    pub fn new(
-        table_root: Url,
-        physical_schema: SchemaRef,
-        logical_schema: SchemaRef,
-    ) -> DeltaResult<Self> {
-        let state = ScanBuildState::new(table_root, physical_schema, logical_schema)?;
-        let initial_plan = Self::create_commit_plan_static(&state)?;
-        Ok(Self {
-            phase: ScanPhase::Commit(initial_plan),
-            state,
-        })
-    }
+    /// Construct a scan state machine from a `Scan` (the only intended construction path).
+    ///
+    /// This avoids re-threading schemas/predicate/column-mapping that already live in `StateInfo`.
+    pub(crate) fn from_scan(scan: &crate::scan::Scan) -> DeltaResult<Self> {
+        use crate::scan::PhysicalPredicate;
 
-    /// Create from scan configuration (used by Scan::begin()).
-    pub fn from_scan_config(
-        table_root: Url,
-        log_root: Url,
-        physical_schema: SchemaRef,
-        logical_schema: SchemaRef,
-        commit_files: Vec<FileMeta>,
-        checkpoint_files: Vec<FileMeta>,
-    ) -> DeltaResult<Self> {
-        let logical_schema_full = logical_schema.clone();
-        Self::from_scan_config_with_predicate(
-            table_root,
-            log_root,
-            physical_schema,
-            logical_schema,
-            commit_files,
-            checkpoint_files,
-            None,
-            None,
-            crate::table_features::ColumnMappingMode::None,
-            logical_schema_full,
-        )
-    }
+        if let PhysicalPredicate::StaticSkipAll = scan.state_info().physical_predicate {
+            // Caller typically checks this already; return a trivially-complete state machine.
+            return Ok(Self {
+                phase: ScanPhase::Complete,
+                state: ScanBuildState {
+                    snapshot: scan.snapshot().clone(),
+                    state_info: scan.state_info(),
+                    dedup_state: FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new()),
+                    partition_prune_state: None,
+                    commit_files: vec![],
+                    checkpoint_files: vec![],
+                    sidecar_files: vec![],
+                    checkpoint_type: None,
+                },
+            });
+        }
 
-    /// Create from scan configuration with optional predicate for data skipping.
-    pub(crate) fn from_scan_config_with_predicate(
-        table_root: Url,
-        log_root: Url,
-        physical_schema: SchemaRef,
-        logical_schema: SchemaRef,
-        commit_files: Vec<FileMeta>,
-        checkpoint_files: Vec<FileMeta>,
-        predicate: Option<(PredicateRef, SchemaRef)>,
-        transform_spec: Option<Arc<crate::transforms::TransformSpec>>,
-        column_mapping_mode: crate::table_features::ColumnMappingMode,
-        logical_schema_full: crate::schema::SchemaRef,
-    ) -> DeltaResult<Self> {
-        use std::borrow::Cow;
-        use crate::schema::{DataType, PrimitiveType, SchemaTransform, StructField, StructType};
+        // Extract log segment files.
+        let log_segment = scan.snapshot().log_segment();
+        let commit_files: Vec<FileMeta> = log_segment.find_commit_cover();
+        let checkpoint_files: Vec<FileMeta> = log_segment
+            .checkpoint_parts
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
 
-        // Compute stats schema from predicate's referenced schema if present
-        let stats_schema = predicate.as_ref().and_then(|(_, referenced_schema)| {
-            // Convert all fields into nullable
-            struct NullableStatsTransform;
-            impl<'a> SchemaTransform<'a> for NullableStatsTransform {
-                fn transform_struct_field(
-                    &mut self,
-                    field: &'a StructField,
-                ) -> Option<Cow<'a, StructField>> {
-                    let field = match self.transform(&field.data_type)? {
-                        Cow::Borrowed(_) if field.is_nullable() => Cow::Borrowed(field),
-                        data_type => Cow::Owned(StructField {
-                            name: field.name.clone(),
-                            data_type: data_type.into_owned(),
-                            nullable: true,
-                            metadata: field.metadata.clone(),
-                        }),
-                    };
-                    Some(field)
-                }
-            }
-
-            // Convert a min/max stats schema into a nullcount schema
-            struct NullCountStatsTransform;
-            impl<'a> SchemaTransform<'a> for NullCountStatsTransform {
-                fn transform_primitive(
-                    &mut self,
-                    _ptype: &'a PrimitiveType,
-                ) -> Option<Cow<'a, PrimitiveType>> {
-                    Some(Cow::Owned(PrimitiveType::Long))
-                }
-            }
-
-            let nullable_schema = NullableStatsTransform
-                .transform_struct(referenced_schema)?
-                .into_owned();
-
-            let nullcount_schema = NullCountStatsTransform
-                .transform_struct(&nullable_schema)?
-                .into_owned();
-
-            Some(Arc::new(StructType::new_unchecked([
-                StructField::nullable("numRecords", DataType::LONG),
-                StructField::nullable("nullCount", nullcount_schema),
-                StructField::nullable("minValues", nullable_schema.clone()),
-                StructField::nullable("maxValues", nullable_schema),
-            ])))
-        });
-
-        let partition_prune_state = match (&predicate, &transform_spec) {
-            (Some((pred, _)), Some(ts)) => Some(FilterKdfState::PartitionPrune(
+        // Compute partition pruning state from scan's predicate and transform spec
+        let partition_prune_state = match (&scan.state_info().physical_predicate, &scan.state_info().transform_spec) {
+            (PhysicalPredicate::Some(pred, _), Some(ts)) => Some(FilterKdfState::PartitionPrune(
                 crate::plans::kdf_state::PartitionPruneState {
                     predicate: pred.clone(),
                     transform_spec: ts.clone(),
-                    logical_schema: logical_schema_full.clone(),
-                    column_mapping_mode,
+                    logical_schema: scan.state_info().logical_schema.clone(),
+                    column_mapping_mode: scan.state_info().column_mapping_mode,
                 },
             )),
             _ => None,
         };
 
-        let state = ScanBuildState {
-            table_root,
-            log_root,
-            physical_schema,
-            logical_schema,
-            dedup_state: FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new()),
-            partition_prune_state,
-            commit_files,
-            checkpoint_files,
-            sidecar_files: Vec::new(),
-            checkpoint_type: None,
-            predicate,
-            column_mapping_mode,
-            stats_schema,
-        };
+        let mut state = ScanBuildState::new(
+            scan.snapshot().clone(),
+            scan.state_info(),
+        )?;
+        state.commit_files = commit_files;
+        state.checkpoint_files = checkpoint_files;
+        state.partition_prune_state = partition_prune_state;
+
         let initial_plan = Self::create_commit_plan_static(&state)?;
         Ok(Self {
             phase: ScanPhase::Commit(initial_plan),
@@ -1067,6 +968,10 @@ impl ScanStateMachine {
         })
     }
 
+    // Legacy test-only constructors - these panic and should not be used in production.
+    // They exist only to allow old tests to compile. New code should use `from_scan`.
+    #[doc(hidden)]
+    #[cfg(test)]
     /// Get the current phase.
     pub fn phase(&self) -> &ScanPhase {
         &self.phase
@@ -1189,10 +1094,10 @@ impl ScanStateMachine {
 
     fn build_result(&self) -> ScanMetadataResult {
         ScanMetadataResult {
-            table_root: self.state.table_root.clone(),
+            table_root: self.state.table_root().clone(),
             files: Vec::new(), // Would be populated from accumulated state
-            physical_schema: self.state.physical_schema.clone(),
-            logical_schema: self.state.logical_schema.clone(),
+            physical_schema: self.state.physical_schema().clone(),
+            logical_schema: self.state.logical_schema().clone(),
         }
     }
 
@@ -1260,10 +1165,10 @@ impl ScanStateMachine {
         let transform_expr = get_add_transform_expr();
 
         // Build data skipping plan if predicate is present
-        let data_skipping = match (&state.predicate, &state.stats_schema) {
+        let data_skipping = match (state.predicate(), state.stats_schema().as_ref()) {
             (Some((predicate, _)), Some(stats_schema)) => {
                 // Transform user predicate into data skipping predicate
-                let skipping_pred = as_sql_data_skipping_predicate(predicate);
+                let skipping_pred = as_sql_data_skipping_predicate(&predicate);
                 
                 skipping_pred.map(|pred| {
                     DataSkippingPlan {
@@ -1289,10 +1194,7 @@ impl ScanStateMachine {
                 schema,
             },
             data_skipping,
-            partition_prune_filter: state
-                .partition_prune_state
-                .as_ref()
-                .map(|s| FilterByKDF::with_state(s.clone())),
+            partition_prune_filter: state.partition_prune_filter(),
             dedup_filter: FilterByKDF::with_state(state.dedup_state.clone()),
             project: SelectNode {
                 columns: vec![transform_expr],
@@ -1328,17 +1230,10 @@ impl ScanStateMachine {
             ]),
         )]));
 
-        // Output schema for sidecar file paths - just path and sizeInBytes
-        let output_schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::nullable("path", DataType::STRING),
-            StructField::nullable("sizeInBytes", DataType::LONG),
-        ]));
-
-        // Project sidecar.path and sidecar.sizeInBytes
-        let columns = vec![
-            Expression::column(["sidecar", "path"]).into(),
-            Expression::column(["sidecar", "sizeInBytes"]).into(),
-        ];
+        // Pass through the `sidecar` struct so SidecarCollector can reuse SidecarVisitor
+        // (avoid bespoke Arrow column-walking logic and keep a single canonical extractor).
+        let output_schema = schema.clone();
+        let columns = vec![Expression::column(["sidecar"]).into()];
 
         Ok(CheckpointManifestPlan {
             scan: ScanNode {
@@ -1350,7 +1245,7 @@ impl ScanStateMachine {
                 columns,
                 output_schema,
             },
-            sidecar_collector: ConsumeByKDF::sidecar_collector(self.state.log_root.clone()),
+            sidecar_collector: ConsumeByKDF::sidecar_collector(self.state.log_root().clone()),
             sink: SinkNode::drop(), // Drop sink - side effect only (collects sidecar paths)
         })
     }
@@ -1409,11 +1304,7 @@ impl ScanStateMachine {
                 files,
                 schema,
             },
-            partition_prune_filter: self
-                .state
-                .partition_prune_state
-                .as_ref()
-                .map(|s| FilterByKDF::with_state(s.clone())),
+            partition_prune_filter: self.state.partition_prune_filter(),
             dedup_filter: FilterByKDF::with_state(FilterKdfState::CheckpointDedup(checkpoint_dedup_state)),
             project: SelectNode {
                 columns: vec![transform_expr],
@@ -1466,12 +1357,8 @@ impl ScanStateMachine {
             },
             // SidecarCollector sees all rows before filtering
             // It gracefully handles rows without sidecar data
-            sidecar_collector: ConsumeByKDF::sidecar_collector(self.state.log_root.clone()),
-            partition_prune_filter: self
-                .state
-                .partition_prune_state
-                .as_ref()
-                .map(|s| FilterByKDF::with_state(s.clone())),
+            sidecar_collector: ConsumeByKDF::sidecar_collector(self.state.log_root().clone()),
+            partition_prune_filter: self.state.partition_prune_filter(),
             // Reuse dedup state from commit phase to filter out already-seen files
             dedup_filter: FilterByKDF::with_state(self.state.dedup_state.clone()),
             project: SelectNode {

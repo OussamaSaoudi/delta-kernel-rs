@@ -59,23 +59,20 @@ pub(crate) struct DataSkippingFilter {
 }
 
 impl DataSkippingFilter {
-    /// Creates a new data skipping filter. Returns None if there is no predicate, or the predicate
-    /// is ineligible for data skipping.
+    /// Compute the stats schema from a predicate's referenced schema.
     ///
-    /// NOTE: None is equivalent to a trivial filter that always returns TRUE (= keeps all files),
-    /// but using an Option lets the engine easily avoid the overhead of applying trivial filters.
-    pub(crate) fn new(
-        engine: &dyn Engine,
-        physical_predicate: Option<(PredicateRef, SchemaRef)>,
-    ) -> Option<Self> {
-        static STATS_EXPR: LazyLock<ExpressionRef> =
-            LazyLock::new(|| Arc::new(column_expr!("add.stats")));
-        static FILTER_PRED: LazyLock<PredicateRef> =
-            LazyLock::new(|| Arc::new(column_expr!("output").distinct(Expr::literal(false))));
-
-        let (predicate, referenced_schema) = physical_predicate?;
-        debug!("Creating a data skipping filter for {:#?}", predicate);
-
+    /// This transforms the referenced schema into a stats schema with the structure:
+    /// ```text
+    /// {
+    ///   numRecords: Long,
+    ///   nullCount: { /* referenced schema with all leaves as Long */ },
+    ///   minValues: { /* referenced schema with all fields nullable */ },
+    ///   maxValues: { /* referenced schema with all fields nullable */ }
+    /// }
+    /// ```
+    ///
+    /// Returns `None` if the transformation fails (e.g., unsupported types).
+    pub(crate) fn compute_stats_schema(referenced_schema: &SchemaRef) -> Option<SchemaRef> {
         // Convert all fields into nullable, as stats may not be available for all columns
         // (and usually aren't for partition columns).
         struct NullableStatsTransform;
@@ -110,18 +107,48 @@ impl DataSkippingFilter {
         }
 
         let stats_schema = NullableStatsTransform
-            .transform_struct(&referenced_schema)?
+            .transform_struct(referenced_schema)?
             .into_owned();
 
         let nullcount_schema = NullCountStatsTransform
             .transform_struct(&stats_schema)?
             .into_owned();
-        let stats_schema = Arc::new(StructType::new_unchecked([
+
+        Some(Arc::new(StructType::new_unchecked([
             StructField::nullable("numRecords", DataType::LONG),
             StructField::nullable("nullCount", nullcount_schema),
             StructField::nullable("minValues", stats_schema.clone()),
             StructField::nullable("maxValues", stats_schema),
-        ]));
+        ])))
+    }
+
+    /// Extract predicate and stats schema from a physical predicate.
+    ///
+    /// Returns `None` if there is no predicate or the predicate is ineligible for data skipping.
+    pub(crate) fn extract_predicate_and_stats_schema(
+        physical_predicate: Option<(PredicateRef, SchemaRef)>,
+    ) -> Option<(PredicateRef, SchemaRef, SchemaRef)> {
+        let (predicate, referenced_schema) = physical_predicate?;
+        let stats_schema = Self::compute_stats_schema(&referenced_schema)?;
+        Some((predicate, referenced_schema, stats_schema))
+    }
+
+    /// Creates a new data skipping filter. Returns None if there is no predicate, or the predicate
+    /// is ineligible for data skipping.
+    ///
+    /// NOTE: None is equivalent to a trivial filter that always returns TRUE (= keeps all files),
+    /// but using an Option lets the engine easily avoid the overhead of applying trivial filters.
+    pub(crate) fn new(
+        engine: &dyn Engine,
+        physical_predicate: Option<(PredicateRef, SchemaRef)>,
+    ) -> Option<Self> {
+        static STATS_EXPR: LazyLock<ExpressionRef> =
+            LazyLock::new(|| Arc::new(column_expr!("add.stats")));
+        static FILTER_PRED: LazyLock<PredicateRef> =
+            LazyLock::new(|| Arc::new(column_expr!("output").distinct(Expr::literal(false))));
+
+        let (predicate, _referenced_schema, stats_schema) = Self::extract_predicate_and_stats_schema(physical_predicate)?;
+        debug!("Creating a data skipping filter for {:#?}", predicate);
 
         // Skipping happens in several steps:
         //

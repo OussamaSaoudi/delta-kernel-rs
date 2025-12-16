@@ -19,6 +19,46 @@ use prost::Message;
 use crate::handle::Handle;
 use crate::IntoExternResult;
 
+macro_rules! ffi_handle_fns {
+    (
+        $to_proto_fn:ident,
+        $is_terminal_fn:ident,
+        $phase_name_fn:ident,
+        $free_fn:ident,
+        $shared:ty,
+        $ty:ty,
+        $proto:ty,
+        to_proto = $to_proto:expr,
+        is_terminal = $is_terminal:expr,
+        phase_name = $phase_name:expr
+    ) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $to_proto_fn(handle: Handle<$shared>) -> ProtoBytes {
+            let h = unsafe { handle.as_ref() };
+            let proto_val: $proto = ($to_proto)(h);
+            ProtoBytes::from_vec(proto_val.encode_to_vec())
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C" fn $is_terminal_fn(handle: Handle<$shared>) -> bool {
+            let h = unsafe { handle.as_ref() };
+            ($is_terminal)(h)
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C" fn $phase_name_fn(handle: Handle<$shared>) -> crate::KernelStringSlice {
+            let h = unsafe { handle.as_ref() };
+            let name: &'static str = ($phase_name)(h);
+            crate::kernel_string_slice!(name)
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C" fn $free_fn(handle: Handle<$shared>) {
+            handle.drop_handle();
+        }
+    };
+}
+
 // =============================================================================
 // Handle Types
 // =============================================================================
@@ -88,41 +128,18 @@ pub unsafe extern "C" fn free_proto_bytes(bytes: ProtoBytes) {
 // LogReplayPhase FFI (Legacy)
 // =============================================================================
 
-/// Serialize a LogReplayPhase to protobuf bytes.
-#[no_mangle]
-pub unsafe extern "C" fn log_replay_phase_to_proto(
-    phase: Handle<SharedLogReplayPhase>,
-) -> ProtoBytes {
-    let phase_ref = unsafe { phase.as_ref() };
-    let proto_phase: proto::LogReplayPhase = phase_ref.into();
-    let bytes = proto_phase.encode_to_vec();
-    ProtoBytes::from_vec(bytes)
-}
-
-/// Check if a LogReplayPhase is complete.
-#[no_mangle]
-pub unsafe extern "C" fn log_replay_phase_is_complete(
-    phase: Handle<SharedLogReplayPhase>,
-) -> bool {
-    let phase_ref = unsafe { phase.as_ref() };
-    phase_ref.is_complete()
-}
-
-/// Get the phase name for a LogReplayPhase.
-#[no_mangle]
-pub unsafe extern "C" fn log_replay_phase_name(
-    phase: Handle<SharedLogReplayPhase>,
-) -> crate::KernelStringSlice {
-    let phase_ref = unsafe { phase.as_ref() };
-    let name = phase_ref.phase_name();
-    crate::kernel_string_slice!(name)
-}
-
-/// Free a LogReplayPhase handle.
-#[no_mangle]
-pub unsafe extern "C" fn free_log_replay_phase(phase: Handle<SharedLogReplayPhase>) {
-    phase.drop_handle();
-}
+ffi_handle_fns!(
+    log_replay_phase_to_proto,
+    log_replay_phase_is_complete,
+    log_replay_phase_name,
+    free_log_replay_phase,
+    SharedLogReplayPhase,
+    LogReplayPhase,
+    proto::LogReplayPhase,
+    to_proto = |p: &LogReplayPhase| -> proto::LogReplayPhase { p.into() },
+    is_terminal = |p: &LogReplayPhase| -> bool { p.is_complete() },
+    phase_name = |p: &LogReplayPhase| -> &'static str { p.phase_name() }
+);
 
 // =============================================================================
 // LogReplayStateMachine FFI (New Opaque Handle API)
