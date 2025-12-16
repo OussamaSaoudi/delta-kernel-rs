@@ -471,7 +471,7 @@ mod state_machine_comparison_tests {
         .expect("Should create state machine");
 
         // Execute via ResultsDriver
-        let driver = ResultsDriver::new(engine.clone(), sm);
+        let driver = ResultsDriver::new(engine.as_ref(), sm);
 
         // Create TransformComputer
         let computer = TransformComputer::new(state_info);
@@ -482,12 +482,13 @@ mod state_machine_comparison_tests {
 
             // Compute transforms for this batch
             let transforms = computer
-                .compute_transforms(batch.engine_data.as_ref())
+                .compute_transforms(batch.data())
                 .expect("compute_transforms should succeed");
 
             // Extract paths from batch
-            let engine_data_arc = batch.engine_data.clone().as_any();
-            let arrow_data = engine_data_arc
+            let arrow_data = batch
+                .data()
+                .any_ref()
                 .downcast_ref::<ArrowEngineData>()
                 .expect("Should be ArrowEngineData");
             let record_batch = arrow_data.record_batch();
@@ -501,7 +502,7 @@ mod state_machine_comparison_tests {
             for (i, path) in path_col.iter().enumerate() {
                 if let Some(path) = path {
                     // Check selection vector
-                    let selected = batch.selection_vector.get(i).copied().unwrap_or(true);
+                    let selected = batch.selection_vector().get(i).copied().unwrap_or(true);
                     if selected {
                         let has_transform = transforms.get(i).map(|t| t.is_some()).unwrap_or(false);
                         files.push((path.to_string(), has_transform));
@@ -848,11 +849,14 @@ mod state_machine_comparison_tests {
             commit_files,
             checkpoint_files,
             predicate,
+            state_info.transform_spec.clone(),
+            state_info.column_mapping_mode,
+            state_info.logical_schema.clone(),
         )
         .expect("Should create state machine");
 
         // Execute via ResultsDriver
-        let driver = ResultsDriver::new(engine.clone(), sm);
+        let driver = ResultsDriver::new(engine.as_ref(), sm);
         let computer = TransformComputer::new(state_info);
 
         let mut files: Vec<(String, bool)> = Vec::new();
@@ -860,11 +864,12 @@ mod state_machine_comparison_tests {
             let batch = result.expect("Batch should succeed");
 
             let transforms = computer
-                .compute_transforms(batch.engine_data.as_ref())
+                .compute_transforms(batch.data())
                 .expect("compute_transforms should succeed");
 
-            let engine_data_arc = batch.engine_data.clone().as_any();
-            let arrow_data = engine_data_arc
+            let arrow_data = batch
+                .data()
+                .any_ref()
                 .downcast_ref::<ArrowEngineData>()
                 .expect("Should be ArrowEngineData");
             let record_batch = arrow_data.record_batch();
@@ -876,7 +881,7 @@ mod state_machine_comparison_tests {
 
             for (i, path) in path_col.iter().enumerate() {
                 if let Some(path) = path {
-                    let selected = batch.selection_vector.get(i).copied().unwrap_or(true);
+                    let selected = batch.selection_vector().get(i).copied().unwrap_or(true);
                     if selected {
                         let has_transform = transforms.get(i).map(|t| t.is_some()).unwrap_or(false);
                         files.push((path.to_string(), has_transform));

@@ -786,6 +786,8 @@ pub struct ScanBuildState {
     pub logical_schema: SchemaRef,
     /// Typed dedup state for AddRemoveDedup KDF
     pub dedup_state: FilterKdfState,
+    /// Optional partition pruning state (built from predicate + transform spec)
+    pub partition_prune_state: Option<FilterKdfState>,
     /// Files discovered during commit phase
     pub commit_files: Vec<FileMeta>,
     /// Checkpoint files to read
@@ -796,6 +798,8 @@ pub struct ScanBuildState {
     pub checkpoint_type: Option<CheckpointType>,
     /// Optional predicate for data skipping (predicate and its referenced schema)
     pub predicate: Option<(PredicateRef, SchemaRef)>,
+    /// Column mapping mode (needed for parsing partition values)
+    pub column_mapping_mode: crate::table_features::ColumnMappingMode,
     /// Stats schema for data skipping (computed from predicate's referenced schema)
     pub stats_schema: Option<SchemaRef>,
 }
@@ -875,11 +879,13 @@ impl ScanBuildState {
             physical_schema,
             logical_schema,
             dedup_state: FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new()),
+            partition_prune_state: None,
             commit_files: Vec::new(),
             checkpoint_files: Vec::new(),
             sidecar_files: Vec::new(),
             checkpoint_type: None,
             predicate,
+            column_mapping_mode: crate::table_features::ColumnMappingMode::None,
             stats_schema,
         })
     }
@@ -947,6 +953,7 @@ impl ScanStateMachine {
         commit_files: Vec<FileMeta>,
         checkpoint_files: Vec<FileMeta>,
     ) -> DeltaResult<Self> {
+        let logical_schema_full = logical_schema.clone();
         Self::from_scan_config_with_predicate(
             table_root,
             log_root,
@@ -955,11 +962,14 @@ impl ScanStateMachine {
             commit_files,
             checkpoint_files,
             None,
+            None,
+            crate::table_features::ColumnMappingMode::None,
+            logical_schema_full,
         )
     }
 
     /// Create from scan configuration with optional predicate for data skipping.
-    pub fn from_scan_config_with_predicate(
+    pub(crate) fn from_scan_config_with_predicate(
         table_root: Url,
         log_root: Url,
         physical_schema: SchemaRef,
@@ -967,6 +977,9 @@ impl ScanStateMachine {
         commit_files: Vec<FileMeta>,
         checkpoint_files: Vec<FileMeta>,
         predicate: Option<(PredicateRef, SchemaRef)>,
+        transform_spec: Option<Arc<crate::transforms::TransformSpec>>,
+        column_mapping_mode: crate::table_features::ColumnMappingMode,
+        logical_schema_full: crate::schema::SchemaRef,
     ) -> DeltaResult<Self> {
         use std::borrow::Cow;
         use crate::schema::{DataType, PrimitiveType, SchemaTransform, StructField, StructType};
@@ -1020,17 +1033,31 @@ impl ScanStateMachine {
             ])))
         });
 
+        let partition_prune_state = match (&predicate, &transform_spec) {
+            (Some((pred, _)), Some(ts)) => Some(FilterKdfState::PartitionPrune(
+                crate::plans::kdf_state::PartitionPruneState {
+                    predicate: pred.clone(),
+                    transform_spec: ts.clone(),
+                    logical_schema: logical_schema_full.clone(),
+                    column_mapping_mode,
+                },
+            )),
+            _ => None,
+        };
+
         let state = ScanBuildState {
             table_root,
             log_root,
             physical_schema,
             logical_schema,
             dedup_state: FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new()),
+            partition_prune_state,
             commit_files,
             checkpoint_files,
             sidecar_files: Vec::new(),
             checkpoint_type: None,
             predicate,
+            column_mapping_mode,
             stats_schema,
         };
         let initial_plan = Self::create_commit_plan_static(&state)?;
@@ -1178,15 +1205,23 @@ impl ScanStateMachine {
         match plan {
             DeclarativePlanNode::FilterByKDF { child, node } => {
                 // State is typed - variant encodes the function identity
-                match &node.state {
+                let state = node
+                    .state
+                    .lock()
+                    .expect("FilterByKDF state mutex poisoned")
+                    .clone();
+                match &state {
                     FilterKdfState::AddRemoveDedup(_) => {
                         // Update our stored dedup state with the mutated state from execution
-                        self.state.dedup_state = node.state.clone();
+                        self.state.dedup_state = state;
                     }
                     FilterKdfState::CheckpointDedup(_) => {
                         // Checkpoint dedup state handled separately
                     }
-                }
+                    FilterKdfState::PartitionPrune(_) => {
+                        // Partition prune is immutable; nothing to persist.
+                    }
+                };
                 self.extract_kdf_state_recursive(child)
             }
             // ConsumeByKDF state is handled separately (it's a consumer, not a filter)
@@ -1254,6 +1289,10 @@ impl ScanStateMachine {
                 schema,
             },
             data_skipping,
+            partition_prune_filter: state
+                .partition_prune_state
+                .as_ref()
+                .map(|s| FilterByKDF::with_state(s.clone())),
             dedup_filter: FilterByKDF::with_state(state.dedup_state.clone()),
             project: SelectNode {
                 columns: vec![transform_expr],
@@ -1370,6 +1409,11 @@ impl ScanStateMachine {
                 files,
                 schema,
             },
+            partition_prune_filter: self
+                .state
+                .partition_prune_state
+                .as_ref()
+                .map(|s| FilterByKDF::with_state(s.clone())),
             dedup_filter: FilterByKDF::with_state(FilterKdfState::CheckpointDedup(checkpoint_dedup_state)),
             project: SelectNode {
                 columns: vec![transform_expr],
@@ -1423,6 +1467,11 @@ impl ScanStateMachine {
             // SidecarCollector sees all rows before filtering
             // It gracefully handles rows without sidecar data
             sidecar_collector: ConsumeByKDF::sidecar_collector(self.state.log_root.clone()),
+            partition_prune_filter: self
+                .state
+                .partition_prune_state
+                .as_ref()
+                .map(|s| FilterByKDF::with_state(s.clone())),
             // Reuse dedup state from commit phase to filter out already-seen files
             dedup_filter: FilterByKDF::with_state(self.state.dedup_state.clone()),
             project: SelectNode {

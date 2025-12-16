@@ -3,7 +3,7 @@
 //! These are the basic building blocks for constructing plans.
 //! Each node represents a single operation in a query plan.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::expressions::Expression;
 use crate::schema::SchemaRef;
@@ -78,27 +78,33 @@ pub struct FileListingNode {
 #[derive(Debug, Clone)]
 pub struct FilterByKDF {
     /// Typed state - the variant encodes which function to apply
-    pub state: FilterKdfState,
+    pub state: Arc<Mutex<FilterKdfState>>,
 }
 
 impl FilterByKDF {
     /// Create a new AddRemoveDedup filter.
     pub fn add_remove_dedup() -> Self {
         Self {
-            state: FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new()),
+            state: Arc::new(Mutex::new(FilterKdfState::AddRemoveDedup(
+                AddRemoveDedupState::new(),
+            ))),
         }
     }
 
     /// Create a new CheckpointDedup filter.
     pub fn checkpoint_dedup() -> Self {
         Self {
-            state: FilterKdfState::CheckpointDedup(CheckpointDedupState::new()),
+            state: Arc::new(Mutex::new(FilterKdfState::CheckpointDedup(
+                CheckpointDedupState::new(),
+            ))),
         }
     }
 
     /// Create from existing state.
     pub fn with_state(state: FilterKdfState) -> Self {
-        Self { state }
+        Self {
+            state: Arc::new(Mutex::new(state)),
+        }
     }
 }
 

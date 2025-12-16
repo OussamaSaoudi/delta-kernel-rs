@@ -85,6 +85,7 @@ mod proto_roundtrip_tests {
                 schema: test_schema(),
             },
             data_skipping: None,
+            partition_prune_filter: None,
             dedup_filter: FilterByKDF::add_remove_dedup(),
             project: SelectNode {
                 columns: vec![],
@@ -143,6 +144,7 @@ mod proto_roundtrip_tests {
                 schema: test_schema(),
             },
             data_skipping: None,
+            partition_prune_filter: None,
             dedup_filter: FilterByKDF::add_remove_dedup(),
             project: SelectNode {
                 columns: vec![],
@@ -162,7 +164,11 @@ mod proto_roundtrip_tests {
                         match *child {
                             DeclarativePlanNode::FilterByKDF { child: inner, node } => {
                                 // Verify it's AddRemoveDedup (variant IS the identity)
-                                assert!(matches!(&node.state, FilterKdfState::AddRemoveDedup(_)));
+                                let state = node
+                                    .state
+                                    .lock()
+                                    .expect("FilterByKDF state mutex poisoned");
+                                assert!(matches!(&*state, FilterKdfState::AddRemoveDedup(_)));
                                 match *inner {
                                     DeclarativePlanNode::Scan(scan) => {
                                         assert_eq!(scan.file_type, FileType::Json);
@@ -224,10 +230,18 @@ mod typed_state_tests {
     fn test_filter_by_kdf_constructors() {
         // Test convenience constructors
         let filter1 = FilterByKDF::add_remove_dedup();
-        assert!(matches!(&filter1.state, FilterKdfState::AddRemoveDedup(_)));
+        let state1 = filter1
+            .state
+            .lock()
+            .expect("FilterByKDF state mutex poisoned");
+        assert!(matches!(&*state1, FilterKdfState::AddRemoveDedup(_)));
         
         let filter2 = FilterByKDF::checkpoint_dedup();
-        assert!(matches!(&filter2.state, FilterKdfState::CheckpointDedup(_)));
+        let state2 = filter2
+            .state
+            .lock()
+            .expect("FilterByKDF state mutex poisoned");
+        assert!(matches!(&*state2, FilterKdfState::CheckpointDedup(_)));
     }
 
     #[test]
@@ -245,22 +259,88 @@ mod typed_state_tests {
     #[test]
     fn test_filter_kdf_apply() {
         use crate::arrow::array::{BooleanArray, RecordBatch, StringArray, StructArray};
+        use crate::arrow::array::Int32Array;
         use crate::arrow::datatypes::{DataType, Field, Fields, Schema};
         use crate::engine::arrow_data::ArrowEngineData;
         use std::sync::Arc;
         
         // Helper to create add struct with path column
         fn create_add_struct_batch(paths: Vec<&str>) -> RecordBatch {
+            let len = paths.len();
             let path_array = StringArray::from(paths);
-            let add_fields = Fields::from(vec![Field::new("path", DataType::Utf8, true)]);
+            let dv_storage = StringArray::from(vec![None::<&str>; len]);
+            let dv_path = StringArray::from(vec![None::<&str>; len]);
+            let dv_offset = Int32Array::from(vec![None::<i32>; len]);
+            let dv_fields = Fields::from(vec![
+                Field::new("storageType", DataType::Utf8, true),
+                Field::new("pathOrInlineDv", DataType::Utf8, true),
+                Field::new("offset", DataType::Int32, true),
+            ]);
+            let dv_struct = StructArray::from(vec![
+                (
+                    Arc::new(Field::new("storageType", DataType::Utf8, true)),
+                    Arc::new(dv_storage) as Arc<dyn crate::arrow::array::Array>,
+                ),
+                (
+                    Arc::new(Field::new("pathOrInlineDv", DataType::Utf8, true)),
+                    Arc::new(dv_path) as Arc<dyn crate::arrow::array::Array>,
+                ),
+                (
+                    Arc::new(Field::new("offset", DataType::Int32, true)),
+                    Arc::new(dv_offset) as Arc<dyn crate::arrow::array::Array>,
+                ),
+            ]);
+            let add_fields = Fields::from(vec![
+                Field::new("path", DataType::Utf8, true),
+                Field::new("deletionVector", DataType::Struct(dv_fields.clone()), true),
+            ]);
             let add_struct = StructArray::from(vec![(
                 Arc::new(Field::new("path", DataType::Utf8, true)),
                 Arc::new(path_array) as Arc<dyn crate::arrow::array::Array>,
+            ), (
+                Arc::new(Field::new("deletionVector", DataType::Struct(dv_fields), true)),
+                Arc::new(dv_struct) as Arc<dyn crate::arrow::array::Array>,
+            )]);
+            // remove struct (all null) to satisfy AddRemoveDedupState expected leaves
+            let remove_path = StringArray::from(vec![None::<&str>; len]);
+            let remove_dv_storage = StringArray::from(vec![None::<&str>; len]);
+            let remove_dv_path = StringArray::from(vec![None::<&str>; len]);
+            let remove_dv_offset = Int32Array::from(vec![None::<i32>; len]);
+            let remove_dv_fields = Fields::from(vec![
+                Field::new("storageType", DataType::Utf8, true),
+                Field::new("pathOrInlineDv", DataType::Utf8, true),
+                Field::new("offset", DataType::Int32, true),
+            ]);
+            let remove_dv_struct = StructArray::from(vec![
+                (
+                    Arc::new(Field::new("storageType", DataType::Utf8, true)),
+                    Arc::new(remove_dv_storage) as Arc<dyn crate::arrow::array::Array>,
+                ),
+                (
+                    Arc::new(Field::new("pathOrInlineDv", DataType::Utf8, true)),
+                    Arc::new(remove_dv_path) as Arc<dyn crate::arrow::array::Array>,
+                ),
+                (
+                    Arc::new(Field::new("offset", DataType::Int32, true)),
+                    Arc::new(remove_dv_offset) as Arc<dyn crate::arrow::array::Array>,
+                ),
+            ]);
+            let remove_fields = Fields::from(vec![
+                Field::new("path", DataType::Utf8, true),
+                Field::new("deletionVector", DataType::Struct(remove_dv_fields.clone()), true),
+            ]);
+            let remove_struct = StructArray::from(vec![(
+                Arc::new(Field::new("path", DataType::Utf8, true)),
+                Arc::new(remove_path) as Arc<dyn crate::arrow::array::Array>,
+            ), (
+                Arc::new(Field::new("deletionVector", DataType::Struct(remove_dv_fields), true)),
+                Arc::new(remove_dv_struct) as Arc<dyn crate::arrow::array::Array>,
             )]);
             let schema = Schema::new(vec![
                 Field::new("add", DataType::Struct(add_fields), true),
+                Field::new("remove", DataType::Struct(remove_fields), true),
             ]);
-            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(add_struct)]).unwrap()
+            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(add_struct), Arc::new(remove_struct)]).unwrap()
         }
         
         // Create typed state
@@ -297,22 +377,87 @@ mod typed_state_tests {
     #[test]
     fn test_filter_kdf_apply_large_batch() {
         use crate::arrow::array::{BooleanArray, RecordBatch, StringArray, StructArray};
+        use crate::arrow::array::Int32Array;
         use crate::arrow::datatypes::{DataType, Field, Fields, Schema};
         use crate::engine::arrow_data::ArrowEngineData;
         use std::sync::Arc;
         
         // Helper to create add struct batch
         fn create_add_struct_batch(paths: Vec<String>) -> RecordBatch {
+            let len = paths.len();
             let path_array = StringArray::from(paths);
-            let add_fields = Fields::from(vec![Field::new("path", DataType::Utf8, true)]);
+            let dv_storage = StringArray::from(vec![None::<&str>; len]);
+            let dv_path = StringArray::from(vec![None::<&str>; len]);
+            let dv_offset = Int32Array::from(vec![None::<i32>; len]);
+            let dv_fields = Fields::from(vec![
+                Field::new("storageType", DataType::Utf8, true),
+                Field::new("pathOrInlineDv", DataType::Utf8, true),
+                Field::new("offset", DataType::Int32, true),
+            ]);
+            let dv_struct = StructArray::from(vec![
+                (
+                    Arc::new(Field::new("storageType", DataType::Utf8, true)),
+                    Arc::new(dv_storage) as Arc<dyn crate::arrow::array::Array>,
+                ),
+                (
+                    Arc::new(Field::new("pathOrInlineDv", DataType::Utf8, true)),
+                    Arc::new(dv_path) as Arc<dyn crate::arrow::array::Array>,
+                ),
+                (
+                    Arc::new(Field::new("offset", DataType::Int32, true)),
+                    Arc::new(dv_offset) as Arc<dyn crate::arrow::array::Array>,
+                ),
+            ]);
+            let add_fields = Fields::from(vec![
+                Field::new("path", DataType::Utf8, true),
+                Field::new("deletionVector", DataType::Struct(dv_fields.clone()), true),
+            ]);
             let add_struct = StructArray::from(vec![(
                 Arc::new(Field::new("path", DataType::Utf8, true)),
                 Arc::new(path_array) as Arc<dyn crate::arrow::array::Array>,
+            ), (
+                Arc::new(Field::new("deletionVector", DataType::Struct(dv_fields), true)),
+                Arc::new(dv_struct) as Arc<dyn crate::arrow::array::Array>,
+            )]);
+            let remove_path = StringArray::from(vec![None::<&str>; len]);
+            let remove_dv_storage = StringArray::from(vec![None::<&str>; len]);
+            let remove_dv_path = StringArray::from(vec![None::<&str>; len]);
+            let remove_dv_offset = Int32Array::from(vec![None::<i32>; len]);
+            let remove_dv_fields = Fields::from(vec![
+                Field::new("storageType", DataType::Utf8, true),
+                Field::new("pathOrInlineDv", DataType::Utf8, true),
+                Field::new("offset", DataType::Int32, true),
+            ]);
+            let remove_dv_struct = StructArray::from(vec![
+                (
+                    Arc::new(Field::new("storageType", DataType::Utf8, true)),
+                    Arc::new(remove_dv_storage) as Arc<dyn crate::arrow::array::Array>,
+                ),
+                (
+                    Arc::new(Field::new("pathOrInlineDv", DataType::Utf8, true)),
+                    Arc::new(remove_dv_path) as Arc<dyn crate::arrow::array::Array>,
+                ),
+                (
+                    Arc::new(Field::new("offset", DataType::Int32, true)),
+                    Arc::new(remove_dv_offset) as Arc<dyn crate::arrow::array::Array>,
+                ),
+            ]);
+            let remove_fields = Fields::from(vec![
+                Field::new("path", DataType::Utf8, true),
+                Field::new("deletionVector", DataType::Struct(remove_dv_fields.clone()), true),
+            ]);
+            let remove_struct = StructArray::from(vec![(
+                Arc::new(Field::new("path", DataType::Utf8, true)),
+                Arc::new(remove_path) as Arc<dyn crate::arrow::array::Array>,
+            ), (
+                Arc::new(Field::new("deletionVector", DataType::Struct(remove_dv_fields), true)),
+                Arc::new(remove_dv_struct) as Arc<dyn crate::arrow::array::Array>,
             )]);
             let schema = Schema::new(vec![
                 Field::new("add", DataType::Struct(add_fields), true),
+                Field::new("remove", DataType::Struct(remove_fields), true),
             ]);
-            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(add_struct)]).unwrap()
+            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(add_struct), Arc::new(remove_struct)]).unwrap()
         }
         
         let mut state = FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new());
@@ -346,22 +491,87 @@ mod typed_state_tests {
     #[test]
     fn test_filter_kdf_state_isolated_between_instances() {
         use crate::arrow::array::{BooleanArray, RecordBatch, StringArray, StructArray};
+        use crate::arrow::array::Int32Array;
         use crate::arrow::datatypes::{DataType, Field, Fields, Schema};
         use crate::engine::arrow_data::ArrowEngineData;
         use std::sync::Arc;
         
         // Helper to create add struct batch
         fn create_add_struct_batch(paths: Vec<&str>) -> RecordBatch {
+            let len = paths.len();
             let path_array = StringArray::from(paths);
-            let add_fields = Fields::from(vec![Field::new("path", DataType::Utf8, true)]);
+            let dv_storage = StringArray::from(vec![None::<&str>; len]);
+            let dv_path = StringArray::from(vec![None::<&str>; len]);
+            let dv_offset = Int32Array::from(vec![None::<i32>; len]);
+            let dv_fields = Fields::from(vec![
+                Field::new("storageType", DataType::Utf8, true),
+                Field::new("pathOrInlineDv", DataType::Utf8, true),
+                Field::new("offset", DataType::Int32, true),
+            ]);
+            let dv_struct = StructArray::from(vec![
+                (
+                    Arc::new(Field::new("storageType", DataType::Utf8, true)),
+                    Arc::new(dv_storage) as Arc<dyn crate::arrow::array::Array>,
+                ),
+                (
+                    Arc::new(Field::new("pathOrInlineDv", DataType::Utf8, true)),
+                    Arc::new(dv_path) as Arc<dyn crate::arrow::array::Array>,
+                ),
+                (
+                    Arc::new(Field::new("offset", DataType::Int32, true)),
+                    Arc::new(dv_offset) as Arc<dyn crate::arrow::array::Array>,
+                ),
+            ]);
+            let add_fields = Fields::from(vec![
+                Field::new("path", DataType::Utf8, true),
+                Field::new("deletionVector", DataType::Struct(dv_fields.clone()), true),
+            ]);
             let add_struct = StructArray::from(vec![(
                 Arc::new(Field::new("path", DataType::Utf8, true)),
                 Arc::new(path_array) as Arc<dyn crate::arrow::array::Array>,
+            ), (
+                Arc::new(Field::new("deletionVector", DataType::Struct(dv_fields), true)),
+                Arc::new(dv_struct) as Arc<dyn crate::arrow::array::Array>,
+            )]);
+            let remove_path = StringArray::from(vec![None::<&str>; len]);
+            let remove_dv_storage = StringArray::from(vec![None::<&str>; len]);
+            let remove_dv_path = StringArray::from(vec![None::<&str>; len]);
+            let remove_dv_offset = Int32Array::from(vec![None::<i32>; len]);
+            let remove_dv_fields = Fields::from(vec![
+                Field::new("storageType", DataType::Utf8, true),
+                Field::new("pathOrInlineDv", DataType::Utf8, true),
+                Field::new("offset", DataType::Int32, true),
+            ]);
+            let remove_dv_struct = StructArray::from(vec![
+                (
+                    Arc::new(Field::new("storageType", DataType::Utf8, true)),
+                    Arc::new(remove_dv_storage) as Arc<dyn crate::arrow::array::Array>,
+                ),
+                (
+                    Arc::new(Field::new("pathOrInlineDv", DataType::Utf8, true)),
+                    Arc::new(remove_dv_path) as Arc<dyn crate::arrow::array::Array>,
+                ),
+                (
+                    Arc::new(Field::new("offset", DataType::Int32, true)),
+                    Arc::new(remove_dv_offset) as Arc<dyn crate::arrow::array::Array>,
+                ),
+            ]);
+            let remove_fields = Fields::from(vec![
+                Field::new("path", DataType::Utf8, true),
+                Field::new("deletionVector", DataType::Struct(remove_dv_fields.clone()), true),
+            ]);
+            let remove_struct = StructArray::from(vec![(
+                Arc::new(Field::new("path", DataType::Utf8, true)),
+                Arc::new(remove_path) as Arc<dyn crate::arrow::array::Array>,
+            ), (
+                Arc::new(Field::new("deletionVector", DataType::Struct(remove_dv_fields), true)),
+                Arc::new(remove_dv_struct) as Arc<dyn crate::arrow::array::Array>,
             )]);
             let schema = Schema::new(vec![
                 Field::new("add", DataType::Struct(add_fields), true),
+                Field::new("remove", DataType::Struct(remove_fields), true),
             ]);
-            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(add_struct)]).unwrap()
+            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(add_struct), Arc::new(remove_struct)]).unwrap()
         }
         
         // Create two separate states
@@ -1091,6 +1301,7 @@ mod state_machine_transition_tests {
                 files: vec![],
                 schema: Arc::new(StructType::new_unchecked(vec![])),
             },
+            partition_prune_filter: None,
             dedup_filter: FilterByKDF::checkpoint_dedup(),
             project: SelectNode {
                 columns: vec![],
@@ -1169,7 +1380,11 @@ mod state_machine_transition_tests {
                     DeclarativePlanNode::Select { child: inner, .. } => {
                         match *inner {
                             DeclarativePlanNode::FilterByKDF { child: scan_box, node: filter_node } => {
-                                assert!(matches!(filter_node.state, FilterKdfState::AddRemoveDedup(_)));
+                                let state = filter_node
+                                    .state
+                                    .lock()
+                                    .expect("FilterByKDF state mutex poisoned");
+                                assert!(matches!(&*state, FilterKdfState::AddRemoveDedup(_)));
                                 match *scan_box {
                                     DeclarativePlanNode::Scan(scan_node) => {
                                         assert_eq!(scan_node.file_type, FileType::Json);
@@ -1269,7 +1484,11 @@ mod state_machine_transition_tests {
                         match *filter_box {
                             DeclarativePlanNode::FilterByKDF { child: scan_box, node: filter_node } => {
                                 // 3. Verify AddRemoveDedup filter
-                                match &filter_node.state {
+                                let state = filter_node
+                                    .state
+                                    .lock()
+                                    .expect("FilterByKDF state mutex poisoned");
+                                match &*state {
                                     FilterKdfState::AddRemoveDedup(state) => {
                                         // State should be empty initially
                                         assert!(state.is_empty(), "Initial dedup state should be empty");
@@ -1334,6 +1553,7 @@ mod state_machine_transition_tests {
                     ])),
                 ])),
             },
+            partition_prune_filter: None,
             dedup_filter: FilterByKDF::checkpoint_dedup(),
             project: SelectNode {
                 columns: vec![],
@@ -1362,8 +1582,12 @@ mod state_machine_transition_tests {
                         match *filter_box {
                             DeclarativePlanNode::FilterByKDF { child: scan_box, node: filter_node } => {
                                 // 3. Verify CheckpointDedup filter
+                                let state = filter_node
+                                    .state
+                                    .lock()
+                                    .expect("FilterByKDF state mutex poisoned");
                                 assert!(
-                                    matches!(&filter_node.state, FilterKdfState::CheckpointDedup(_)),
+                                    matches!(&*state, FilterKdfState::CheckpointDedup(_)),
                                     "CheckpointLeaf must use CheckpointDedup filter"
                                 );
                                 
@@ -1580,7 +1804,11 @@ mod state_machine_transition_tests {
         fn has_checkpoint_dedup_filter(plan: &DeclarativePlanNode) -> bool {
             match plan {
                 DeclarativePlanNode::FilterByKDF { node, .. } => {
-                    matches!(&node.state, FilterKdfState::CheckpointDedup(_))
+                    let state = node
+                        .state
+                        .lock()
+                        .expect("FilterByKDF state mutex poisoned");
+                    matches!(&*state, FilterKdfState::CheckpointDedup(_))
                 }
                 DeclarativePlanNode::Sink { child, .. }
                 | DeclarativePlanNode::Select { child, .. }
@@ -1774,8 +2002,8 @@ mod real_table_execution_tests {
         let mut paths = Vec::new();
         
         for batch in batches {
-            // Use the helper to extract the RecordBatch from the Arc<dyn EngineData>
-            let record_batch = extract_record_batch(batch.engine_data.as_ref())
+            // Use the helper to extract the RecordBatch from the EngineData
+            let record_batch = extract_record_batch(batch.data())
                 .expect("Should be ArrowEngineData");
             
             // First try top-level "path" column (after transform)
@@ -1784,7 +2012,9 @@ mod real_table_execution_tests {
                 if let Some(string_array) = path_column.as_string_opt::<i32>() {
                     for i in 0..string_array.len() {
                         // Only include rows that are selected
-                        if batch.selection_vector.get(i).copied().unwrap_or(false) && !string_array.is_null(i) {
+                        if batch.selection_vector().get(i).copied().unwrap_or(false)
+                            && !string_array.is_null(i)
+                        {
                             paths.push(string_array.value(i).to_string());
                         }
                     }
@@ -1800,7 +2030,9 @@ mod real_table_execution_tests {
                         if let Some(string_array) = path_col.as_string_opt::<i32>() {
                             for i in 0..string_array.len() {
                                 // Only include rows that are selected
-                                if batch.selection_vector.get(i).copied().unwrap_or(false) && !string_array.is_null(i) {
+                                if batch.selection_vector().get(i).copied().unwrap_or(false)
+                                    && !string_array.is_null(i)
+                                {
                                     paths.push(string_array.value(i).to_string());
                                 }
                             }
@@ -1878,7 +2110,7 @@ mod real_table_execution_tests {
             checkpoint_files,
         ).expect("Should create ScanStateMachine");
         
-        let mut driver = ResultsDriver::new(engine, sm);
+        let mut driver = ResultsDriver::new(engine.as_ref(), sm);
         let mut batches = Vec::new();
         let mut iteration_count = 0;
         
@@ -1951,14 +2183,14 @@ mod real_table_execution_tests {
         
         // Execute raw scan plan
         let plan = create_raw_scan_plan(commit_files);
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
         let results = executor.execute(plan).expect("Execution should succeed");
         let batches: Vec<FilteredEngineData> = results
             .filter_map(|r| r.ok())
             .collect();
         
         // STATIC ASSERTION 1: Verify row count (4 lines in the commit file)
-        let total_rows: usize = batches.iter().map(|b| b.engine_data.len()).sum();
+        let total_rows: usize = batches.iter().map(|b| b.data().len()).sum();
         assert_eq!(total_rows, 4, "Raw scan should have 4 rows from the commit file");
         
         // STATIC ASSERTION 2: Verify the add action path
@@ -2037,14 +2269,14 @@ mod real_table_execution_tests {
 
         // Execute raw scan plan
         let plan = create_raw_scan_plan(commit_files);
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
         let results = executor.execute(plan).expect("Execution should succeed");
         let batches: Vec<FilteredEngineData> = results
             .filter_map(|r| r.ok())
             .collect();
 
         // STATIC ASSERTION 1: Verify total row count matches expected
-        let total_rows: usize = batches.iter().map(|b| b.engine_data.len()).sum();
+        let total_rows: usize = batches.iter().map(|b| b.data().len()).sum();
         assert_eq!(
             total_rows, 
             expected_basic_partitioned::EXPECTED_TOTAL_COMMIT_ROWS,
@@ -2099,7 +2331,7 @@ mod real_table_execution_tests {
 
         // Execute raw scan plan
         let plan = create_raw_scan_plan(commit_files);
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
         let results = executor.execute(plan).expect("Execution should succeed");
         
         let batches: Vec<FilteredEngineData> = results
@@ -2107,7 +2339,7 @@ mod real_table_execution_tests {
             .collect();
 
         // EXACT static assertion - the commit has exactly 4 lines
-        let total_rows: usize = batches.iter().map(|b| b.engine_data.len()).sum();
+        let total_rows: usize = batches.iter().map(|b| b.data().len()).sum();
         assert_eq!(
             total_rows, 
             4,  // Static: commitInfo, protocol, metaData, add
@@ -2136,7 +2368,7 @@ mod real_table_execution_tests {
 
         // Execute raw scan plan
         let plan = create_raw_scan_plan(commit_files);
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
         let results = executor.execute(plan).expect("Execution should succeed");
         let batches: Vec<FilteredEngineData> = results
             .filter_map(|r| r.ok())
@@ -2178,7 +2410,7 @@ mod real_table_execution_tests {
 
         // Execute raw scan plan
         let plan = create_raw_scan_plan(commit_files);
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
         let results = executor.execute(plan).expect("Execution should succeed");
         let batches: Vec<FilteredEngineData> = results
             .filter_map(|r| r.ok())
@@ -2229,13 +2461,13 @@ mod real_table_execution_tests {
 
         // Test version 0 only (should have 6 lines: protocol, metadata, 3 adds, commitInfo)
         let plan = create_raw_scan_plan(vec![commit_files[0].clone()]);
-        let executor = DeclarativePlanExecutor::new(engine.clone());
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
         let results = executor.execute(plan).expect("Execution should succeed");
         let batches: Vec<FilteredEngineData> = results
             .filter_map(|r| r.ok())
             .collect();
 
-        let total_rows: usize = batches.iter().map(|b| b.engine_data.len()).sum();
+        let total_rows: usize = batches.iter().map(|b| b.data().len()).sum();
         
         // Static assertion: version 0 has exactly 6 lines
         assert_eq!(
@@ -2247,13 +2479,13 @@ mod real_table_execution_tests {
 
         // Test version 1 only (should have 4 lines: 3 adds, commitInfo)
         let plan = create_raw_scan_plan(vec![commit_files[1].clone()]);
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
         let results = executor.execute(plan).expect("Execution should succeed");
         let batches: Vec<FilteredEngineData> = results
             .filter_map(|r| r.ok())
             .collect();
 
-        let total_rows: usize = batches.iter().map(|b| b.engine_data.len()).sum();
+        let total_rows: usize = batches.iter().map(|b| b.data().len()).sum();
         
         // Static assertion: version 1 has exactly 4 lines
         assert_eq!(
@@ -2302,12 +2534,12 @@ mod real_table_execution_tests {
         let plan = sm.get_plan().expect("Should get plan");
         assert!(plan.is_results_sink(), "Commit phase should have Results sink");
         
-        let executor = DeclarativePlanExecutor::new(engine.clone());
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
         let results = executor.execute(plan.clone()).expect("Direct execution should succeed");
         let direct_batches: Vec<FilteredEngineData> = results
             .filter_map(|r| r.ok())
             .collect();
-        let direct_rows: usize = direct_batches.iter().map(|b| b.engine_data.len()).sum();
+        let direct_rows: usize = direct_batches.iter().map(|b| b.data().len()).sum();
         
         // Manually advance the state machine
         let advance_result = sm.advance(Ok(plan)).expect("Advance should succeed");
@@ -2358,7 +2590,7 @@ mod real_table_execution_tests {
         ).expect("Should create ScanStateMachine");
 
         // Execute via ResultsDriver
-        let mut driver = ResultsDriver::new(engine, sm);
+        let mut driver = ResultsDriver::new(engine.as_ref(), sm);
         let batches: Vec<FilteredEngineData> = driver
             .by_ref()
             .filter_map(|r| r.ok())
@@ -2426,14 +2658,14 @@ mod real_table_execution_tests {
         ).expect("Should create ScanStateMachine");
 
         // Execute via ResultsDriver
-        let mut driver = ResultsDriver::new(engine, sm);
+        let mut driver = ResultsDriver::new(engine.as_ref(), sm);
         let batches: Vec<FilteredEngineData> = driver
             .by_ref()
             .filter_map(|r| r.ok())
             .collect();
 
         // Should produce results from both commit and checkpoint phases
-        let total_rows: usize = batches.iter().map(|b| b.engine_data.len()).sum();
+        let total_rows: usize = batches.iter().map(|b| b.data().len()).sum();
         assert!(total_rows > 0, "State machine with checkpoint should produce rows");
 
         // Extract add.path values
@@ -2475,7 +2707,7 @@ mod real_table_execution_tests {
         ).expect("Should create ScanStateMachine");
 
         // Execute and collect results
-        let mut driver = ResultsDriver::new(engine, sm);
+        let mut driver = ResultsDriver::new(engine.as_ref(), sm);
         let batches: Vec<FilteredEngineData> = driver
             .by_ref()
             .filter_map(|r| r.ok())

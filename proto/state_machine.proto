@@ -24,6 +24,7 @@ message CommitPhasePlan {
   FilterByKDF dedup_filter = 3;                   // AddRemoveDedup KDF filter
   SelectNode project = 4;                         // Project to output schema
   SinkNode sink = 5;                              // Terminal sink (default: Results)
+  optional FilterByKDF partition_prune_filter = 6; // Optional partition pruning KDF filter
 }
 
 // Plan for reading checkpoint manifest (for v2 checkpoints)
@@ -39,6 +40,7 @@ message CheckpointLeafPlan {
   FilterByKDF dedup_filter = 2;           // Dedup KDF for checkpoint
   SelectNode project = 3;                 // Project to output schema
   SinkNode sink = 4;                      // Terminal sink (default: Results)
+  optional FilterByKDF partition_prune_filter = 5; // Optional partition pruning KDF filter
 }
 
 // Plan for listing log files

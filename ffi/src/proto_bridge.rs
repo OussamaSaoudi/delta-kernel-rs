@@ -670,6 +670,7 @@ pub extern "C" fn create_test_log_replay_phase() -> ProtoBytes {
             schema: schema.clone(),
         },
         data_skipping: None,
+        partition_prune_filter: None,
         dedup_filter: FilterByKDF::add_remove_dedup(),
         project: SelectNode {
             columns: vec![
@@ -678,6 +679,7 @@ pub extern "C" fn create_test_log_replay_phase() -> ProtoBytes {
             ],
             output_schema: schema,
         },
+        sink: SinkNode::results(),
     };
 
     let phase = LogReplayPhase::Commit(commit_plan);

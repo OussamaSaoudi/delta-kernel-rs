@@ -27,13 +27,15 @@ pub struct DataSkippingPlan {
 
 /// Plan for processing commit files (JSON log files).
 ///
-/// Structure: Scan → [DataSkipping] → AddRemoveDedup → Project → Sink
+/// Structure: Scan → [DataSkipping] → [PartitionPrune] → AddRemoveDedup → Project → Sink
 #[derive(Debug, Clone)]
 pub struct CommitPhasePlan {
     /// Scan commit JSON files
     pub scan: ScanNode,
     /// Optional data skipping optimization
     pub data_skipping: Option<DataSkippingPlan>,
+    /// Optional partition pruning filter (partitionValues-only pruning)
+    pub partition_prune_filter: Option<FilterByKDF>,
     /// Deduplication filter (AddRemoveDedup KDF)
     pub dedup_filter: FilterByKDF,
     /// Project to output schema
@@ -65,11 +67,13 @@ pub struct CheckpointManifestPlan {
 
 /// Plan for reading checkpoint leaf/sidecar files.
 ///
-/// Structure: Scan → Dedup → Project → Sink
+/// Structure: Scan → [PartitionPrune] → Dedup → Project → Sink
 #[derive(Debug, Clone)]
 pub struct CheckpointLeafPlan {
     /// Scan checkpoint parquet files
     pub scan: ScanNode,
+    /// Optional partition pruning filter (partitionValues-only pruning)
+    pub partition_prune_filter: Option<FilterByKDF>,
     /// Deduplication KDF for checkpoint
     pub dedup_filter: FilterByKDF,
     /// Project to output schema
@@ -140,7 +144,7 @@ pub struct SchemaQueryPhasePlan {
 
 /// Plan for reading JSON checkpoints that may or may not have sidecars.
 ///
-/// Structure: Scan → ConsumeByKDF(SidecarCollector) → FilterByKDF(AddRemoveDedup) → Select → Sink(Results)
+/// Structure: Scan → ConsumeByKDF(SidecarCollector) → [PartitionPrune] → FilterByKDF(AddRemoveDedup) → Select → Sink(Results)
 ///
 /// This plan handles both V2 JSON checkpoints with sidecars and V2 JSON checkpoints
 /// where add actions are embedded directly. The SidecarCollector sees all rows to
@@ -155,6 +159,8 @@ pub struct JsonCheckpointPhasePlan {
     pub scan: ScanNode,
     /// Consumer KDF to collect sidecar file paths (sees all rows before filtering)
     pub sidecar_collector: ConsumeByKDF,
+    /// Optional partition pruning filter (partitionValues-only pruning)
+    pub partition_prune_filter: Option<FilterByKDF>,
     /// Deduplication filter for add/remove actions
     pub dedup_filter: FilterByKDF,
     /// Project add actions to output schema
@@ -180,6 +186,14 @@ impl AsQueryPlan for CommitPhasePlan {
             plan = DeclarativePlanNode::FilterByExpression {
                 child: Box::new(plan),
                 node: ds.filter.clone(),
+            };
+        }
+
+        // Add partition pruning if present
+        if let Some(pp) = &self.partition_prune_filter {
+            plan = DeclarativePlanNode::FilterByKDF {
+                child: Box::new(plan),
+                node: pp.clone(),
             };
         }
 
@@ -220,9 +234,15 @@ impl AsQueryPlan for CheckpointManifestPlan {
 
 impl AsQueryPlan for CheckpointLeafPlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
-        let scan = DeclarativePlanNode::Scan(self.scan.clone());
+        let mut plan = DeclarativePlanNode::Scan(self.scan.clone());
+        if let Some(pp) = &self.partition_prune_filter {
+            plan = DeclarativePlanNode::FilterByKDF {
+                child: Box::new(plan),
+                node: pp.clone(),
+            };
+        }
         let dedup = DeclarativePlanNode::FilterByKDF {
-            child: Box::new(scan),
+            child: Box::new(plan),
             node: self.dedup_filter.clone(),
         };
         DeclarativePlanNode::Sink {
@@ -293,8 +313,15 @@ impl AsQueryPlan for JsonCheckpointPhasePlan {
             child: Box::new(scan),
             node: self.sidecar_collector.clone(),
         };
+        let mut plan = consume;
+        if let Some(pp) = &self.partition_prune_filter {
+            plan = DeclarativePlanNode::FilterByKDF {
+                child: Box::new(plan),
+                node: pp.clone(),
+            };
+        }
         let filter = DeclarativePlanNode::FilterByKDF {
-            child: Box::new(consume),
+            child: Box::new(plan),
             node: self.dedup_filter.clone(),
         };
         let select = DeclarativePlanNode::Select {

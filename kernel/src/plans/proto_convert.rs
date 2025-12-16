@@ -94,7 +94,12 @@ impl From<&FilterByKDF> for proto::FilterByKdf {
         // Convert typed state to raw pointer for FFI
         // Clone the state since we're taking ownership for the raw pointer
         proto::FilterByKdf {
-            state_ptr: node.state.clone().into_raw(),
+            state_ptr: node
+                .state
+                .lock()
+                .expect("FilterByKDF state mutex poisoned")
+                .clone()
+                .into_raw(),
         }
     }
 }
@@ -262,6 +267,10 @@ impl From<&CommitPhasePlan> for proto::CommitPhasePlan {
             dedup_filter: Some((&plan.dedup_filter).into()),
             project: Some((&plan.project).into()),
             sink: Some((&plan.sink).into()),
+            partition_prune_filter: plan
+                .partition_prune_filter
+                .as_ref()
+                .map(|f| f.into()),
         }
     }
 }
@@ -283,6 +292,10 @@ impl From<&CheckpointLeafPlan> for proto::CheckpointLeafPlan {
             dedup_filter: Some((&plan.dedup_filter).into()),
             project: Some((&plan.project).into()),
             sink: Some((&plan.sink).into()),
+            partition_prune_filter: plan
+                .partition_prune_filter
+                .as_ref()
+                .map(|f| f.into()),
         }
     }
 }

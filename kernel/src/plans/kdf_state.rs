@@ -168,149 +168,85 @@ impl AddRemoveDedupState {
         batch: &dyn EngineData,
         selection: BooleanArray,
     ) -> DeltaResult<BooleanArray> {
-        use crate::arrow::array::{Array, AsArray, StringArray};
-        use crate::engine::arrow_data::ArrowEngineData;
-        use crate::AsAny;
+        use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
+        use crate::log_replay::FileActionDeduplicator;
+        use crate::schema::{ColumnName, ColumnNamesAndTypes, DataType};
+        use std::sync::LazyLock;
 
-        // Try to get the batch as ArrowEngineData
-        let arrow_data = batch
-            .any_ref()
-            .downcast_ref::<ArrowEngineData>()
-            .ok_or_else(|| Error::generic("Expected ArrowEngineData for KDF apply"))?;
+        // Commit/log batch behavior (AddRemoveDedupState is only used in commit phase).
+        const IS_LOG_BATCH: bool = true;
 
-        let record_batch = arrow_data.record_batch();
-        let num_rows = record_batch.num_rows();
-
-        // Get add.path column
-        let add_path_col = record_batch
-            .column_by_name("add")
-            .and_then(|col| col.as_struct_opt())
-            .and_then(|s| s.column_by_name("path"));
-        let add_path_array = add_path_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
-
-        // Get add.deletionVector struct fields for constructing dv_unique_id
-        let add_dv_struct = record_batch
-            .column_by_name("add")
-            .and_then(|col| col.as_struct_opt())
-            .and_then(|s| s.column_by_name("deletionVector"))
-            .and_then(|col| col.as_struct_opt());
-        let add_dv_storage_type = add_dv_struct
-            .and_then(|s| s.column_by_name("storageType"))
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
-        let add_dv_path_or_inline = add_dv_struct
-            .and_then(|s| s.column_by_name("pathOrInlineDv"))
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
-        let add_dv_offset = add_dv_struct
-            .and_then(|s| s.column_by_name("offset"))
-            .and_then(|col| col.as_any().downcast_ref::<Int32Array>());
-
-        // Get remove.path column
-        let remove_path_col = record_batch
-            .column_by_name("remove")
-            .and_then(|col| col.as_struct_opt())
-            .and_then(|s| s.column_by_name("path"));
-        let remove_path_array =
-            remove_path_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
-
-        // Get remove.deletionVector struct fields
-        let remove_dv_struct = record_batch
-            .column_by_name("remove")
-            .and_then(|col| col.as_struct_opt())
-            .and_then(|s| s.column_by_name("deletionVector"))
-            .and_then(|col| col.as_struct_opt());
-        let remove_dv_storage_type = remove_dv_struct
-            .and_then(|s| s.column_by_name("storageType"))
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
-        let remove_dv_path_or_inline = remove_dv_struct
-            .and_then(|s| s.column_by_name("pathOrInlineDv"))
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
-        let remove_dv_offset = remove_dv_struct
-            .and_then(|s| s.column_by_name("offset"))
-            .and_then(|col| col.as_any().downcast_ref::<Int32Array>());
-
-        // If no add or remove columns, return selection unchanged
-        if add_path_array.is_none() && remove_path_array.is_none() {
-            return Ok(selection);
+        // ---- Fast path: reuse FileActionDeduplicator with full add/remove + DV columns ----
+        struct DedupVisitor<'seen> {
+            dedup: FileActionDeduplicator<'seen>,
+            input_selection: BooleanArray,
+            out_selection: Vec<bool>,
         }
 
-        // Build new selection by checking each row
-        let mut result: Vec<bool> = Vec::with_capacity(num_rows);
-
-        for i in 0..num_rows {
-            // If already filtered out, keep it filtered
-            if !selection.value(i) {
-                result.push(false);
-                continue;
+        impl crate::engine_data::RowVisitor for DedupVisitor<'_> {
+            fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+                // Keep ordering consistent with the indices passed to FileActionDeduplicator below.
+                static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+                    const STRING: DataType = DataType::STRING;
+                    const INTEGER: DataType = DataType::INTEGER;
+                    let types_and_names = vec![
+                        (STRING, crate::schema::column_name!("add.path")),
+                        (STRING, crate::schema::column_name!("add.deletionVector.storageType")),
+                        (STRING, crate::schema::column_name!("add.deletionVector.pathOrInlineDv")),
+                        (INTEGER, crate::schema::column_name!("add.deletionVector.offset")),
+                        (STRING, crate::schema::column_name!("remove.path")),
+                        (STRING, crate::schema::column_name!("remove.deletionVector.storageType")),
+                        (STRING, crate::schema::column_name!("remove.deletionVector.pathOrInlineDv")),
+                        (INTEGER, crate::schema::column_name!("remove.deletionVector.offset")),
+                    ];
+                    let (types, names) = types_and_names.into_iter().unzip();
+                    (names, types).into()
+                });
+                let (names, types) = NAMES_AND_TYPES.as_ref();
+                (names, types)
             }
 
-            // Try to extract add action first
-            let add_path = add_path_array.and_then(|arr| {
-                if arr.is_null(i) {
-                    None
-                } else {
-                    Some(arr.value(i).to_string())
+            fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+                self.out_selection.resize(row_count, false);
+                for i in 0..row_count {
+                    if !self.input_selection.value(i) {
+                        self.out_selection[i] = false;
+                        continue;
+                    }
+                    let Some((file_key, is_add)) =
+                        self.dedup.extract_file_action(i, getters, /*skip_removes*/ false)?
+                    else {
+                        self.out_selection[i] = false;
+                        continue;
+                    };
+                    // Record both adds and removes, but only emit surviving adds.
+                    self.out_selection[i] = !(self.dedup.check_and_record_seen(file_key) || !is_add);
                 }
-            });
-
-            // Try to extract remove action
-            let remove_path = remove_path_array.and_then(|arr| {
-                if arr.is_null(i) {
-                    None
-                } else {
-                    Some(arr.value(i).to_string())
-                }
-            });
-
-            // Determine which action this row represents (add takes precedence)
-            // Also get the DV fields for constructing the unique ID
-            let (path, dv_storage, dv_path_or_inline, dv_offset, is_add) = if let Some(p) = add_path {
-                (p, add_dv_storage_type, add_dv_path_or_inline, add_dv_offset, true)
-            } else if let Some(p) = remove_path {
-                (p, remove_dv_storage_type, remove_dv_path_or_inline, remove_dv_offset, false)
-            } else {
-                // No add or remove path - filter out
-                result.push(false);
-                continue;
-            };
-
-            // Construct DV unique ID from the three DV fields if present
-            let dv_unique_id = match (dv_storage, dv_path_or_inline) {
-                (Some(storage_arr), Some(path_arr)) if !storage_arr.is_null(i) && !path_arr.is_null(i) => {
-                    let storage_type = storage_arr.value(i);
-                    let path_or_inline = path_arr.value(i);
-                    let offset: Option<i32> = dv_offset.and_then(|arr| {
-                        if arr.is_null(i) { None } else { Some(arr.value(i)) }
-                    });
-                    Some(crate::actions::deletion_vector::DeletionVectorDescriptor::unique_id_from_parts(
-                        storage_type,
-                        path_or_inline,
-                        offset,
-                    ))
-                }
-                _ => None,
-            };
-
-            // Create the file action key
-            let key = FileActionKey {
-                path,
-                dv_unique_id,
-            };
-
-            // Check if we've seen this key before
-            let mut seen_keys = self.seen_keys.lock().map_err(|_| Error::generic("Lock poisoned"))?;
-            if seen_keys.contains(&key) {
-                // Duplicate - filter out
-                result.push(false);
-            } else {
-                // New - add to seen set
-                seen_keys.insert(key);
-                // Only keep add actions, filter out remove actions
-                // (removes are just recorded to prevent checkpoint from returning them)
-                result.push(is_add);
+                Ok(())
             }
         }
 
-        Ok(BooleanArray::from(result))
+        let mut seen_keys_guard = self
+            .seen_keys
+            .lock()
+            .map_err(|_| Error::generic("Lock poisoned"))?;
+
+        // Strict: this KDF expects Delta action batches containing add/remove and DV fields.
+        let mut full_visitor = DedupVisitor {
+            dedup: FileActionDeduplicator::new(
+                &mut seen_keys_guard,
+                IS_LOG_BATCH,
+                /*add_path_index*/ 0,
+                /*remove_path_index*/ 4,
+                /*add_dv_start_index*/ 1,
+                /*remove_dv_start_index*/ 5,
+            ),
+            input_selection: selection.clone(),
+            out_selection: vec![],
+        };
+
+        full_visitor.visit_rows_of(batch)?;
+        Ok(BooleanArray::from(full_visitor.out_selection))
     }
 
     /// Serialize state for distribution to executors.
@@ -381,6 +317,113 @@ pub struct CheckpointDedupState {
     seen_keys: HashSet<FileActionKey>,
 }
 
+// =============================================================================
+// PartitionPruneState - Partition-only pruning using add.partitionValues
+// =============================================================================
+
+/// State for PartitionPrune KDF - prunes Add actions based on partition values.
+///
+/// This evaluates the scan predicate against directory-derived partition values (from
+/// `add.partitionValues`). It is conservative: rows are pruned only when the predicate can be
+/// proven false from partition values alone. Non-add rows (e.g. removes) are never pruned.
+#[derive(Debug, Clone)]
+pub struct PartitionPruneState {
+    pub(crate) predicate: crate::expressions::PredicateRef,
+    pub(crate) transform_spec: Arc<crate::transforms::TransformSpec>,
+    pub(crate) logical_schema: crate::schema::SchemaRef,
+    pub(crate) column_mapping_mode: crate::table_features::ColumnMappingMode,
+}
+
+impl PartitionPruneState {
+    #[inline]
+    pub fn apply(
+        &self,
+        batch: &dyn EngineData,
+        selection: BooleanArray,
+    ) -> DeltaResult<BooleanArray> {
+        use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
+        use crate::kernel_predicates::{DefaultKernelPredicateEvaluator, KernelPredicateEvaluator as _};
+        use crate::schema::{ColumnName, ColumnNamesAndTypes, DataType, MapType};
+        use crate::transforms::parse_partition_values;
+        use std::collections::HashMap;
+        use std::sync::LazyLock;
+
+        struct Visitor<'a> {
+            state: &'a PartitionPruneState,
+            input_selection: &'a BooleanArray,
+            out: Vec<bool>,
+        }
+
+        impl crate::engine_data::RowVisitor for Visitor<'_> {
+            fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+                static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+                    const STRING: DataType = DataType::STRING;
+                    let ss_map: DataType = MapType::new(STRING, STRING, true).into();
+                    let types_and_names = vec![
+                        (STRING, crate::schema::column_name!("add.path")),
+                        (ss_map, crate::schema::column_name!("add.partitionValues")),
+                    ];
+                    let (types, names) = types_and_names.into_iter().unzip();
+                    (names, types).into()
+                });
+                let (names, types) = NAMES_AND_TYPES.as_ref();
+                (names, types)
+            }
+
+            fn visit<'a2>(&mut self, row_count: usize, getters: &[&'a2 dyn GetData<'a2>]) -> DeltaResult<()> {
+                self.out.resize(row_count, true);
+                for i in 0..row_count {
+                    // Treat missing selection entries as true (selected) per FilteredEngineData contract.
+                    let selected = if i < self.input_selection.len() {
+                        self.input_selection.value(i)
+                    } else {
+                        true
+                    };
+                    if !selected {
+                        self.out[i] = false;
+                        continue;
+                    }
+
+                    // Only prune Add rows. Removes/non-adds should stay selected.
+                    let is_add = getters[0].get_str(i, "add.path")?.is_some();
+                    if !is_add {
+                        self.out[i] = true;
+                        continue;
+                    }
+
+                    let partition_values: HashMap<String, String> =
+                        getters[1].get(i, "add.partitionValues")?;
+                    let parsed = parse_partition_values(
+                        &self.state.logical_schema,
+                        &self.state.transform_spec,
+                        &partition_values,
+                        self.state.column_mapping_mode,
+                    )?;
+                    let partition_values_for_eval: HashMap<_, _> = parsed
+                        .values()
+                        .map(|(k, v)| (ColumnName::new([k]), v.clone()))
+                        .collect();
+                    let evaluator = DefaultKernelPredicateEvaluator::from(partition_values_for_eval);
+                    if evaluator.eval_sql_where(&self.state.predicate) == Some(false) {
+                        self.out[i] = false;
+                    } else {
+                        self.out[i] = true;
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        let mut visitor = Visitor {
+            state: self,
+            input_selection: &selection,
+            out: vec![],
+        };
+        visitor.visit_rows_of(batch)?;
+        Ok(BooleanArray::from(visitor.out))
+    }
+}
+
 impl CheckpointDedupState {
     /// Create new empty state.
     pub fn new() -> Self {
@@ -410,84 +453,78 @@ impl CheckpointDedupState {
         batch: &dyn EngineData,
         selection: BooleanArray,
     ) -> DeltaResult<BooleanArray> {
-        use crate::arrow::array::{Array, AsArray, StringArray};
-        use crate::engine::arrow_data::ArrowEngineData;
-        use crate::AsAny;
+        use crate::engine_data::{GetData, RowVisitor};
+        use crate::log_replay::FileActionDeduplicator;
+        use crate::schema::{ColumnName, ColumnNamesAndTypes, DataType};
+        use std::sync::LazyLock;
 
-        // Try to get the batch as ArrowEngineData
-        let arrow_data = batch
-            .any_ref()
-            .downcast_ref::<ArrowEngineData>()
-            .ok_or_else(|| Error::generic("Expected ArrowEngineData for KDF apply"))?;
+        // Checkpoint dedup is a read-only probe. It should match legacy behavior:
+        // - Only consider Add actions (checkpoint files are reconciled)
+        // - Key by (path, dv_unique_id) (not path-only)
+        struct ProbeVisitor<'seen> {
+            dedup: FileActionDeduplicator<'seen>,
+            input_selection: BooleanArray,
+            out_selection: Vec<bool>,
+        }
 
-        let record_batch = arrow_data.record_batch();
-        let num_rows = record_batch.num_rows();
-
-        // Get the path column from nested add.path struct
-        let path_col = record_batch
-            .column_by_name("add")
-            .and_then(|col| col.as_struct_opt())
-            .and_then(|s| s.column_by_name("path"));
-
-        let path_array = match path_col {
-            Some(col) => col
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| Error::generic("add.path column is not a string array"))?,
-            None => {
-                // No add.path column - return selection unchanged
-                return Ok(selection);
-            }
-        };
-
-        // Get optional deletion vector column from nested add.deletionVector
-        let dv_col = record_batch
-            .column_by_name("add")
-            .and_then(|col| col.as_struct_opt())
-            .and_then(|s| s.column_by_name("deletionVector"));
-
-        let dv_array = dv_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
-
-        // Build new selection by checking each row (read-only probe)
-        let mut result: Vec<bool> = Vec::with_capacity(num_rows);
-
-        for i in 0..num_rows {
-            // If already filtered out, keep it filtered
-            if !selection.value(i) {
-                result.push(false);
-                continue;
+        impl crate::engine_data::RowVisitor for ProbeVisitor<'_> {
+            fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+                static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+                    const STRING: DataType = DataType::STRING;
+                    const INTEGER: DataType = DataType::INTEGER;
+                    let types_and_names = vec![
+                        (STRING, crate::schema::column_name!("add.path")),
+                        (STRING, crate::schema::column_name!("add.deletionVector.storageType")),
+                        (STRING, crate::schema::column_name!("add.deletionVector.pathOrInlineDv")),
+                        (INTEGER, crate::schema::column_name!("add.deletionVector.offset")),
+                    ];
+                    let (types, names) = types_and_names.into_iter().unzip();
+                    (names, types).into()
+                });
+                let (names, types) = NAMES_AND_TYPES.as_ref();
+                (names, types)
             }
 
-            // Get the path
-            let path = if path_array.is_null(i) {
-                result.push(false);
-                continue;
-            } else {
-                path_array.value(i).to_string()
-            };
-
-            // Get optional deletion vector unique ID
-            let dv_unique_id = dv_array.and_then(|arr| {
-                if arr.is_null(i) {
-                    None
-                } else {
-                    Some(arr.value(i).to_string())
+            fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+                self.out_selection.resize(row_count, false);
+                for i in 0..row_count {
+                    if !self.input_selection.value(i) {
+                        self.out_selection[i] = false;
+                        continue;
+                    }
+                    let Some((file_key, _is_add)) =
+                        self.dedup.extract_file_action(i, getters, /*skip_removes*/ true)?
+                    else {
+                        self.out_selection[i] = false;
+                        continue;
+                    };
+                    // Probe only: is_log_batch=false means check_and_record_seen() won't insert.
+                    self.out_selection[i] = !self.dedup.check_and_record_seen(file_key);
                 }
-            });
-
-            // Create the file action key
-            let key = FileActionKey { path, dv_unique_id };
-
-            // Probe only - DO NOT insert (read-only access)
-            if self.seen_keys.contains(&key) {
-                // Already seen during commit phase - filter out
-                result.push(false);
-            } else {
-                // Not seen - keep the row
-                result.push(true);
+                Ok(())
             }
         }
-        Ok(BooleanArray::from(result))
+
+        // In checkpoint mode we must not record new keys.
+        const IS_LOG_BATCH: bool = false;
+
+        // Strict: checkpoint dedup expects action batches containing add.path (+ optional DV fields).
+        let mut seen_keys = self.seen_keys.clone();
+        let mut visitor = ProbeVisitor {
+            dedup: FileActionDeduplicator::new(
+                &mut seen_keys,
+                IS_LOG_BATCH,
+                /*add_path_index*/ 0,
+                /*remove_path_index*/ 0, // unused when skip_removes=true
+                /*add_dv_start_index*/ 1,
+                /*remove_dv_start_index*/ 1, // unused when skip_removes=true
+            ),
+            input_selection: selection.clone(),
+            out_selection: vec![],
+        };
+
+        visitor.visit_rows_of(batch)?;
+        Ok(BooleanArray::from(visitor.out_selection))
     }
 
     /// Serialize state for distribution to executors.
@@ -1724,6 +1761,8 @@ pub enum FilterKdfState {
     AddRemoveDedup(AddRemoveDedupState),
     /// Deduplicates file actions when reading checkpoint files
     CheckpointDedup(CheckpointDedupState),
+    /// Prunes add actions using partition values (add.partitionValues) and the scan predicate
+    PartitionPrune(PartitionPruneState),
 }
 
 impl FilterKdfState {
@@ -1744,6 +1783,7 @@ impl FilterKdfState {
         match self {
             Self::AddRemoveDedup(state) => state.apply(batch, selection),
             Self::CheckpointDedup(state) => state.apply(batch, selection),
+            Self::PartitionPrune(state) => state.apply(batch, selection),
         }
     }
 
@@ -1752,6 +1792,10 @@ impl FilterKdfState {
         match self {
             Self::AddRemoveDedup(state) => state.serialize(),
             Self::CheckpointDedup(state) => state.serialize(),
+            // PartitionPrune is not distributable today; if needed, implement serde/arrow IPC for its fields.
+            Self::PartitionPrune(_) => Err(Error::generic(
+                "PartitionPruneState serialization is not supported",
+            )),
         }
     }
 
@@ -1871,25 +1915,110 @@ impl SchemaReaderState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arrow::array::{RecordBatch, StringArray};
-    use crate::arrow::datatypes::{DataType, Field, Schema};
+    use crate::arrow::array::{Int32Array, RecordBatch, StringArray, StructArray};
+    use crate::arrow::datatypes::{DataType, Field, Fields, Schema};
     use crate::engine::arrow_data::ArrowEngineData;
     use std::sync::Arc;
 
     fn create_test_batch(paths: &[&str]) -> ArrowEngineData {
-        use crate::arrow::array::StructArray;
-        use crate::arrow::datatypes::Fields;
-        
-        let path_array = StringArray::from(paths.to_vec());
-        let add_fields = Fields::from(vec![Field::new("path", DataType::Utf8, true)]);
-        let add_struct = StructArray::from(vec![(
-            Arc::new(Field::new("path", DataType::Utf8, true)),
-            Arc::new(path_array) as Arc<dyn crate::arrow::array::Array>,
-        )]);
+        let len = paths.len();
+
+        // add.path
+        let add_path_array = StringArray::from(paths.to_vec());
+
+        // add.deletionVector.{storageType,pathOrInlineDv,offset} (all nulls)
+        let add_dv_storage = StringArray::from(vec![None::<&str>; len]);
+        let add_dv_path = StringArray::from(vec![None::<&str>; len]);
+        let add_dv_offset = Int32Array::from(vec![None::<i32>; len]);
+        let add_dv_fields = Fields::from(vec![
+            Field::new("storageType", DataType::Utf8, true),
+            Field::new("pathOrInlineDv", DataType::Utf8, true),
+            Field::new("offset", DataType::Int32, true),
+        ]);
+        let add_dv_struct = StructArray::from(vec![
+            (
+                Arc::new(Field::new("storageType", DataType::Utf8, true)),
+                Arc::new(add_dv_storage) as Arc<dyn crate::arrow::array::Array>,
+            ),
+            (
+                Arc::new(Field::new("pathOrInlineDv", DataType::Utf8, true)),
+                Arc::new(add_dv_path) as Arc<dyn crate::arrow::array::Array>,
+            ),
+            (
+                Arc::new(Field::new("offset", DataType::Int32, true)),
+                Arc::new(add_dv_offset) as Arc<dyn crate::arrow::array::Array>,
+            ),
+        ]);
+
+        let add_fields = Fields::from(vec![
+            Field::new("path", DataType::Utf8, true),
+            Field::new("deletionVector", DataType::Struct(add_dv_fields.clone()), true),
+        ]);
+        let add_struct = StructArray::from(vec![
+            (
+                Arc::new(Field::new("path", DataType::Utf8, true)),
+                Arc::new(add_path_array) as Arc<dyn crate::arrow::array::Array>,
+            ),
+            (
+                Arc::new(Field::new(
+                    "deletionVector",
+                    DataType::Struct(add_dv_fields.clone()),
+                    true,
+                )),
+                Arc::new(add_dv_struct) as Arc<dyn crate::arrow::array::Array>,
+            ),
+        ]);
+
+        // remove struct (all nulls)
+        let remove_path = StringArray::from(vec![None::<&str>; len]);
+        let remove_dv_storage = StringArray::from(vec![None::<&str>; len]);
+        let remove_dv_path = StringArray::from(vec![None::<&str>; len]);
+        let remove_dv_offset = Int32Array::from(vec![None::<i32>; len]);
+        let remove_dv_fields = Fields::from(vec![
+            Field::new("storageType", DataType::Utf8, true),
+            Field::new("pathOrInlineDv", DataType::Utf8, true),
+            Field::new("offset", DataType::Int32, true),
+        ]);
+        let remove_dv_struct = StructArray::from(vec![
+            (
+                Arc::new(Field::new("storageType", DataType::Utf8, true)),
+                Arc::new(remove_dv_storage) as Arc<dyn crate::arrow::array::Array>,
+            ),
+            (
+                Arc::new(Field::new("pathOrInlineDv", DataType::Utf8, true)),
+                Arc::new(remove_dv_path) as Arc<dyn crate::arrow::array::Array>,
+            ),
+            (
+                Arc::new(Field::new("offset", DataType::Int32, true)),
+                Arc::new(remove_dv_offset) as Arc<dyn crate::arrow::array::Array>,
+            ),
+        ]);
+        let remove_fields = Fields::from(vec![
+            Field::new("path", DataType::Utf8, true),
+            Field::new("deletionVector", DataType::Struct(remove_dv_fields.clone()), true),
+        ]);
+        let remove_struct = StructArray::from(vec![
+            (
+                Arc::new(Field::new("path", DataType::Utf8, true)),
+                Arc::new(remove_path) as Arc<dyn crate::arrow::array::Array>,
+            ),
+            (
+                Arc::new(Field::new(
+                    "deletionVector",
+                    DataType::Struct(remove_dv_fields.clone()),
+                    true,
+                )),
+                Arc::new(remove_dv_struct) as Arc<dyn crate::arrow::array::Array>,
+            ),
+        ]);
+
         let schema = Schema::new(vec![
             Field::new("add", DataType::Struct(add_fields), true),
+            Field::new("remove", DataType::Struct(remove_fields), true),
         ]);
-        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(add_struct)]).unwrap();
+        let batch =
+            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(add_struct), Arc::new(remove_struct)])
+                .unwrap();
         ArrowEngineData::new(batch)
     }
 

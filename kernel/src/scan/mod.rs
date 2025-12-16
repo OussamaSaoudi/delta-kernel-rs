@@ -429,11 +429,79 @@ impl Scan {
     ///   [`Self::logical_schema()`]. If the item at index `i` in this `Vec` is `None`, or if the
     ///   `Vec` contains fewer than `i` elements, no expression need be applied and the data read
     ///   from disk is already in the correct logical state.
-    pub fn scan_metadata(
-        &self,
-        engine: &dyn Engine,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanMetadata>>> {
-        self.scan_metadata_inner(engine, self.replay_for_scan_metadata(engine)?)
+    pub fn scan_metadata<'a>(
+        &'a self,
+        engine: &'a dyn Engine,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanMetadata>> + 'a> {
+        #[cfg(feature = "arrow")]
+        {
+            use crate::plans::executor::ResultsDriver;
+            use crate::plans::state_machines::ScanStateMachine;
+            use crate::scan::transform::TransformComputer;
+
+            if let PhysicalPredicate::StaticSkipAll = self.state_info.physical_predicate {
+                return Ok(None.into_iter().flatten());
+            }
+
+            let log_segment = self.snapshot.log_segment();
+            let commit_files: Vec<FileMeta> = log_segment.find_commit_cover();
+            let checkpoint_files: Vec<FileMeta> = log_segment
+                .checkpoint_parts
+                .iter()
+                .map(|f| f.location.clone())
+                .collect();
+
+            let table_root = self.snapshot.table_root().clone();
+            let log_root = table_root.join("_delta_log/")?;
+
+            let predicate = match &self.state_info.physical_predicate {
+                PhysicalPredicate::Some(predicate, referenced_schema) => {
+                    Some((predicate.clone(), referenced_schema.clone()))
+                }
+                _ => None,
+            };
+
+            let sm = ScanStateMachine::from_scan_config_with_predicate(
+                table_root,
+                log_root,
+                self.physical_schema().clone(),
+                self.logical_schema().clone(),
+                commit_files,
+                checkpoint_files,
+                predicate,
+                self.state_info().transform_spec.clone(),
+                self.state_info().column_mapping_mode,
+                self.state_info().logical_schema.clone(),
+            )?;
+
+            let driver = ResultsDriver::new(engine, sm);
+            let state_info = self.state_info();
+            let computer = TransformComputer::new(state_info.clone());
+
+            let it = driver
+                .map(move |res| -> DeltaResult<ScanMetadata> {
+                    let batch = res?;
+                    let transforms = computer.compute_transforms(batch.data())?;
+                    ScanMetadata::from_filtered_with_transforms(batch, transforms)
+                })
+                // Match legacy scan_metadata behavior: don't emit empty batches (all rows filtered).
+                // This matters for some tables (e.g. checkpoint tables) where an intermediate phase
+                // can yield a batch with zero selected rows.
+                .filter_map(|res| match res {
+                    Ok(metadata) => metadata
+                        .scan_files
+                        .has_selected_rows()
+                        .then_some(Ok(metadata)),
+                    Err(e) => Some(Err(e)),
+                });
+
+            return Ok(Some(it).into_iter().flatten());
+        }
+
+        #[cfg(not(feature = "arrow"))]
+        {
+            self.scan_metadata_inner(engine, self.replay_for_scan_metadata(engine)?)
+        }
     }
 
     /// Get an updated iterator of [`ScanMetadata`]s based on an existing iterator of [`EngineData`]s.
@@ -479,13 +547,13 @@ impl Scan {
     /// * `existing_predicate` - The predicate used by the previous scan.
     #[allow(unused)]
     #[internal_api]
-    pub(crate) fn scan_metadata_from(
-        &self,
-        engine: &dyn Engine,
+    pub(crate) fn scan_metadata_from<'a>(
+        &'a self,
+        engine: &'a dyn Engine,
         existing_version: Version,
         existing_data: impl IntoIterator<Item = Box<dyn EngineData>> + 'static,
         _existing_predicate: Option<PredicateRef>,
-    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<ScanMetadata>>>> {
+    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<ScanMetadata>> + 'a>> {
         static RESTORED_ADD_SCHEMA: LazyLock<DataType> = LazyLock::new(|| {
             use crate::scan::log_replay::DEFAULT_ROW_COMMIT_VERSION_NAME;
 
@@ -615,7 +683,7 @@ impl Scan {
     pub fn execute(
         &self,
         engine: Arc<dyn Engine>,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<Box<dyn EngineData>>>> {
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<Box<dyn EngineData>>> + '_> {
         struct ScanFile {
             path: String,
             size: i64,
@@ -646,21 +714,24 @@ impl Scan {
 
         let table_root = self.snapshot.table_root().clone();
 
-        let scan_metadata_iter = self.scan_metadata(engine.as_ref())?;
-        let scan_files_iter = scan_metadata_iter
+        // Collect scan files eagerly so we don't return an iterator borrowing a local `engine`
+        // reference used to produce scan metadata. `execute()` is explicitly an all-in-one API, so
+        // this trade-off is acceptable here.
+        let scan_files: Vec<ScanFile> = self
+            .scan_metadata(engine.as_ref())?
             .map(|res| {
                 let scan_metadata = res?;
                 let scan_files = vec![];
                 scan_metadata.visit_scan_files(scan_files, scan_metadata_callback)
             })
-            // Iterator<DeltaResult<Vec<ScanFile>>> to Iterator<DeltaResult<ScanFile>>
-            .flatten_ok();
+            .flatten_ok()
+            .try_collect()?;
 
         let physical_schema = self.physical_schema().clone();
         let logical_schema = self.logical_schema().clone();
-        let result = scan_files_iter
+        let result = scan_files
+            .into_iter()
             .map(move |scan_file| -> DeltaResult<_> {
-                let scan_file = scan_file?;
                 let file_path = table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
                     .dv_info

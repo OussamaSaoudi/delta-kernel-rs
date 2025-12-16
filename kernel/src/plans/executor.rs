@@ -17,7 +17,9 @@
 use std::sync::Arc;
 
 use crate::arrow::array::BooleanArray;
+pub use crate::engine_data::FilteredEngineData;
 use crate::engine_data::{GetData, TypedGetData};
+use crate::engine::arrow_conversion::TryFromArrow as _;
 use crate::expressions::Expression;
 use crate::schema::DataType;
 use crate::{DeltaResult, Engine, EngineData, Error};
@@ -25,13 +27,6 @@ use crate::{DeltaResult, Engine, EngineData, Error};
 use super::declarative::DeclarativePlanNode;
 use super::kdf_state::FilterKdfState;
 use super::nodes::*;
-
-/// Filtered data with selection vector.
-#[derive(Clone)]
-pub struct FilteredEngineData {
-    pub engine_data: Arc<dyn EngineData>,
-    pub selection_vector: Vec<bool>,
-}
 
 /// Type alias for the result iterator.
 pub type FilteredDataIter = Box<dyn Iterator<Item = DeltaResult<FilteredEngineData>> + Send>;
@@ -58,7 +53,7 @@ impl Iterator for ConsumeByKdfIterator {
         match self.child_iter.next() {
             Some(Ok(batch)) => {
                 // Apply consumer to batch (mutates state via interior mutability)
-                match self.state.apply(batch.engine_data.as_ref()) {
+                match self.state.apply(batch.data()) {
                     Ok(true) => Some(Ok(batch)), // Continue, pass through
                     Ok(false) => {
                         // Break signal - finalize and stop
@@ -134,13 +129,13 @@ fn extract_nested_string_column(
 /// This executor interprets declarative plan nodes and executes them using the
 /// provided Engine. It mirrors `DefaultPlanExecutor` but works with the
 /// protobuf-serializable `DeclarativePlanNode` type.
-pub struct DeclarativePlanExecutor {
-    pub engine: Arc<dyn Engine>,
+pub struct DeclarativePlanExecutor<'a> {
+    pub engine: &'a dyn Engine,
 }
 
-impl DeclarativePlanExecutor {
-    /// Create a new executor with the given engine.
-    pub fn new(engine: Arc<dyn Engine>) -> Self {
+impl<'a> DeclarativePlanExecutor<'a> {
+    /// Create a new executor with the given engine reference.
+    pub fn new(engine: &'a dyn Engine) -> Self {
         Self { engine }
     }
 
@@ -167,6 +162,36 @@ impl DeclarativePlanExecutor {
             DeclarativePlanNode::Sink { child, node } => self.execute_sink(*child, node),
         }
     }
+
+    /// Infer the output schema (as a kernel `SchemaRef`) for a declarative plan node.
+    ///
+    /// This is used by nodes like `Select` to construct expression evaluators with the correct
+    /// input schema (matching the nested struct layout of log actions, e.g. `add.path`,
+    /// `remove.deletionVector.*`).
+    fn infer_output_schema(&self, plan: &DeclarativePlanNode) -> DeltaResult<crate::schema::SchemaRef> {
+        use crate::schema::{DataType, StructField, StructType};
+
+        Ok(match plan {
+            DeclarativePlanNode::Scan(node) => node.schema.clone(),
+            DeclarativePlanNode::FileListing(_) => {
+                // Must match the schema produced by `execute_file_listing`.
+                Arc::new(StructType::new_unchecked(vec![
+                    StructField::nullable("path", DataType::STRING),
+                    StructField::nullable("size", DataType::LONG),
+                    StructField::nullable("modificationTime", DataType::LONG),
+                ]))
+            }
+            DeclarativePlanNode::SchemaQuery(_) => Arc::new(StructType::new_unchecked(vec![])),
+            DeclarativePlanNode::FilterByKDF { child, .. }
+            | DeclarativePlanNode::ConsumeByKDF { child, .. }
+            | DeclarativePlanNode::FilterByExpression { child, .. }
+            | DeclarativePlanNode::FirstNonNull { child, .. }
+            | DeclarativePlanNode::ParseJson { child, .. }
+            | DeclarativePlanNode::Sink { child, .. } => self.infer_output_schema(child)?,
+            DeclarativePlanNode::Select { node, .. } => node.output_schema.clone(),
+        })
+    }
+
 
     /// Execute a Sink node - terminal node that consumes data.
     ///
@@ -212,9 +237,9 @@ impl DeclarativePlanExecutor {
                 let json_handler = self.engine.json_handler();
                 let files_iter = json_handler.read_json_files(files.as_slice(), schema, None)?;
                 Ok(Box::new(files_iter.map(|result| {
-                    result.map(|engine_data| FilteredEngineData {
-                        selection_vector: vec![true; engine_data.len()],
-                        engine_data: Arc::from(engine_data),
+                    result.and_then(|engine_data| {
+                        let len = engine_data.len();
+                        FilteredEngineData::try_new(engine_data, vec![true; len])
                     })
                 })))
             }
@@ -223,9 +248,9 @@ impl DeclarativePlanExecutor {
                 let files_iter =
                     parquet_handler.read_parquet_files(files.as_slice(), schema, None)?;
                 Ok(Box::new(files_iter.map(|result| {
-                    result.map(|engine_data| FilteredEngineData {
-                        selection_vector: vec![true; engine_data.len()],
-                        engine_data: Arc::from(engine_data),
+                    result.and_then(|engine_data| {
+                        let len = engine_data.len();
+                        FilteredEngineData::try_new(engine_data, vec![true; len])
                     })
                 })))
             }
@@ -295,13 +320,11 @@ impl DeclarativePlanExecutor {
         .map_err(|e| Error::generic(format!("Failed to create file listing batch: {}", e)))?;
 
         // Wrap in ArrowEngineData and return as single batch
-        let engine_data = ArrowEngineData::from(batch);
-        let selection_vector = vec![true; engine_data.len()];
-
-        Ok(Box::new(std::iter::once(Ok(FilteredEngineData {
-            engine_data: Arc::new(engine_data),
-            selection_vector,
-        }))))
+        let engine_data = Box::new(ArrowEngineData::from(batch)) as Box<dyn EngineData>;
+        let len = engine_data.len();
+        Ok(Box::new(std::iter::once(
+            FilteredEngineData::try_new(engine_data, vec![true; len]),
+        )))
     }
 
     /// Execute a SchemaQuery node - reads parquet file schema (footer only).
@@ -313,12 +336,12 @@ impl DeclarativePlanExecutor {
         
         // Read the schema from the parquet footer
         let parquet_handler = self.engine.parquet_handler();
-        let url = url::Url::parse(file_path).map_err(|e| Error::generic(format!("Invalid file path: {}", e)))?;
-        let file_meta = crate::FileMeta {
-            location: url,
-            last_modified: 0,
-            size: 0,
-        };
+        let url =
+            url::Url::parse(file_path).map_err(|e| Error::generic(format!("Invalid file path: {}", e)))?;
+
+        // Schema queries need accurate file metadata (especially size) for many parquet readers.
+        // Fetch it through the storage handler.
+        let file_meta = self.engine.storage_handler().head(&url)?;
         
         // Get the parquet footer which contains the schema
         let footer = parquet_handler.read_parquet_footer(&file_meta)?;
@@ -341,32 +364,31 @@ impl DeclarativePlanExecutor {
         child: DeclarativePlanNode,
         node: FilterByKDF,
     ) -> DeltaResult<FilteredDataIter> {
-        // State is typed - clone for use in the iterator closure
-        let mut state = node.state;
+        // State is shared (Arc<Mutex<...>>) - clone for use in the iterator closure
+        let state = node.state.clone();
 
         let child_iter = self.execute(child)?;
 
         Ok(Box::new(child_iter.map(move |result| {
-            let FilteredEngineData {
-                engine_data,
-                selection_vector,
-            } = result?;
+            let (engine_data, selection_vector) = result?.into_parts();
 
             // Convert selection vector to BooleanArray
             let selection_array = BooleanArray::from(selection_vector);
 
             // Apply the Filter KDF - direct dispatch via enum, monomorphized execution
-            let new_selection = state.apply(engine_data.as_ref(), selection_array)?;
+            let new_selection = {
+                let mut state = state
+                    .lock()
+                    .expect("FilterByKDF state mutex poisoned");
+                state.apply(engine_data.as_ref(), selection_array)?
+            };
 
             // Convert back to Vec<bool>
             let new_selection_vec: Vec<bool> = (0..new_selection.len())
                 .map(|i| new_selection.value(i))
                 .collect();
 
-            Ok(FilteredEngineData {
-                engine_data,
-                selection_vector: new_selection_vec,
-            })
+            FilteredEngineData::try_new(engine_data, new_selection_vec)
         })))
     }
 
@@ -425,10 +447,7 @@ impl DeclarativePlanExecutor {
         let child_iter = self.execute(child)?;
 
         Ok(Box::new(child_iter.map(move |result| {
-            let FilteredEngineData {
-                engine_data,
-                selection_vector,
-            } = result?;
+            let (engine_data, selection_vector) = result?.into_parts();
 
             // Extract the RecordBatch to get the schema
             let record_batch = extract_record_batch(engine_data.as_ref())?;
@@ -476,10 +495,7 @@ impl DeclarativePlanExecutor {
                 .map(|(existing, pred_result)| *existing && *pred_result)
                 .collect();
 
-            Ok(FilteredEngineData {
-                engine_data,
-                selection_vector: new_selection,
-            })
+            FilteredEngineData::try_new(engine_data, new_selection)
         })))
     }
 
@@ -497,6 +513,7 @@ impl DeclarativePlanExecutor {
             output_schema,
         } = node;
 
+        let input_schema = self.infer_output_schema(&child)?;
         let child_iter = self.execute(child)?;
 
         // For simple single-column references, just pass through the data
@@ -512,10 +529,7 @@ impl DeclarativePlanExecutor {
         let eval_handler = self.engine.evaluation_handler();
 
         Ok(Box::new(child_iter.map(move |result| {
-            let FilteredEngineData {
-                engine_data,
-                selection_vector,
-            } = result?;
+            let (engine_data, selection_vector) = result?.into_parts();
 
             // Build expression to evaluate - wrap in struct if multiple columns
             let expression_to_eval: Arc<Expression> = if columns.len() == 1 {
@@ -527,20 +541,15 @@ impl DeclarativePlanExecutor {
             // Convert output_schema to DataType
             let output_data_type: DataType = (*output_schema).clone().into();
 
-            // Use output_schema as input_schema approximation
-            // In a full implementation, we'd track the actual input schema through the plan
             let evaluator = eval_handler.new_expression_evaluator(
-                output_schema.clone(),
+                input_schema.clone(),
                 expression_to_eval,
                 output_data_type,
             )?;
 
             let new_data = evaluator.evaluate(engine_data.as_ref())?;
 
-            Ok(FilteredEngineData {
-                engine_data: Arc::from(new_data),
-                selection_vector,
-            })
+            FilteredEngineData::try_new(new_data, selection_vector)
         })))
     }
 
@@ -569,10 +578,7 @@ impl DeclarativePlanExecutor {
         let child_iter = self.execute(child)?;
 
         Ok(Box::new(child_iter.map(move |result| {
-            let FilteredEngineData {
-                engine_data,
-                selection_vector,
-            } = result?;
+            let (engine_data, selection_vector) = result?.into_parts();
 
             // Extract the RecordBatch from EngineData
             let record_batch = extract_record_batch(engine_data.as_ref())?;
@@ -626,10 +632,9 @@ impl DeclarativePlanExecutor {
                     .map_err(|e| Error::Arrow(e.into()))?
             };
 
-            Ok(FilteredEngineData {
-                engine_data: Arc::new(ArrowEngineData::new(output_batch)),
-                selection_vector,
-            })
+            let output_engine_data: Box<dyn crate::EngineData> =
+                Box::new(ArrowEngineData::new(output_batch));
+            FilteredEngineData::try_new(output_engine_data, selection_vector)
         })))
     }
 
@@ -680,12 +685,12 @@ use super::state_machines::{AdvanceResult, StateMachine};
 ///
 /// ```ignore
 /// let engine = Arc::new(SyncEngine::new());
-/// let executor = DeclarativePlanExecutor::new(engine);
+/// let executor = DeclarativePlanExecutor::new(engine.as_ref());
 /// let snapshot_sm = SnapshotStateMachine::new(table_root)?;
 /// let result = execute_state_machine(&executor, snapshot_sm)?;
 /// ```
 pub fn execute_state_machine<SM: StateMachine>(
-    executor: &DeclarativePlanExecutor,
+    executor: &DeclarativePlanExecutor<'_>,
     mut sm: SM,
 ) -> DeltaResult<SM::Result> {
     loop {
@@ -716,25 +721,25 @@ pub fn execute_state_machine<SM: StateMachine>(
 ///
 /// An iterator that yields `FilteredEngineData` batches from each phase,
 /// and finally yields the terminal result.
-pub fn execute_state_machine_iter<SM: StateMachine>(
-    executor: &DeclarativePlanExecutor,
+pub fn execute_state_machine_iter<'a, SM: StateMachine>(
+    executor: &'a DeclarativePlanExecutor<'a>,
     sm: SM,
-) -> StateMachineIterator<SM> {
-    StateMachineIterator::new(executor.engine.clone(), sm)
+) -> StateMachineIterator<'a, SM> {
+    StateMachineIterator::new(executor.engine, sm)
 }
 
 /// Iterator over state machine execution.
 ///
 /// Yields `FilteredEngineData` batches from each phase of execution.
-pub struct StateMachineIterator<SM: StateMachine> {
-    engine: Arc<dyn Engine>,
+pub struct StateMachineIterator<'a, SM: StateMachine> {
+    engine: &'a dyn Engine,
     sm: Option<SM>,
     current_iter: Option<FilteredDataIter>,
     is_done: bool,
 }
 
-impl<SM: StateMachine> StateMachineIterator<SM> {
-    fn new(engine: Arc<dyn Engine>, sm: SM) -> Self {
+impl<'a, SM: StateMachine> StateMachineIterator<'a, SM> {
+    fn new(engine: &'a dyn Engine, sm: SM) -> Self {
         Self {
             engine,
             sm: Some(sm),
@@ -752,7 +757,7 @@ impl<SM: StateMachine> StateMachineIterator<SM> {
     }
 }
 
-impl<SM: StateMachine> Iterator for StateMachineIterator<SM> {
+impl<'a, SM: StateMachine> Iterator for StateMachineIterator<'a, SM> {
     type Item = DeltaResult<FilteredEngineData>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -785,7 +790,7 @@ impl<SM: StateMachine> Iterator for StateMachineIterator<SM> {
                 Err(e) => return Some(Err(e)),
             };
 
-            let executor = DeclarativePlanExecutor::new(self.engine.clone());
+            let executor = DeclarativePlanExecutor::new(self.engine);
             let results = match executor.execute(plan.clone()) {
                 Ok(r) => r,
                 Err(e) => return Some(Err(e)),
@@ -831,17 +836,17 @@ impl<SM: StateMachine> Iterator for StateMachineIterator<SM> {
 ///
 /// ```ignore
 /// let snapshot_sm = SnapshotStateMachine::new(table_root)?;
-/// let driver = DropOnlyDriver::new(engine, snapshot_sm);
+/// let driver = DropOnlyDriver::new(engine.as_ref(), snapshot_sm);
 /// let snapshot: Snapshot = driver.execute()?;
 /// ```
-pub struct DropOnlyDriver<SM: StateMachine> {
-    engine: Arc<dyn Engine>,
+pub struct DropOnlyDriver<'a, SM: StateMachine> {
+    engine: &'a dyn Engine,
     sm: SM,
 }
 
-impl<SM: StateMachine> DropOnlyDriver<SM> {
+impl<'a, SM: StateMachine> DropOnlyDriver<'a, SM> {
     /// Create a new DropOnlyDriver with the given engine and state machine.
-    pub fn new(engine: Arc<dyn Engine>, sm: SM) -> Self {
+    pub fn new(engine: &'a dyn Engine, sm: SM) -> Self {
         Self { engine, sm }
     }
 
@@ -870,7 +875,7 @@ impl<SM: StateMachine> DropOnlyDriver<SM> {
             }
 
             // Execute the plan (Drop sink consumes data internally)
-            let executor = DeclarativePlanExecutor::new(self.engine.clone());
+            let executor = DeclarativePlanExecutor::new(self.engine);
             let execution_result = executor.execute(plan.clone());
 
             // Handle execution results - either success or error
@@ -924,15 +929,15 @@ impl<SM: StateMachine> DropOnlyDriver<SM> {
 ///
 /// ```ignore
 /// let scan_sm = ScanStateMachine::from_scan_config(...)?;
-/// let driver = ResultsDriver::new(engine, scan_sm);
+/// let driver = ResultsDriver::new(engine.as_ref(), scan_sm);
 /// for batch in &mut driver {
 ///     let data = batch?;
 ///     // Process streamed scan results
 /// }
 /// let scan_result = driver.into_result()?;
 /// ```
-pub struct ResultsDriver<SM: StateMachine> {
-    engine: Arc<dyn Engine>,
+pub struct ResultsDriver<'a, SM: StateMachine> {
+    engine: &'a dyn Engine,
     sm: Option<SM>,
     current_iter: Option<FilteredDataIter>,
     current_plan: Option<DeclarativePlanNode>,
@@ -940,9 +945,9 @@ pub struct ResultsDriver<SM: StateMachine> {
     is_done: bool,
 }
 
-impl<SM: StateMachine> ResultsDriver<SM> {
+impl<'a, SM: StateMachine> ResultsDriver<'a, SM> {
     /// Create a new ResultsDriver with the given engine and state machine.
-    pub fn new(engine: Arc<dyn Engine>, sm: SM) -> Self {
+    pub fn new(engine: &'a dyn Engine, sm: SM) -> Self {
         Self {
             engine,
             sm: Some(sm),
@@ -989,7 +994,7 @@ impl<SM: StateMachine> ResultsDriver<SM> {
 
     /// Execute a Drop sink plan silently (for side effects only).
     fn execute_drop_plan(&mut self, plan: DeclarativePlanNode) -> DeltaResult<()> {
-        let executor = DeclarativePlanExecutor::new(self.engine.clone());
+        let executor = DeclarativePlanExecutor::new(self.engine);
         let results = executor.execute(plan)?;
         
         // Consume all results to trigger side effects
@@ -1001,7 +1006,7 @@ impl<SM: StateMachine> ResultsDriver<SM> {
     }
 }
 
-impl<SM: StateMachine> Iterator for ResultsDriver<SM> {
+impl<'a, SM: StateMachine> Iterator for ResultsDriver<'a, SM> {
     type Item = DeltaResult<FilteredEngineData>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1048,7 +1053,7 @@ impl<SM: StateMachine> Iterator for ResultsDriver<SM> {
             // Check sink type and handle accordingly
             if plan.is_results_sink() {
                 // Results sink - execute and stream results to caller
-                let executor = DeclarativePlanExecutor::new(self.engine.clone());
+                let executor = DeclarativePlanExecutor::new(self.engine);
                 let results = match executor.execute(plan.clone()) {
                     Ok(r) => r,
                     Err(e) => return Some(Err(e)),
@@ -1142,8 +1147,7 @@ mod tests {
     #[test]
     fn test_executor_creation() {
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
-        assert!(Arc::strong_count(&executor.engine) >= 1);
+        let _executor = DeclarativePlanExecutor::new(engine.as_ref());
     }
 
     // =========================================================================
@@ -1157,7 +1161,7 @@ mod tests {
         };
 
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         let plan = DeclarativePlanNode::Scan(ScanNode {
             file_type: FileType::Json,
@@ -1178,14 +1182,14 @@ mod tests {
         let total_rows: usize = batches
             .iter()
             .filter_map(|b| b.as_ref().ok())
-            .map(|b| b.engine_data.len())
+            .map(|b| b.data().len())
             .sum();
         assert_eq!(total_rows, 4, "Delta log should have 4 rows");
 
         // All rows should be selected initially
         for batch in batches.iter().filter_map(|b| b.as_ref().ok()) {
             assert!(
-                batch.selection_vector.iter().all(|&v| v),
+                batch.selection_vector().iter().all(|&v| v),
                 "All rows should be selected after scan"
             );
         }
@@ -1198,7 +1202,7 @@ mod tests {
         };
 
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         let plan = DeclarativePlanNode::Scan(ScanNode {
             file_type: FileType::Parquet,
@@ -1218,7 +1222,7 @@ mod tests {
         let total_rows: usize = batches
             .iter()
             .filter_map(|b| b.as_ref().ok())
-            .map(|b| b.engine_data.len())
+            .map(|b| b.data().len())
             .sum();
         assert_eq!(total_rows, 10, "Parquet file should have 10 rows");
     }
@@ -1226,7 +1230,7 @@ mod tests {
     #[test]
     fn test_scan_empty_files() {
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         let plan = DeclarativePlanNode::Scan(ScanNode {
             file_type: FileType::Json,
@@ -1250,7 +1254,7 @@ mod tests {
         };
 
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         let scan = DeclarativePlanNode::Scan(ScanNode {
             file_type: FileType::Parquet,
@@ -1267,18 +1271,13 @@ mod tests {
             node: FilterByKDF::add_remove_dedup(),
         };
 
-        let result = executor.execute(plan).expect("KDF filter should succeed");
-        let batches: Vec<_> = result.collect();
-
-        assert!(!batches.is_empty(), "Should have data after KDF filter");
-
-        // Data should still be 10 rows (AddRemoveDedup needs path column to work)
-        let total_rows: usize = batches
-            .iter()
-            .filter_map(|b| b.as_ref().ok())
-            .map(|b| b.engine_data.len())
-            .sum();
-        assert_eq!(total_rows, 10, "KDF filter should preserve row count");
+        // This KDF is defined for Delta action batches (add/remove). Applying it to arbitrary user
+        // parquet rows is a schema error that surfaces during iteration.
+        let mut result = executor.execute(plan).expect("Iterator creation should succeed");
+        let first = result
+            .next()
+            .expect("Expected at least one batch from parquet scan");
+        assert!(matches!(first, Err(Error::MissingColumn(_))));
     }
 
     // =========================================================================
@@ -1293,7 +1292,7 @@ mod tests {
         };
 
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         let scan = DeclarativePlanNode::Scan(ScanNode {
             file_type: FileType::Parquet,
@@ -1321,7 +1320,7 @@ mod tests {
         let total_selected: usize = batches
             .iter()
             .filter_map(|b| b.as_ref().ok())
-            .map(|b| b.selection_vector.iter().filter(|&&v| v).count())
+            .map(|b| b.selection_vector().iter().filter(|&&v| v).count())
             .sum();
         assert_eq!(total_selected, 10, "All 10 rows should be selected");
     }
@@ -1337,7 +1336,7 @@ mod tests {
         };
 
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         let scan = DeclarativePlanNode::Scan(ScanNode {
             file_type: FileType::Parquet,
@@ -1372,7 +1371,7 @@ mod tests {
         let total_rows: usize = batches
             .iter()
             .filter_map(|b| b.as_ref().ok())
-            .map(|b| b.engine_data.len())
+            .map(|b| b.data().len())
             .sum();
         assert_eq!(total_rows, 10, "Select should preserve row count");
     }
@@ -1388,7 +1387,7 @@ mod tests {
         };
 
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         let scan = DeclarativePlanNode::Scan(ScanNode {
             file_type: FileType::Json,
@@ -1432,7 +1431,7 @@ mod tests {
         };
 
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         let scan = DeclarativePlanNode::Scan(ScanNode {
             file_type: FileType::Parquet,
@@ -1465,7 +1464,7 @@ mod tests {
     #[test]
     fn test_file_listing_executes() {
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         // Use a test data directory that exists
         let Some((test_path, _)) = get_test_table_path() else {
@@ -1504,7 +1503,7 @@ mod tests {
         };
 
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         let output_schema = Arc::new(StructType::new_unchecked(vec![StructField::nullable(
             "value",
@@ -1547,7 +1546,7 @@ mod tests {
         let total_rows: usize = batches
             .iter()
             .filter_map(|b| b.as_ref().ok())
-            .map(|b| b.engine_data.len())
+            .map(|b| b.data().len())
             .sum();
         assert_eq!(total_rows, 10, "Pipeline should preserve 10 rows");
     }
@@ -1559,7 +1558,7 @@ mod tests {
         };
 
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         let scan = DeclarativePlanNode::Scan(ScanNode {
             file_type: FileType::Parquet,
@@ -1571,15 +1570,17 @@ mod tests {
             schema: create_parquet_schema(),
         });
 
+        // This KDF is defined for Delta action batches (add/remove). Applying it to arbitrary user
+        // parquet rows is a schema error.
         let filter = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
             node: FilterByKDF::add_remove_dedup(),
         };
-
-        let result = executor.execute(filter).expect("Pipeline should succeed");
-        let batches: Vec<_> = result.collect();
-
-        assert!(!batches.is_empty(), "Pipeline should produce data");
+        let mut iter = executor.execute(filter).expect("Iterator creation should succeed");
+        let first = iter
+            .next()
+            .expect("Expected at least one batch from parquet scan");
+        assert!(matches!(first, Err(Error::MissingColumn(_))));
     }
 
     #[test]
@@ -1590,14 +1591,14 @@ mod tests {
         };
 
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         let output_schema = Arc::new(StructType::new_unchecked(vec![StructField::nullable(
             "value",
             DataType::LONG,
         )]));
 
-        // Build deep pipeline: Scan -> Filter -> FilterByExpr -> Select -> FirstNonNull
+        // Build deep pipeline: Scan -> FilterByExpr -> Select -> FirstNonNull
         let scan = DeclarativePlanNode::Scan(ScanNode {
             file_type: FileType::Parquet,
             files: vec![FileMeta {
@@ -1608,13 +1609,8 @@ mod tests {
             schema: create_parquet_schema(),
         });
 
-        let kdf_filter = DeclarativePlanNode::FilterByKDF {
-            child: Box::new(scan),
-            node: FilterByKDF::add_remove_dedup(),
-        };
-
         let expr_filter = DeclarativePlanNode::FilterByExpression {
-            child: Box::new(kdf_filter),
+            child: Box::new(scan),
             node: FilterByExpressionNode {
                 predicate: Arc::new(Expression::Literal(Scalar::Boolean(true))),
             },
@@ -1653,7 +1649,7 @@ mod tests {
         };
 
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         // Build pipeline with multiple filters
         let scan = DeclarativePlanNode::Scan(ScanNode {
@@ -1673,13 +1669,8 @@ mod tests {
             },
         };
 
-        let filter2 = DeclarativePlanNode::FilterByKDF {
-            child: Box::new(filter1),
-            node: FilterByKDF::add_remove_dedup(),
-        };
-
         let filter3 = DeclarativePlanNode::FilterByExpression {
-            child: Box::new(filter2),
+            child: Box::new(filter1),
             node: FilterByExpressionNode {
                 predicate: Arc::new(Expression::Literal(Scalar::Boolean(true))),
             },
@@ -1695,7 +1686,7 @@ mod tests {
         let total_rows: usize = batches
             .iter()
             .filter_map(|b| b.as_ref().ok())
-            .map(|b| b.engine_data.len())
+            .map(|b| b.data().len())
             .sum();
         assert_eq!(
             total_rows, 10,
@@ -1768,7 +1759,7 @@ mod tests {
         use crate::plans::state_machines::SnapshotStateMachine;
 
         let engine = create_test_engine();
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         let table_url = url::Url::parse("file:///tmp/nonexistent_table/").unwrap();
         let sm = SnapshotStateMachine::new(table_url).unwrap();
@@ -1883,7 +1874,11 @@ mod tests {
                         match select_child.as_ref() {
                             DeclarativePlanNode::FilterByKDF { child: inner, node: filter_node } => {
                                 // Verify it's an AddRemoveDedup filter (state variant IS the identity)
-                                assert!(matches!(&filter_node.state, FilterKdfState::AddRemoveDedup(_)));
+                                let state = filter_node
+                                    .state
+                                    .lock()
+                                    .expect("FilterByKDF state mutex poisoned");
+                                assert!(matches!(&*state, FilterKdfState::AddRemoveDedup(_)));
                                 match inner.as_ref() {
                                     DeclarativePlanNode::Scan(scan) => {
                                         assert_eq!(scan.file_type, super::FileType::Json);
@@ -2169,7 +2164,8 @@ mod tests {
             ScanStateMachine::new(table_url, physical_schema.clone(), physical_schema).unwrap();
 
         // Create iterator
-        let iter = execute_state_machine_iter(&DeclarativePlanExecutor::new(engine), sm);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
+        let iter = execute_state_machine_iter(&executor, sm);
 
         // Collect results (may be empty since no commit files in this simple table path)
         let results: Vec<_> = iter.collect();
@@ -2457,7 +2453,7 @@ mod tests {
         let sm = ScanStateMachine::new(table_url, physical_schema.clone(), physical_schema.clone())
             .unwrap();
 
-        let executor = DeclarativePlanExecutor::new(engine);
+        let executor = DeclarativePlanExecutor::new(engine.as_ref());
 
         // High-level: Just iterate - execution is handled automatically
         let results: Vec<_> = execute_state_machine_iter(&executor, sm).collect();
@@ -2553,7 +2549,7 @@ mod tests {
 
         let engine = create_test_engine();
         let sm = MockResultsStateMachine { done: false };
-        let driver = DropOnlyDriver::new(engine, sm);
+        let driver = DropOnlyDriver::new(engine.as_ref(), sm);
 
         // DropOnlyDriver should error on Results sink
         let result = driver.execute();
@@ -2618,7 +2614,7 @@ mod tests {
         let sm = MockDropStateMachine {
             calls: std::cell::Cell::new(0),
         };
-        let driver = DropOnlyDriver::new(engine, sm);
+        let driver = DropOnlyDriver::new(engine.as_ref(), sm);
 
         // DropOnlyDriver should accept Drop sink and complete successfully
         let result = driver.execute();
@@ -2671,7 +2667,7 @@ mod tests {
 
         let engine = create_test_engine();
         let sm = MockStreamingStateMachine { done: false };
-        let mut driver = ResultsDriver::new(engine, sm);
+        let mut driver = ResultsDriver::new(engine.as_ref(), sm);
 
         // Consume the iterator (should be empty since no files)
         let batches: Vec<_> = driver.by_ref().collect();
@@ -2752,7 +2748,7 @@ mod tests {
         let sm = MockMixedStateMachine {
             phase: std::cell::Cell::new(0),
         };
-        let mut driver = ResultsDriver::new(engine, sm);
+        let mut driver = ResultsDriver::new(engine.as_ref(), sm);
 
         // Consume the iterator
         // Drop phase should be handled silently, Results phase should yield nothing (empty files)
@@ -2842,7 +2838,7 @@ mod tests {
 
         // Build snapshot using SnapshotStateMachine + DropOnlyDriver
         let sm = SnapshotStateMachine::new(table_url.clone()).unwrap();
-        let driver = DropOnlyDriver::new(engine.clone(), sm);
+        let driver = DropOnlyDriver::new(engine.as_ref(), sm);
 
         let actual_snapshot = match driver.execute() {
             Ok(s) => s,
@@ -2923,7 +2919,7 @@ mod tests {
 
         // Build snapshot using SnapshotStateMachine + DropOnlyDriver
         let sm = SnapshotStateMachine::new(table_url).unwrap();
-        let driver = DropOnlyDriver::new(engine.clone(), sm);
+        let driver = DropOnlyDriver::new(engine.as_ref(), sm);
 
         let actual_snapshot = match driver.execute() {
             Ok(s) => s,
@@ -2988,7 +2984,7 @@ mod tests {
 
             // Build using SnapshotStateMachine + DropOnlyDriver
             let sm = SnapshotStateMachine::new(table_url).unwrap();
-            let driver = DropOnlyDriver::new(engine.clone(), sm);
+            let driver = DropOnlyDriver::new(engine.as_ref(), sm);
 
             match driver.execute() {
                 Ok(actual_snapshot) => {

@@ -169,9 +169,10 @@ async fn latest_snapshot_test(
     url: Url,
     expected_path: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let snapshot = Snapshot::builder_for(url).build(&engine)?;
+    let engine = Arc::new(engine);
+    let snapshot = Snapshot::builder_for(url).build(engine.as_ref())?;
     let scan = snapshot.scan_builder().build()?;
-    let scan_res = scan.execute(Arc::new(engine))?;
+    let scan_res = scan.execute(engine.clone())?;
     let batches: Vec<RecordBatch> = scan_res
         .map(EngineDataArrowExt::try_into_record_batch)
         .try_collect()?;
@@ -182,9 +183,92 @@ async fn latest_snapshot_test(
     let result = concat_batches(&schema, &batches)?;
     let result = sort_record_batch(result)?;
     let expected = sort_record_batch(expected)?;
-    assert!(
-        expected.num_rows() == result.num_rows(),
-        "Didn't have same number of rows"
+    if expected.num_rows() != result.num_rows() {
+        // Helpful debug output for CI: show how scan_metadata is chunking and whether DV info exists.
+        #[derive(Default)]
+        struct ScanDebug {
+            scan_metadata_items: usize,
+            total_files: usize,
+            dv_files: usize,
+            dv_deleted_rows: usize,
+            dv_details: Vec<(String, bool, usize)>, // (path, has_dv, deleted_rows)
+            engine: Option<Arc<dyn delta_kernel::Engine>>,
+            table_root: Option<Url>,
+        }
+        fn scan_debug_callback(
+            ctx: &mut ScanDebug,
+            path: &str,
+            _size: i64,
+            _stats: Option<delta_kernel::scan::state::Stats>,
+            dv_info: delta_kernel::scan::state::DvInfo,
+            _transform: Option<delta_kernel::ExpressionRef>,
+            _partition_values: std::collections::HashMap<String, String>,
+        ) {
+            ctx.total_files += 1;
+            let has_dv = dv_info.has_vector();
+            let mut deleted_rows = 0usize;
+            if has_dv {
+                ctx.dv_files += 1;
+                if let (Some(engine), Some(table_root)) = (&ctx.engine, &ctx.table_root) {
+                    if let Ok(Some(sv)) = dv_info.get_selection_vector(engine.as_ref(), table_root) {
+                        deleted_rows = sv.iter().filter(|&&b| !b).count();
+                        ctx.dv_deleted_rows += deleted_rows;
+                    }
+                }
+            }
+            ctx.dv_details.push((path.to_string(), has_dv, deleted_rows));
+        }
+
+        let mut dbg = ScanDebug {
+            engine: Some(engine.clone()),
+            table_root: Some(scan.table_root().clone()),
+            ..Default::default()
+        };
+        for item in scan.scan_metadata(engine.as_ref())? {
+            let md = item?;
+            dbg.scan_metadata_items += 1;
+            dbg = md.visit_scan_files(dbg, scan_debug_callback)?;
+        }
+
+        eprintln!(
+            "Row count mismatch for table_root={}. expected_rows={}, actual_rows={}, scan_metadata_items={}, total_files={}, dv_files={}, dv_deleted_rows={}",
+            scan.table_root(),
+            expected.num_rows(),
+            result.num_rows(),
+            dbg.scan_metadata_items,
+            dbg.total_files,
+            dbg.dv_files,
+            dbg.dv_deleted_rows
+        );
+        {
+            use std::collections::HashMap;
+            let mut counts: HashMap<&str, usize> = HashMap::new();
+            for (path, _has_dv, _deleted_rows) in dbg.dv_details.iter() {
+                *counts.entry(path.as_str()).or_default() += 1;
+            }
+            let dupes: Vec<_> = counts.iter().filter(|(_, c)| **c > 1).collect();
+            eprintln!(
+                "  unique_files={}, duplicate_paths={}",
+                counts.len(),
+                dupes.len()
+            );
+            for (p, c) in dupes {
+                eprintln!("  duplicate path={} count={}", p, c);
+            }
+        }
+        // Print per-file DV info for easier diagnosis (only for mismatches).
+        for (path, has_dv, deleted_rows) in dbg.dv_details.iter() {
+            if *has_dv {
+                eprintln!("  dv_file path={} deleted_rows={}", path, deleted_rows);
+            }
+        }
+    }
+    assert_eq!(
+        expected.num_rows(),
+        result.num_rows(),
+        "Didn't have same number of rows (expected {}, got {})",
+        expected.num_rows(),
+        result.num_rows()
     );
     assert_eq(&result.into(), &expected.into());
     Ok(())

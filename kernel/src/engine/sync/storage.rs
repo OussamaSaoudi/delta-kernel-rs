@@ -76,7 +76,28 @@ impl StorageHandler for SyncStorageHandler {
     }
 
     fn head(&self, _path: &Url) -> DeltaResult<FileMeta> {
-        unimplemented!("head is not implemented for SyncStorageHandler")
+        let path = _path;
+        if path.scheme() == "file" {
+            let file_path = path
+                .to_file_path()
+                .map_err(|_| Error::Generic(format!("Invalid path for head: {path:?}")))?;
+            let metadata = std::fs::metadata(&file_path)
+                .map_err(|_| Error::file_not_found(path.path()))?;
+            let last_modified = metadata
+                .modified()?
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .map_err(|_| Error::generic("Failed to convert file timestamp to milliseconds"))?
+                .as_millis()
+                .try_into()
+                .map_err(|_| Error::generic("Failed to convert file timestamp to i64"))?;
+            Ok(FileMeta {
+                location: path.clone(),
+                last_modified,
+                size: metadata.len(),
+            })
+        } else {
+            Err(Error::generic("Can only read local filesystem"))
+        }
     }
 }
 
