@@ -15,7 +15,7 @@ use super::{AsQueryPlan, DeclarativePlanNode};
 /// Parses stats JSON and filters files based on min/max values.
 #[derive(Debug, Clone)]
 pub struct DataSkippingPlan {
-    /// Parse stats JSON column
+    /// Parse stats JSON column (outputs stats schema at root level)
     pub parse_json: ParseJsonNode,
     /// Filter based on parsed stats
     pub filter: FilterByExpressionNode,

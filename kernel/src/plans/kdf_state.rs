@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use url::Url;
 
-use crate::arrow::array::BooleanArray;
+use crate::arrow::array::{BooleanArray, Int32Array};
 use crate::listed_log_files::ListedLogFiles;
 use crate::log_replay::FileActionKey;
 use crate::log_segment::LogSegment;
@@ -188,12 +188,21 @@ impl AddRemoveDedupState {
             .and_then(|s| s.column_by_name("path"));
         let add_path_array = add_path_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
 
-        // Get add.deletionVector column
-        let add_dv_col = record_batch
+        // Get add.deletionVector struct fields for constructing dv_unique_id
+        let add_dv_struct = record_batch
             .column_by_name("add")
             .and_then(|col| col.as_struct_opt())
-            .and_then(|s| s.column_by_name("deletionVector"));
-        let add_dv_array = add_dv_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
+            .and_then(|s| s.column_by_name("deletionVector"))
+            .and_then(|col| col.as_struct_opt());
+        let add_dv_storage_type = add_dv_struct
+            .and_then(|s| s.column_by_name("storageType"))
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+        let add_dv_path_or_inline = add_dv_struct
+            .and_then(|s| s.column_by_name("pathOrInlineDv"))
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+        let add_dv_offset = add_dv_struct
+            .and_then(|s| s.column_by_name("offset"))
+            .and_then(|col| col.as_any().downcast_ref::<Int32Array>());
 
         // Get remove.path column
         let remove_path_col = record_batch
@@ -203,13 +212,21 @@ impl AddRemoveDedupState {
         let remove_path_array =
             remove_path_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
 
-        // Get remove.deletionVector column
-        let remove_dv_col = record_batch
+        // Get remove.deletionVector struct fields
+        let remove_dv_struct = record_batch
             .column_by_name("remove")
             .and_then(|col| col.as_struct_opt())
-            .and_then(|s| s.column_by_name("deletionVector"));
-        let remove_dv_array =
-            remove_dv_col.and_then(|col| col.as_any().downcast_ref::<StringArray>());
+            .and_then(|s| s.column_by_name("deletionVector"))
+            .and_then(|col| col.as_struct_opt());
+        let remove_dv_storage_type = remove_dv_struct
+            .and_then(|s| s.column_by_name("storageType"))
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+        let remove_dv_path_or_inline = remove_dv_struct
+            .and_then(|s| s.column_by_name("pathOrInlineDv"))
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+        let remove_dv_offset = remove_dv_struct
+            .and_then(|s| s.column_by_name("offset"))
+            .and_then(|col| col.as_any().downcast_ref::<Int32Array>());
 
         // If no add or remove columns, return selection unchanged
         if add_path_array.is_none() && remove_path_array.is_none() {
@@ -245,24 +262,33 @@ impl AddRemoveDedupState {
             });
 
             // Determine which action this row represents (add takes precedence)
-            let (path, dv_array, is_add) = if let Some(p) = add_path {
-                (p, add_dv_array, true)
+            // Also get the DV fields for constructing the unique ID
+            let (path, dv_storage, dv_path_or_inline, dv_offset, is_add) = if let Some(p) = add_path {
+                (p, add_dv_storage_type, add_dv_path_or_inline, add_dv_offset, true)
             } else if let Some(p) = remove_path {
-                (p, remove_dv_array, false)
+                (p, remove_dv_storage_type, remove_dv_path_or_inline, remove_dv_offset, false)
             } else {
                 // No add or remove path - filter out
                 result.push(false);
                 continue;
             };
 
-            // Get optional deletion vector unique ID
-            let dv_unique_id = dv_array.and_then(|arr| {
-                if arr.is_null(i) {
-                    None
-                } else {
-                    Some(arr.value(i).to_string())
+            // Construct DV unique ID from the three DV fields if present
+            let dv_unique_id = match (dv_storage, dv_path_or_inline) {
+                (Some(storage_arr), Some(path_arr)) if !storage_arr.is_null(i) && !path_arr.is_null(i) => {
+                    let storage_type = storage_arr.value(i);
+                    let path_or_inline = path_arr.value(i);
+                    let offset: Option<i32> = dv_offset.and_then(|arr| {
+                        if arr.is_null(i) { None } else { Some(arr.value(i)) }
+                    });
+                    Some(crate::actions::deletion_vector::DeletionVectorDescriptor::unique_id_from_parts(
+                        storage_type,
+                        path_or_inline,
+                        offset,
+                    ))
                 }
-            });
+                _ => None,
+            };
 
             // Create the file action key
             let key = FileActionKey {

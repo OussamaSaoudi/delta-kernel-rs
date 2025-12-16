@@ -46,7 +46,7 @@ pub(crate) fn as_data_skipping_predicate(pred: &Pred) -> Option<Pred> {
 
 /// Like `as_data_skipping_predicate`, but invokes [`KernelPredicateEvaluator::eval_sql_where`]
 /// instead of [`KernelPredicateEvaluator::eval`].
-fn as_sql_data_skipping_predicate(pred: &Pred) -> Option<Pred> {
+pub(crate) fn as_sql_data_skipping_predicate(pred: &Pred) -> Option<Pred> {
     DataSkippingPredicateCreator.eval_sql_where(pred)
 }
 

@@ -87,6 +87,48 @@ impl Iterator for ConsumeByKdfIterator {
     }
 }
 
+/// Helper to extract a nested string column from a RecordBatch.
+///
+/// Handles dot-separated paths like "add.stats" by navigating through struct columns.
+fn extract_nested_string_column(
+    batch: &crate::arrow::array::RecordBatch,
+    column_path: &str,
+) -> DeltaResult<crate::arrow::array::StringArray> {
+    use crate::arrow::array::{Array, StringArray};
+    use crate::arrow::array::cast::AsArray;
+
+    let parts: Vec<&str> = column_path.split('.').collect();
+    
+    if parts.is_empty() {
+        return Err(Error::generic("Empty column path"));
+    }
+
+    // Start with the first part
+    let mut current_array: Arc<dyn Array> = batch
+        .column_by_name(parts[0])
+        .ok_or_else(|| Error::generic(format!("Column '{}' not found", parts[0])))?
+        .clone();
+
+    // Navigate through nested struct fields
+    for part in parts.iter().skip(1) {
+        let struct_array = current_array
+            .as_struct_opt()
+            .ok_or_else(|| Error::generic(format!("Expected struct for path '{}'", column_path)))?;
+        
+        current_array = struct_array
+            .column_by_name(part)
+            .ok_or_else(|| Error::generic(format!("Field '{}' not found in struct", part)))?
+            .clone();
+    }
+
+    // Final array should be a string
+    let string_array = current_array
+        .as_string_opt::<i32>()
+        .ok_or_else(|| Error::generic(format!("Column '{}' is not a string type", column_path)))?;
+
+    Ok(string_array.clone())
+}
+
 /// Executor for `DeclarativePlanNode` trees.
 ///
 /// This executor interprets declarative plan nodes and executes them using the
@@ -358,21 +400,29 @@ impl DeclarativePlanExecutor {
 
     /// Execute a FilterByExpression node - evaluates a predicate expression.
     ///
-    /// Note: This is a simplified implementation. For full predicate evaluation,
-    /// the engine's expression evaluator should be used with proper schema handling.
+    /// This evaluates the predicate against each batch and updates the selection vector.
+    /// For data skipping, the predicate evaluates against parsed stats and produces
+    /// true (keep), null (keep), or false (skip) for each file.
     fn execute_filter_by_expr(
         &self,
         child: DeclarativePlanNode,
         node: FilterByExpressionNode,
     ) -> DeltaResult<FilteredDataIter> {
+        use crate::actions::visitors::SelectionVectorVisitor;
+        use crate::engine::arrow_data::extract_record_batch;
+        use crate::engine::arrow_conversion::TryFromArrow;
+        use crate::expressions::{column_expr, Expression, Predicate};
+        use crate::RowVisitor as _;
+        use crate::PredicateRef;
+        use std::sync::LazyLock;
+
+        // The filter predicate: DISTINCT(output, false) treats true/null as keep, false as skip
+        static FILTER_PRED: LazyLock<PredicateRef> =
+            LazyLock::new(|| Arc::new(column_expr!("output").distinct(Expression::literal(false))));
+
         let FilterByExpressionNode { predicate } = node;
-
-        let child_iter = self.execute(child)?;
         let eval_handler = self.engine.evaluation_handler();
-
-        // For predicate evaluation, we need to know the input schema
-        // Since EngineData doesn't expose schema directly, we use the approach
-        // from DefaultPlanExecutor: evaluate with a simple visitor pattern
+        let child_iter = self.execute(child)?;
 
         Ok(Box::new(child_iter.map(move |result| {
             let FilteredEngineData {
@@ -380,51 +430,50 @@ impl DeclarativePlanExecutor {
                 selection_vector,
             } = result?;
 
-            // Use a visitor to extract boolean predicate results
-            // This is a simplified approach - actual implementation would
-            // use the expression evaluator properly
+            // Extract the RecordBatch to get the schema
+            let record_batch = extract_record_batch(engine_data.as_ref())?;
+            let arrow_schema = record_batch.schema();
+            
+            // Convert Arrow schema to kernel schema for predicate evaluator
+            let input_schema = Arc::new(crate::schema::StructType::try_from_arrow(
+                arrow_schema.as_ref()
+            )?);
 
-            struct PredicateVisitor {
-                predicate: Arc<Expression>,
-                results: Vec<bool>,
-            }
+            // Wrap Expression in a Predicate::BooleanExpression
+            let pred = Predicate::BooleanExpression(predicate.as_ref().clone());
 
-            impl crate::RowVisitor for PredicateVisitor {
-                fn selected_column_names_and_types(
-                    &self,
-                ) -> (&'static [crate::schema::ColumnName], &'static [DataType]) {
-                    // Return empty - we're not selecting specific columns
-                    static EMPTY_NAMES: &[crate::schema::ColumnName] = &[];
-                    static EMPTY_TYPES: &[DataType] = &[];
-                    (EMPTY_NAMES, EMPTY_TYPES)
-                }
+            // Create predicate evaluator for this batch's schema
+            let predicate_evaluator = eval_handler.new_predicate_evaluator(
+                input_schema.clone(),
+                Arc::new(pred),
+            )?;
 
-                fn visit<'a>(
-                    &mut self,
-                    row_count: usize,
-                    _getters: &[&'a dyn GetData<'a>],
-                ) -> DeltaResult<()> {
-                    // Without proper schema, default to keeping all rows
-                    // A full implementation would evaluate the predicate here
-                    let _ = &self.predicate;
-                    self.results.extend(std::iter::repeat(true).take(row_count));
-                    Ok(())
-                }
-            }
+            // Step 1: Evaluate the skipping predicate (outputs to "output" column)
+            let skipping_result = predicate_evaluator.evaluate(engine_data.as_ref())?;
 
-            let mut visitor = PredicateVisitor {
-                predicate: predicate.clone(),
-                results: Vec::with_capacity(engine_data.len()),
-            };
+            // Step 2: Apply DISTINCT(output, false) to convert to selection vector
+            // For data skipping, we use DISTINCT(output, false) semantics:
+            // - true → keep (file may have matching data)
+            // - null → keep (can't determine from stats, be conservative)
+            // - false → skip (file definitely has no matching data)
+            let filter_evaluator = eval_handler.new_predicate_evaluator(
+                // The skipping_result has schema { output: BOOLEAN }
+                Arc::new(crate::schema::StructType::try_new([
+                    crate::schema::StructField::nullable("output", crate::schema::DataType::BOOLEAN)
+                ])?),
+                FILTER_PRED.clone(),
+            )?;
+            let selection_result = filter_evaluator.evaluate(skipping_result.as_ref())?;
 
-            // Visit to get row count
-            engine_data.visit_rows(&[], &mut visitor)?;
+            // Visit the engine's selection vector to produce Vec<bool>
+            let mut visitor = SelectionVectorVisitor::default();
+            visitor.visit_rows_of(selection_result.as_ref())?;
 
-            // AND with existing selection
+            // AND the predicate result with existing selection vector
             let new_selection: Vec<bool> = selection_vector
                 .iter()
-                .zip(visitor.results.iter())
-                .map(|(existing, pred)| *existing && *pred)
+                .zip(visitor.selection_vector.iter())
+                .map(|(existing, pred_result)| *existing && *pred_result)
                 .collect();
 
             Ok(FilteredEngineData {
@@ -496,11 +545,20 @@ impl DeclarativePlanExecutor {
     }
 
     /// Execute a ParseJson node - parses a JSON column into structured data.
+    ///
+    /// This extracts a JSON string column (like "add.stats"), parses it according to the
+    /// target schema.
+    /// - If `output_column` is non-empty: adds parsed struct as a new column with that name
+    /// - If `output_column` is empty: outputs parsed data at root level (replaces batch)
     fn execute_parse_json(
         &self,
         child: DeclarativePlanNode,
         node: ParseJsonNode,
     ) -> DeltaResult<FilteredDataIter> {
+        use crate::arrow::array::{Array, RecordBatch, StructArray};
+        use crate::arrow::datatypes::{Field, Schema as ArrowSchema};
+        use crate::engine::arrow_data::{ArrowEngineData, extract_record_batch};
+
         let ParseJsonNode {
             json_column,
             target_schema,
@@ -516,60 +574,60 @@ impl DeclarativePlanExecutor {
                 selection_vector,
             } = result?;
 
-            // Extract the JSON column as a single-column batch first
-            // Then parse it
-            // For now, we need to extract the JSON column using a visitor
+            // Extract the RecordBatch from EngineData
+            let record_batch = extract_record_batch(engine_data.as_ref())?;
 
-            struct JsonColumnExtractor {
-                column_name: String,
-                values: Vec<Option<String>>,
-            }
+            // Find and extract the JSON column (handles nested columns like "add.stats")
+            let json_array = extract_nested_string_column(record_batch, &json_column)?;
 
-            impl crate::RowVisitor for JsonColumnExtractor {
-                fn selected_column_names_and_types(
-                    &self,
-                ) -> (&'static [crate::schema::ColumnName], &'static [DataType]) {
-                    // We need to return the column we want
-                    // For now, return empty and handle in visit
-                    static EMPTY_NAMES: &[crate::schema::ColumnName] = &[];
-                    static EMPTY_TYPES: &[DataType] = &[];
-                    (EMPTY_NAMES, EMPTY_TYPES)
-                }
+            // Create a single-column batch with the JSON strings
+            let json_schema = Arc::new(ArrowSchema::new(vec![
+                Field::new("json", crate::arrow::datatypes::DataType::Utf8, true),
+            ]));
+            let json_batch = RecordBatch::try_new(
+                json_schema,
+                vec![Arc::new(json_array) as Arc<dyn Array>],
+            ).map_err(|e| Error::Arrow(e.into()))?;
+            let json_engine_data: Box<dyn crate::EngineData> = Box::new(ArrowEngineData::new(json_batch));
 
-                fn visit<'a>(
-                    &mut self,
-                    row_count: usize,
-                    getters: &[&'a dyn GetData<'a>],
-                ) -> DeltaResult<()> {
-                    let _ = &self.column_name;
-                    // Without proper column access, fill with None
-                    // A full implementation would extract the JSON strings
-                    if getters.is_empty() {
-                        self.values.extend(std::iter::repeat(None).take(row_count));
-                    } else {
-                        for i in 0..row_count {
-                            let val: Option<String> = getters[0].get_opt(i, "json")?;
-                            self.values.push(val);
-                        }
-                    }
-                    Ok(())
-                }
-            }
+            // Parse the JSON using the json handler
+            let parsed_data = json_handler.parse_json(json_engine_data, target_schema.clone())?;
+            let parsed_batch = extract_record_batch(parsed_data.as_ref())?;
 
-            // For now, return the original data unchanged
-            // A full implementation would:
-            // 1. Extract JSON column
-            // 2. Parse using json_handler.parse_json()
-            // 3. Add parsed columns back to the batch
-            let _ = (
-                json_column.clone(),
-                target_schema.clone(),
-                output_column.clone(),
-                json_handler.as_ref(),
-            );
+            let output_batch = if output_column.is_empty() {
+                // Empty output_column: add parsed data fields at root level (merge with existing batch)
+                // This is used for data skipping where predicates reference stats directly
+                let mut new_fields = record_batch.schema().fields().to_vec();
+                new_fields.extend(parsed_batch.schema().fields().iter().cloned());
+                let new_schema = Arc::new(ArrowSchema::new(new_fields));
+
+                let mut new_columns: Vec<Arc<dyn Array>> = record_batch.columns().to_vec();
+                new_columns.extend(parsed_batch.columns().iter().cloned());
+
+                RecordBatch::try_new(new_schema, new_columns)
+                    .map_err(|e| Error::Arrow(e.into()))?
+            } else {
+                // Non-empty output_column: add parsed struct as new column
+                let parsed_struct = StructArray::from(parsed_batch.clone());
+                let parsed_field = Field::new(
+                    &output_column,
+                    crate::arrow::datatypes::DataType::Struct(parsed_batch.schema().fields().clone()),
+                    true,
+                );
+
+                let mut new_fields = record_batch.schema().fields().to_vec();
+                new_fields.push(Arc::new(parsed_field));
+                let new_schema = Arc::new(ArrowSchema::new(new_fields));
+
+                let mut new_columns: Vec<Arc<dyn Array>> = record_batch.columns().to_vec();
+                new_columns.push(Arc::new(parsed_struct));
+
+                RecordBatch::try_new(new_schema, new_columns)
+                    .map_err(|e| Error::Arrow(e.into()))?
+            };
 
             Ok(FilteredEngineData {
-                engine_data,
+                engine_data: Arc::new(ArrowEngineData::new(output_batch)),
                 selection_vector,
             })
         })))

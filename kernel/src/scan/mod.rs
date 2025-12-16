@@ -38,6 +38,7 @@ pub(crate) mod field_classifiers;
 pub mod log_replay;
 pub mod state;
 pub(crate) mod state_info;
+pub(crate) mod transform;
 
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -316,6 +317,22 @@ impl ScanMetadata {
             scan_file_transforms,
         })
     }
+
+    /// Create `ScanMetadata` from a `FilteredEngineData` batch with pre-computed transforms.
+    ///
+    /// This is used by [`TransformComputer`] to construct `ScanMetadata` from batches
+    /// produced by the `ScanStateMachine`.
+    ///
+    /// [`TransformComputer`]: crate::scan::transform::TransformComputer
+    pub fn from_filtered_with_transforms(
+        scan_files: FilteredEngineData,
+        scan_file_transforms: Vec<Option<ExpressionRef>>,
+    ) -> DeltaResult<Self> {
+        Ok(Self {
+            scan_files,
+            scan_file_transforms,
+        })
+    }
 }
 
 impl HasSelectionVector for ScanMetadata {
@@ -382,6 +399,15 @@ impl Scan {
         } else {
             None
         }
+    }
+
+    /// Get a shared reference to the internal [`StateInfo`] for this scan.
+    ///
+    /// This is used by [`TransformComputer`] to compute row-level transforms.
+    ///
+    /// [`TransformComputer`]: crate::scan::transform::TransformComputer
+    pub(crate) fn state_info(&self) -> Arc<StateInfo> {
+        self.state_info.clone()
     }
 
     /// Get an iterator of [`ScanMetadata`]s that should be used to facilitate a scan. This handles

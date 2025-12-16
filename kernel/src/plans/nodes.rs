@@ -232,7 +232,7 @@ pub struct ParseJsonNode {
     pub json_column: String,
     /// Schema to parse the JSON into
     pub target_schema: SchemaRef,
-    /// Name for the output column
+    /// Name for the output column. If empty, outputs at root level (replaces batch).
     pub output_column: String,
 }
 
