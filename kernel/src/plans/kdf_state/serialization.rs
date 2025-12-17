@@ -112,3 +112,4 @@ pub(crate) fn selection_value_or_true(selection: &crate::arrow::array::BooleanAr
     }
 }
 
+
