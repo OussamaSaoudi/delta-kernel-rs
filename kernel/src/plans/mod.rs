@@ -29,7 +29,7 @@ pub mod proto_convert;
 pub mod state_machines;
 pub mod function_registry;
 pub mod kdf_implementations;
-pub mod kdf_state;
+pub mod kdf_state; // Now a directory module
 pub mod executor;
 
 #[cfg(test)]

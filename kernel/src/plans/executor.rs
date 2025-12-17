@@ -718,6 +718,9 @@ pub fn execute_state_machine<SM: StateMachine>(
 
 /// Driver for state machines that only use Drop sinks (no result streaming).
 ///
+/// This is a convenience wrapper around `ResultsDriver` that validates
+/// no Results sinks are used and provides a simpler synchronous API.
+///
 /// This driver is designed for operations like `SnapshotStateMachine` that execute
 /// plans purely for side effects (accumulating state in KDFs) and don't stream
 /// any results back to the caller.
@@ -738,14 +741,15 @@ pub fn execute_state_machine<SM: StateMachine>(
 /// let snapshot: Snapshot = driver.execute()?;
 /// ```
 pub struct DropOnlyDriver<'a, SM: StateMachine> {
-    engine: &'a dyn Engine,
-    sm: SM,
+    inner: ResultsDriver<'a, SM>,
 }
 
 impl<'a, SM: StateMachine> DropOnlyDriver<'a, SM> {
     /// Create a new DropOnlyDriver with the given engine and state machine.
     pub fn new(engine: &'a dyn Engine, sm: SM) -> Self {
-        Self { engine, sm }
+        Self {
+            inner: ResultsDriver::new(engine, sm),
+        }
     }
 
     /// Execute the state machine to completion.
@@ -760,50 +764,22 @@ impl<'a, SM: StateMachine> DropOnlyDriver<'a, SM> {
     /// - Plan execution fails and state machine doesn't handle the error
     /// - State machine advancement fails
     pub fn execute(mut self) -> DeltaResult<SM::Result> {
-        loop {
-            // Get the current plan
-            let plan = self.sm.get_plan()?;
-
-            // Validate: must be a Drop sink or no sink (incomplete plan)
-            // Plans ending with Results sink are not allowed
-            if plan.is_results_sink() {
-                return Err(Error::generic(
-                    "DropOnlyDriver encountered Results sink - use ResultsDriver instead",
-                ));
-            }
-
-            // Execute the plan (Drop sink consumes data internally)
-            let executor = DeclarativePlanExecutor::new(self.engine);
-            let execution_result = executor.execute(plan.clone());
-
-            // Handle execution results - either success or error
-            let advance_result = match execution_result {
-                Ok(results) => {
-                    // Consume all results to trigger side effects
-                    for result in results {
-                        if let Err(e) = result {
-                            // Batch-level error - pass to state machine
-                            return match self.sm.advance(Err(e))? {
-                                AdvanceResult::Continue => continue,
-                                AdvanceResult::Done(result) => Ok(result),
-                            };
-                        }
-                    }
-                    // All batches consumed successfully
-                    self.sm.advance(Ok(plan))?
-                }
-                Err(e) => {
-                    // Execution failed - let state machine decide how to handle
-                    // (e.g., FileNotFound during CheckpointHint is OK)
-                    self.sm.advance(Err(e))?
-                }
-            };
-
-            match advance_result {
-                AdvanceResult::Continue => continue,
-                AdvanceResult::Done(result) => return Ok(result),
-            }
+        // Iterate through the ResultsDriver
+        // If we get ANY batch, that means a Results sink was used
+        for result in &mut self.inner {
+            // Propagate any batch errors
+            result?;
+            // If we reach here, we got data from a Results sink - this is an error
+            return Err(Error::generic(
+                "DropOnlyDriver encountered Results sink - use ResultsDriver instead",
+            ));
         }
+        
+        // Iterator exhausted (all Drop sinks executed silently)
+        // Get the final result
+        self.inner.into_result().ok_or_else(|| {
+            Error::generic("State machine did not produce a result")
+        })
     }
 }
 
