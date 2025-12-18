@@ -1,0 +1,48 @@
+[package]
+name = "delta_kernel_datafusion"
+description = "DataFusion integration for Delta Kernel - provides async plan execution via DataFusion"
+documentation = "https://docs.rs/delta_kernel_datafusion"
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+delta_kernel = { path = "../kernel", version = "0.18.1", features = ["arrow", "default-engine-rustls"] }
+
+# DataFusion for native plan execution - using version compatible with arrow-57
+datafusion = { version = "51", default-features = false }
+datafusion-common = "51"
+datafusion-expr = "51"
+datafusion-physical-plan = "51"
+datafusion-physical-expr = "51"
+
+# Arrow deps - must match kernel's arrow-57
+arrow = { package = "arrow", version = "57" }
+arrow-schema = { package = "arrow-schema", version = "57" }
+arrow-array = { package = "arrow-array", version = "57" }
+parquet = { version = "57", features = ["async", "object_store"] }
+
+# Object store for native file access
+object_store = "0.12.3"
+
+# Async runtime
+futures = "0.3"
+async-stream = "0.3"
+async-trait = "0.1"
+tokio = { version = "1.47", features = ["rt-multi-thread"] }
+
+# Utilities
+url = "2"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+delta_kernel = { path = "../kernel", features = ["arrow", "default-engine-rustls", "internal-api"] }
+test_utils = { path = "../test-utils" }
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread"] }
+test-log = { version = "0.2", default-features = false, features = ["trace"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
+

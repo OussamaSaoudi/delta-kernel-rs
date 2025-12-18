@@ -5,6 +5,7 @@ members = [
     "ffi",
     "kernel",
     "kernel/examples/*",
+    "kernel-datafusion",
     "test-utils",
     "feature-tests",
     "mem-test",
