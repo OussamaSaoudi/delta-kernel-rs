@@ -3,9 +3,11 @@
 use std::sync::Arc;
 use datafusion::execution::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_physical_plan::{filter::FilterExec, projection::ProjectionExec};
 
 use delta_kernel::plans::DeclarativePlanNode;
 use crate::error::{DfResult, DfError};
+use crate::expr::lower_expression;
 
 /// Compile a declarative plan node into a DataFusion physical plan.
 pub fn compile_plan(
@@ -104,8 +106,25 @@ fn compile_filter_by_expr(
     node: &delta_kernel::plans::FilterByExpressionNode,
     session_state: &SessionState,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
-    let _child_plan = compile_plan(child, session_state)?;
-    Err(DfError::Unsupported(format!("FilterByExpression compilation not yet implemented: {:?}", node.predicate)))
+    let child_plan = compile_plan(child, session_state)?;
+    
+    // FilterByExpressionNode stores the predicate as Arc<Expression>
+    // Lower it to a DataFusion Expr
+    let predicate_expr = lower_expression(&node.predicate)?;
+    
+    // Convert logical Expr to physical PhysicalExpr
+    // This requires the schema from the child plan
+    let schema = child_plan.schema();
+    let df_schema = datafusion_common::DFSchema::try_from_qualified_schema("", &schema)?;
+    let physical_expr = datafusion_physical_expr::create_physical_expr(
+        &predicate_expr,
+        &df_schema,
+        session_state.execution_props(),
+    )?;
+    
+    // Create a FilterExec with the physical predicate
+    let filter_exec = FilterExec::try_new(physical_expr, child_plan)?;
+    Ok(Arc::new(filter_exec))
 }
 
 fn compile_select(
@@ -113,8 +132,27 @@ fn compile_select(
     node: &delta_kernel::plans::SelectNode,
     session_state: &SessionState,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
-    let _child_plan = compile_plan(child, session_state)?;
-    Err(DfError::Unsupported(format!("Select compilation not yet implemented ({} columns)", node.columns.len())))
+    let child_plan = compile_plan(child, session_state)?;
+    let schema = child_plan.schema();
+    let df_schema = datafusion_common::DFSchema::try_from_qualified_schema("", &schema)?;
+    
+    // Lower each expression and convert to physical
+    let proj_exprs: Result<Vec<_>, DfError> = node.columns.iter()
+        .enumerate()
+        .map(|(i, expr)| {
+            let df_expr = lower_expression(expr)?;
+            let physical_expr = datafusion_physical_expr::create_physical_expr(
+                &df_expr,
+                &df_schema,
+                session_state.execution_props(),
+            )?;
+            // ProjectionExec needs (PhysicalExpr, name) pairs
+            Ok::<_, DfError>((physical_expr, format!("col_{}", i)))
+        })
+        .collect();
+    
+    let projection_exec = ProjectionExec::try_new(proj_exprs?, child_plan)?;
+    Ok(Arc::new(projection_exec))
 }
 
 fn compile_parse_json(
