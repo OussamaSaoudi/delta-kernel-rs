@@ -33,6 +33,7 @@
 
 pub mod executor;
 pub mod compile;
+pub mod scan;
 pub mod expr;
 pub mod exec;
 pub mod driver;

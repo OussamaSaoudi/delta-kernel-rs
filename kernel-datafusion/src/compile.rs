@@ -8,6 +8,7 @@ use datafusion_physical_plan::{filter::FilterExec, projection::ProjectionExec};
 use delta_kernel::plans::DeclarativePlanNode;
 use crate::error::{DfResult, DfError};
 use crate::expr::lower_expression;
+use crate::scan::compile_scan as compile_scan_impl;
 
 /// Compile a declarative plan node into a DataFusion physical plan.
 pub fn compile_plan(
@@ -64,9 +65,9 @@ fn compile_sink(
 
 fn compile_scan(
     node: &delta_kernel::plans::ScanNode,
-    _session_state: &SessionState,
+    session_state: &SessionState,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
-    Err(DfError::Unsupported(format!("Scan compilation not yet implemented: {:?}", node.file_type)))
+    compile_scan_impl(node, session_state)
 }
 
 fn compile_file_listing(

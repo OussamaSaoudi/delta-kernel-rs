@@ -38,6 +38,7 @@ tokio = { version = "1.47", features = ["rt-multi-thread"] }
 url = "2"
 thiserror = "2"
 tracing = "0.1"
+chrono = "0.4"
 
 [dev-dependencies]
 delta_kernel = { path = "../kernel", features = ["arrow", "default-engine-rustls", "internal-api"] }
