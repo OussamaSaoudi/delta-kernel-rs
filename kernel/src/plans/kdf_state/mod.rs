@@ -8,6 +8,7 @@
 //! - **Consumer KDFs**: (batch) -> bool - batch consumption (Continue/Break)
 //! - **Schema Reader KDFs**: () -> schema - schema extraction
 
+pub mod collector;
 pub mod traits;
 pub mod macros;
 pub mod serialization;
@@ -16,6 +17,7 @@ pub mod consumer;
 pub mod schema;
 
 // Re-export public API
+pub use collector::*;
 pub use filter::*;
 pub use consumer::*;
 pub use schema::*;

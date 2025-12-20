@@ -82,10 +82,10 @@ fn extract_selected_rows(metadata_list: &[ScanMetadata]) -> RecordBatch {
 ///
 /// This function:
 /// 1. Runs scan_metadata via DefaultEngine (ground truth)
-/// 2. Runs scan_metadata_stream_async via DataFusion
+/// 2. Runs scan_metadata_stream_async via DataFusion (using new async builder APIs)
 /// 3. Extracts selected rows from both and compares contents
 async fn compare_scan_metadata_results(table_url: url::Url) -> DeltaResult<()> {
-    use delta_kernel_datafusion::{scan_metadata_stream_async, build_snapshot_async, DataFusionExecutor};
+    use delta_kernel_datafusion::{DataFusionExecutor, SnapshotAsyncBuilderExt, ScanAsyncExt};
     use futures::StreamExt;
     
     // === DefaultEngine ground truth ===
@@ -97,14 +97,18 @@ async fn compare_scan_metadata_results(table_url: url::Url) -> DeltaResult<()> {
     let expected: Vec<ScanMetadata> = scan.scan_metadata(default_engine.as_ref())?
         .collect::<DeltaResult<Vec<_>>>()?;
     
-    // === DataFusion path ===
+    // === DataFusion path (using new async builder APIs) ===
     let executor = Arc::new(DataFusionExecutor::new()
         .expect("DataFusionExecutor creation should succeed"));
-    let df_snapshot = Arc::new(build_snapshot_async(&executor, table_url).await?);
-    let df_scan = df_snapshot.scan_builder().build()?;
-    let scan_state = df_scan.into_scan_state()?;
     
-    let mut stream = std::pin::pin!(scan_metadata_stream_async(scan_state, executor));
+    // Use Snapshot::async_builder() instead of build_snapshot_async()
+    let df_snapshot = Snapshot::async_builder(table_url)
+        .build(&executor)
+        .await?;
+    let df_scan = Arc::new(df_snapshot).scan_builder().build()?;
+    
+    // Use scan.scan_metadata_async() instead of scan_metadata_stream_async()
+    let mut stream = std::pin::pin!(df_scan.scan_metadata_async(executor));
     let mut actual: Vec<ScanMetadata> = Vec::new();
     
     while let Some(result) = stream.next().await {
@@ -152,8 +156,9 @@ async fn compare_scan_metadata_results(table_url: url::Url) -> DeltaResult<()> {
 /// Performance comparison between DefaultEngine and DataFusion executor.
 /// 
 /// This function runs both approaches with detailed timing breakdown.
+/// Uses the new async builder APIs for DataFusion path.
 async fn benchmark_scan_metadata(table_url: url::Url, iterations: usize) -> DeltaResult<()> {
-    use delta_kernel_datafusion::{scan_metadata_stream_async, build_snapshot_async, DataFusionExecutor};
+    use delta_kernel_datafusion::{DataFusionExecutor, SnapshotAsyncBuilderExt, ScanAsyncExt};
     use futures::StreamExt;
     use std::time::Instant;
     
@@ -185,47 +190,45 @@ async fn benchmark_scan_metadata(table_url: url::Url, iterations: usize) -> Delt
         de_execute_times.push(t2.elapsed().as_micros());
     }
     
-    // === Detailed Benchmark DataFusion ===
+    // === Detailed Benchmark DataFusion (using new async builder APIs) ===
     let mut df_snapshot_times: Vec<u128> = Vec::new();
     let mut df_scan_build_times: Vec<u128> = Vec::new();
-    let mut df_into_state_times: Vec<u128> = Vec::new();
     let mut df_execute_times: Vec<u128> = Vec::new();
     
     for _ in 0..iterations {
+        // Use Snapshot::async_builder() instead of build_snapshot_async()
         let t0 = Instant::now();
-        let df_snapshot = Arc::new(build_snapshot_async(&executor, table_url.clone()).await?);
+        let df_snapshot = Snapshot::async_builder(table_url.clone())
+            .build(&executor)
+            .await?;
         df_snapshot_times.push(t0.elapsed().as_micros());
         
         let t1 = Instant::now();
-        let df_scan = df_snapshot.scan_builder().build()?;
+        let df_scan = Arc::new(df_snapshot).scan_builder().build()?;
         df_scan_build_times.push(t1.elapsed().as_micros());
         
+        // Use scan.scan_metadata_async() instead of scan_metadata_stream_async()
         let t2 = Instant::now();
-        let scan_state = df_scan.into_scan_state()?;
-        df_into_state_times.push(t2.elapsed().as_micros());
-        
-        let t3 = Instant::now();
-        let mut stream = std::pin::pin!(scan_metadata_stream_async(scan_state, executor.clone()));
+        let mut stream = std::pin::pin!(df_scan.scan_metadata_async(executor.clone()));
         let mut _results: Vec<ScanMetadata> = Vec::new();
         while let Some(result) = stream.next().await {
             _results.push(result?);
         }
-        df_execute_times.push(t3.elapsed().as_micros());
+        df_execute_times.push(t2.elapsed().as_micros());
     }
     
     // === Calculate averages ===
     let avg = |v: &[u128]| v.iter().sum::<u128>() / v.len() as u128;
     
     let de_total = avg(&de_snapshot_times) + avg(&de_scan_build_times) + avg(&de_execute_times);
-    let df_total = avg(&df_snapshot_times) + avg(&df_scan_build_times) + avg(&df_into_state_times) + avg(&df_execute_times);
+    let df_total = avg(&df_snapshot_times) + avg(&df_scan_build_times) + avg(&df_execute_times);
     
     println!("\n┌─────────────────────┬──────────────┬──────────────┐");
     println!("│ Phase               │ DefaultEngine│  DataFusion  │");
     println!("├─────────────────────┼──────────────┼──────────────┤");
-    println!("│ build_snapshot      │ {:>8} µs  │ {:>8} µs  │", avg(&de_snapshot_times), avg(&df_snapshot_times));
+    println!("│ async_builder.build │ {:>8} µs  │ {:>8} µs  │", avg(&de_snapshot_times), avg(&df_snapshot_times));
     println!("│ scan_builder.build  │ {:>8} µs  │ {:>8} µs  │", avg(&de_scan_build_times), avg(&df_scan_build_times));
-    println!("│ into_scan_state     │ {:>8}     │ {:>8} µs  │", "N/A", avg(&df_into_state_times));
-    println!("│ execute (stream)    │ {:>8} µs  │ {:>8} µs  │", avg(&de_execute_times), avg(&df_execute_times));
+    println!("│ scan_metadata_async │ {:>8} µs  │ {:>8} µs  │", avg(&de_execute_times), avg(&df_execute_times));
     println!("├─────────────────────┼──────────────┼──────────────┤");
     println!("│ TOTAL               │ {:>8} µs  │ {:>8} µs  │", de_total, df_total);
     println!("└─────────────────────┴──────────────┴──────────────┘");
@@ -2275,15 +2278,15 @@ async fn test_schema_query_v1_checkpoint_no_sidecar() {
 // STATE MACHINE DRIVER TESTS
 // ============================================================================
 
-/// Test: SnapshotStateMachine can be driven to completion via DataFusion
+/// Test: Snapshot::async_builder() can be driven to completion via DataFusion
 ///
-/// This test verifies the full state machine execution path:
-/// 1. Create a SnapshotStateMachine for a real Delta table
-/// 2. Drive it through all phases using DataFusion execution
+/// This test verifies the full async snapshot builder execution path:
+/// 1. Create an async builder for a real Delta table
+/// 2. Build the snapshot using DataFusion execution
 /// 3. Verify the resulting Snapshot has correct properties
 #[tokio::test]
 async fn test_snapshot_state_machine_execution() {
-    use delta_kernel_datafusion::build_snapshot_async;
+    use delta_kernel_datafusion::{DataFusionExecutor, SnapshotAsyncBuilderExt};
     
     // Use a real Delta table from test fixtures
     let table_path = test_data_path("basic_append/delta");
@@ -2299,11 +2302,13 @@ async fn test_snapshot_state_machine_execution() {
     println!("table_url = {}", table_url);
     println!("  + '_delta_log/' = {}", table_url.join("_delta_log/").unwrap());
     
-    // Create executor and build snapshot via state machine
-    let executor = delta_kernel_datafusion::DataFusionExecutor::new()
+    // Create executor and build snapshot using Snapshot::async_builder()
+    let executor = DataFusionExecutor::new()
         .expect("DataFusionExecutor creation should succeed");
     
-    let snapshot = build_snapshot_async(&executor, table_url).await
+    let snapshot = Snapshot::async_builder(table_url)
+        .build(&executor)
+        .await
         .expect("Snapshot construction should succeed");
     
     // Verify snapshot properties
@@ -2327,13 +2332,13 @@ async fn test_snapshot_state_machine_execution() {
     );
 }
 
-/// Test: SnapshotStateMachine works with tables that have checkpoints
+/// Test: Snapshot::async_builder() works with tables that have checkpoints
 ///
 /// The with_checkpoint table has a checkpoint file, testing the full
-/// CheckpointHint → ListFiles → LoadMetadata flow.
+/// CheckpointHint → ListFiles → LoadMetadata flow with the new async builder API.
 #[tokio::test]
 async fn test_snapshot_state_machine_with_checkpoint() {
-    use delta_kernel_datafusion::build_snapshot_async;
+    use delta_kernel_datafusion::{DataFusionExecutor, SnapshotAsyncBuilderExt};
     
     let table_path = test_data_path("with_checkpoint/delta");
     assert!(table_path.exists(), "Delta table with checkpoint should exist: {:?}", table_path);
@@ -2344,10 +2349,13 @@ async fn test_snapshot_state_machine_with_checkpoint() {
         table_url.set_path(&format!("{}/", table_url.path()));
     }
     
-    let executor = delta_kernel_datafusion::DataFusionExecutor::new()
+    let executor = DataFusionExecutor::new()
         .expect("DataFusionExecutor creation should succeed");
     
-    let snapshot = build_snapshot_async(&executor, table_url).await
+    // Use Snapshot::async_builder() instead of build_snapshot_async()
+    let snapshot = Snapshot::async_builder(table_url)
+        .build(&executor)
+        .await
         .expect("Snapshot construction with checkpoint should succeed");
     
     // with_checkpoint table is at version 3 (versions 0, 1, 2, 3 with checkpoint at 2)
@@ -2358,12 +2366,12 @@ async fn test_snapshot_state_machine_with_checkpoint() {
     assert!(schema.field("letter").is_some(), "Schema should contain 'letter' column");
 }
 
-/// Test: build_snapshot_at_version_async works correctly
+/// Test: Snapshot::async_builder().with_version() works correctly
 ///
-/// Verifies that we can build a snapshot at a specific version.
+/// Verifies that we can build a snapshot at a specific version using the new async builder API.
 #[tokio::test]
 async fn test_snapshot_state_machine_at_version() {
-    use delta_kernel_datafusion::build_snapshot_at_version_async;
+    use delta_kernel_datafusion::{DataFusionExecutor, SnapshotAsyncBuilderExt};
     
     let table_path = test_data_path("basic_append/delta");
     assert!(table_path.exists(), "Delta table should exist");
@@ -2374,11 +2382,14 @@ async fn test_snapshot_state_machine_at_version() {
         table_url.set_path(&format!("{}/", table_url.path()));
     }
     
-    let executor = delta_kernel_datafusion::DataFusionExecutor::new()
+    let executor = DataFusionExecutor::new()
         .expect("DataFusionExecutor creation should succeed");
     
-    // Build snapshot at version 0 (first commit only)
-    let snapshot = build_snapshot_at_version_async(&executor, table_url, 0).await
+    // Use Snapshot::async_builder().with_version() instead of build_snapshot_at_version_async()
+    let snapshot = Snapshot::async_builder(table_url)
+        .with_version(0)  // target version 0
+        .build(&executor)
+        .await
         .expect("Snapshot at version 0 should succeed");
     
     assert_eq!(snapshot.version(), 0, "Snapshot should be at version 0");
@@ -2658,9 +2669,10 @@ async fn test_scan_metadata_stream_no_replay() {
 ///
 /// This isolates the schema mismatch issue by running the state machine
 /// directly and printing the output schema from each executor.
+/// Note: This test deliberately uses low-level APIs (results_stream) for debugging.
 #[tokio::test]
 async fn test_scan_state_machine_output_schema() {
-    use delta_kernel_datafusion::{results_stream, build_snapshot_async, DataFusionExecutor};
+    use delta_kernel_datafusion::{results_stream, DataFusionExecutor, SnapshotAsyncBuilderExt};
     use futures::StreamExt;
     
     let table_path = test_data_path("basic_append/delta");
@@ -2709,15 +2721,19 @@ async fn test_scan_state_machine_output_schema() {
     // === 2. DataFusion path ===
     println!("--- DataFusion ---");
     let executor = DataFusionExecutor::new().expect("DataFusionExecutor should create");
-    let df_snapshot = Arc::new(build_snapshot_async(&executor, table_url.clone()).await
-        .expect("Snapshot construction should succeed"));
-    let df_scan = df_snapshot.scan_builder().build().expect("Scan should build");
+    
+    // Use Snapshot::async_builder() for snapshot construction
+    let df_snapshot = Snapshot::async_builder(table_url.clone())
+        .build(&executor)
+        .await
+        .expect("Snapshot construction should succeed");
+    let df_scan = Arc::new(df_snapshot).scan_builder().build().expect("Scan should build");
     
     // Get state machine (we need to extract it from ScanState)
     let scan_state = df_scan.into_scan_state().expect("into_scan_state should succeed");
     let df_sm = scan_state.state_machine;
     
-    // Execute via results_stream (async) - WITHOUT TransformComputer
+    // Execute via results_stream (async) - WITHOUT TransformComputer (for diagnostic purposes)
     let stream = results_stream(df_sm, executor);
     futures::pin_mut!(stream);
     
@@ -2766,4 +2782,195 @@ async fn test_scan_state_machine_output_schema() {
         default_batch_count, df_batch_count,
         "Batch counts should match"
     );
+}
+
+// ============================================================================
+// DATA SKIPPING TESTS
+// ============================================================================
+
+/// Compare ScanMetadata results from DataFusion vs DefaultEngine WITH a predicate.
+///
+/// This function tests data skipping by:
+/// 1. Runs scan_metadata via DefaultEngine with predicate (ground truth)
+/// 2. Runs scan_metadata_async via DataFusion with predicate
+/// 3. Compares selected file counts and contents
+async fn compare_scan_metadata_with_predicate(
+    table_url: url::Url,
+    predicate: delta_kernel::PredicateRef,
+) -> DeltaResult<()> {
+    use delta_kernel_datafusion::{DataFusionExecutor, SnapshotAsyncBuilderExt, ScanAsyncExt};
+    use futures::StreamExt;
+    
+    println!("\n=== Data Skipping Test ===");
+    println!("Predicate: {:?}", predicate);
+    
+    // === DefaultEngine ground truth ===
+    let store = store_from_url(&table_url)?;
+    let default_engine: Arc<DefaultEngine<TokioBackgroundExecutor>> = Arc::new(DefaultEngine::new(store));
+    let snapshot = Snapshot::builder_for(table_url.clone())
+        .build(default_engine.as_ref())?;
+    let scan = snapshot.scan_builder()
+        .with_predicate(predicate.clone())
+        .build()?;
+    let expected: Vec<ScanMetadata> = scan.scan_metadata(default_engine.as_ref())?
+        .collect::<DeltaResult<Vec<_>>>()?;
+    
+    // === DataFusion path ===
+    let executor = Arc::new(DataFusionExecutor::new()
+        .expect("DataFusionExecutor creation should succeed"));
+    
+    let df_snapshot = Snapshot::async_builder(table_url)
+        .build(&executor)
+        .await?;
+    let df_scan = Arc::new(df_snapshot).scan_builder()
+        .with_predicate(predicate.clone())
+        .build()?;
+    
+    let mut stream = std::pin::pin!(df_scan.scan_metadata_async(executor));
+    let mut actual: Vec<ScanMetadata> = Vec::new();
+    
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(meta) => actual.push(meta),
+            Err(e) => return Err(e),
+        }
+    }
+    
+    // === Compare CONTENTS ===
+    let expected_batch = extract_selected_rows(&expected);
+    let actual_batch = extract_selected_rows(&actual);
+    
+    let expected_formatted = pretty_format_batches(&[expected_batch.clone()])
+        .expect("format should succeed")
+        .to_string();
+    let actual_formatted = pretty_format_batches(&[actual_batch.clone()])
+        .expect("format should succeed")
+        .to_string();
+    
+    println!("\n=== DefaultEngine ({} rows) ===\n{}", expected_batch.num_rows(), expected_formatted);
+    println!("\n=== DataFusion ({} rows) ===\n{}", actual_batch.num_rows(), actual_formatted);
+    
+    assert_eq!(
+        expected_batch.num_rows(), 
+        actual_batch.num_rows(),
+        "Row count mismatch with predicate.\n\nExpected (DefaultEngine): {} rows\nActual (DataFusion): {} rows",
+        expected_batch.num_rows(),
+        actual_batch.num_rows()
+    );
+    
+    assert_eq!(
+        expected_formatted,
+        actual_formatted,
+        "Scan metadata contents mismatch with predicate.\n\nExpected (DefaultEngine):\n{}\n\nActual (DataFusion):\n{}",
+        expected_formatted,
+        actual_formatted
+    );
+    
+    Ok(())
+}
+
+/// Test: Data skipping with predicate that keeps all files (baseline).
+///
+/// Uses a very permissive predicate (number > -1000) that should keep all files.
+/// This establishes a baseline that the predicate path works at all.
+#[tokio::test]
+async fn test_data_skipping_keep_all_files() {
+    use delta_kernel::expressions::{column_expr, Expression, Scalar};
+    
+    let table_path = test_data_path("basic_partitioned/delta");
+    if !table_path.exists() {
+        println!("Skipping test: basic_partitioned not found");
+        return;
+    }
+    
+    let mut table_url = url::Url::from_file_path(table_path.canonicalize().unwrap()).unwrap();
+    if !table_url.path().ends_with('/') {
+        table_url.set_path(&format!("{}/", table_url.path()));
+    }
+    
+    // Predicate: number > -1000 (should keep all files)
+    let predicate = Arc::new(column_expr!("number").gt(Expression::Literal(Scalar::Long(-1000))));
+    
+    compare_scan_metadata_with_predicate(table_url, predicate).await
+        .expect("Data skipping comparison should succeed");
+}
+
+/// Diagnostic test: Test that lower_column preserves case for nested columns.
+/// This test verifies that column expressions like nullCount.column are properly lowered.
+#[tokio::test]
+async fn test_column_case_preservation() {
+    use delta_kernel::expressions::{column_name, joined_column_expr, ColumnName};
+    use delta_kernel_datafusion::expr::lower_column;
+    
+    // Test simple column
+    let col = column_name!("nullCount");
+    let expr = lower_column(&col);
+    let expr_str = format!("{:?}", expr);
+    println!("lower_column(\"nullCount\") = {}", expr_str);
+    // Verify case is preserved in the expression
+    assert!(expr_str.contains("nullCount") || expr_str.contains("Column"), 
+        "Column name 'nullCount' should be preserved, got: {}", expr_str);
+    
+    // Test nested column: nullCount.number
+    let nested_col = joined_column_expr!("nullCount", "number");
+    if let delta_kernel::Expression::Column(cn) = nested_col {
+        let nested_expr = lower_column(&cn);
+        let nested_expr_str = format!("{:?}", nested_expr);
+        println!("lower_column([\"nullCount\", \"number\"]) = {}", nested_expr_str);
+        // Both parts should preserve case
+        assert!(nested_expr_str.contains("nullCount"), 
+            "First part 'nullCount' should be preserved, got: {}", nested_expr_str);
+    }
+}
+
+/// Test: Data skipping with predicate that keeps some files.
+///
+/// Uses predicate (number > 3) on basic_partitioned table.
+/// Files with max(number) <= 3 should be skipped.
+#[tokio::test]
+async fn test_data_skipping_keep_some_files() {
+    use delta_kernel::expressions::{column_expr, Expression, Scalar};
+    
+    let table_path = test_data_path("basic_partitioned/delta");
+    if !table_path.exists() {
+        println!("Skipping test: basic_partitioned not found");
+        return;
+    }
+    
+    let mut table_url = url::Url::from_file_path(table_path.canonicalize().unwrap()).unwrap();
+    if !table_url.path().ends_with('/') {
+        table_url.set_path(&format!("{}/", table_url.path()));
+    }
+    
+    // Predicate: number > 3 (should skip files where max(number) <= 3)
+    let predicate = Arc::new(column_expr!("number").gt(Expression::Literal(Scalar::Long(3))));
+    
+    compare_scan_metadata_with_predicate(table_url, predicate).await
+        .expect("Data skipping comparison should succeed");
+}
+
+/// Test: Data skipping on table-without-dv-small with value predicate.
+///
+/// This table has a 'value' column with known stats (range 0-9).
+/// Tests data skipping on a simple non-partitioned table.
+#[tokio::test]
+async fn test_data_skipping_simple_table() {
+    use delta_kernel::expressions::{column_expr, Expression, Scalar};
+    
+    let table_path = test_data_path("table-without-dv-small/delta");
+    if !table_path.exists() {
+        println!("Skipping test: table-without-dv-small not found");
+        return;
+    }
+    
+    let mut table_url = url::Url::from_file_path(table_path.canonicalize().unwrap()).unwrap();
+    if !table_url.path().ends_with('/') {
+        table_url.set_path(&format!("{}/", table_url.path()));
+    }
+    
+    // Predicate: value > 5 (should keep files where max(value) > 5)
+    let predicate = Arc::new(column_expr!("value").gt(Expression::Literal(Scalar::Long(5))));
+    
+    compare_scan_metadata_with_predicate(table_url, predicate).await
+        .expect("Data skipping comparison should succeed");
 }

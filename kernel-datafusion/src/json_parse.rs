@@ -4,6 +4,7 @@
 //! typed values from JSON strings using `datafusion-functions-json`.
 
 use datafusion_expr::{Expr, expr::ScalarFunction};
+use datafusion_common::Column;
 use datafusion_expr::lit;
 
 use delta_kernel::schema::{DataType, PrimitiveType, StructField, StructType};
@@ -155,14 +156,15 @@ pub fn generate_schema_extractions(
 /// Build an expression to access a potentially nested column.
 ///
 /// Handles dot-separated paths like "add.stats" by chaining get_field calls.
+/// Note: Uses Expr::Column directly to preserve case (col() lowercases names).
 pub fn build_nested_column_expr(column_path: &str) -> Expr {
     let parts: Vec<&str> = column_path.split('.').collect();
     
     if parts.is_empty() {
-        return datafusion_expr::col("");
+        return Expr::Column(Column::new(None::<String>, "".to_string()));
     }
     
-    let mut expr = datafusion_expr::col(parts[0]);
+    let mut expr = Expr::Column(Column::new(None::<String>, parts[0].to_string()));
     for field_name in parts.iter().skip(1) {
         expr = datafusion_functions::core::expr_fn::get_field(expr, (*field_name).to_string());
     }
@@ -184,7 +186,7 @@ mod tests {
 
     #[test]
     fn test_generate_primitive_extract() {
-        let json_col = datafusion_expr::col("json_data");
+        let json_col = Expr::Column(Column::new(None::<String>, "json_data".to_string()));
         let field = StructField::nullable("numRecords", DataType::LONG);
         
         let expr = generate_json_extract_expr(&json_col, &field, &[]).unwrap();
@@ -195,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_generate_struct_extract() {
-        let json_col = datafusion_expr::col("json_data");
+        let json_col = Expr::Column(Column::new(None::<String>, "json_data".to_string()));
         
         // Create a nested struct: minValues { id: Long, name: String }
         let inner_struct = StructType::new_unchecked(vec![

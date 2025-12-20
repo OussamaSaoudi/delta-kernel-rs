@@ -266,19 +266,21 @@ fn flatten_transform_to_exprs(
     output_schema: &delta_kernel::schema::StructType,
     start_field_idx: usize,
 ) -> DfResult<Vec<(datafusion_expr::Expr, String)>> {
-    use datafusion_expr::col;
+    use datafusion_expr::Expr;
+    use datafusion_common::Column as DfColumn;
     
     let mut results = Vec::new();
     let mut output_idx = start_field_idx;
     
     // Helper to get source column expression (handles input_path for nested structs)
+    // Note: We use Expr::Column directly to preserve case (col() lowercases names)
     let get_source_col = |field_name: &str| -> datafusion_expr::Expr {
         match &transform.input_path {
             Some(path) => {
                 let base = lower_column(path);
                 datafusion_functions::core::expr_fn::get_field(base, field_name.to_string())
             }
-            None => col(field_name),
+            None => Expr::Column(DfColumn::new(None::<String>, field_name.to_string())),
         }
     };
     
@@ -354,7 +356,8 @@ fn compile_parse_json(
     session_state: &SessionState,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
     use crate::json_parse::{build_nested_column_expr, generate_schema_extractions};
-    use datafusion_expr::{col, lit};
+    use datafusion_expr::{Expr, lit};
+    use datafusion_common::Column as DfColumn;
     
     let child_plan = compile_plan(child, session_state)?;
     let child_schema = child_plan.schema();
@@ -373,8 +376,9 @@ fn compile_parse_json(
         // Mode A: Merge at root level - keep all original columns + add extracted columns
         
         // First, add all original columns from the child schema
+        // Note: Use Expr::Column directly to preserve case (col() lowercases names)
         for field in child_schema.fields() {
-            let col_expr = col(field.name());
+            let col_expr = Expr::Column(DfColumn::new(None::<String>, field.name().to_string()));
             let physical_expr = datafusion_physical_expr::create_physical_expr(
                 &col_expr,
                 &df_schema,
@@ -396,8 +400,9 @@ fn compile_parse_json(
         // Mode B: Add as a struct column with the given name
         
         // First, add all original columns from the child schema
+        // Note: Use Expr::Column directly to preserve case (col() lowercases names)
         for field in child_schema.fields() {
-            let col_expr = col(field.name());
+            let col_expr = Expr::Column(DfColumn::new(None::<String>, field.name().to_string()));
             let physical_expr = datafusion_physical_expr::create_physical_expr(
                 &col_expr,
                 &df_schema,

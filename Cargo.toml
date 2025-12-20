@@ -29,3 +29,11 @@ repository = "https://github.com/delta-io/delta-kernel-rs"
 readme = "README.md"
 rust-version = "1.85"
 version = "0.18.1"
+
+# Enable debug symbols in benchmark builds for profiling with samply
+[profile.bench]
+debug = true
+
+# Also enable for release profile (used as base for bench)
+[profile.release]
+debug = true

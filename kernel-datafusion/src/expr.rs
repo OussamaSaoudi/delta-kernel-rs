@@ -1,7 +1,7 @@
 //! Expression lowering: Kernel Expression/Predicate -> DataFusion Expr.
 
-use datafusion_expr::{Expr, Operator, lit, col};
-use datafusion_common::ScalarValue;
+use datafusion_expr::{Expr, Operator, lit};
+use datafusion_common::{ScalarValue, Column};
 
 use delta_kernel::expressions::{
     Expression, Predicate, Scalar,
@@ -274,7 +274,7 @@ fn lower_transform_expression(
                     datafusion_functions::core::expr_fn::get_field(base.clone(), field_name.to_string())
                 }
                 None => {
-                    col(field_name)
+                    Expr::Column(Column::new(None::<String>, field_name.to_string()))
                 }
             };
             struct_args.push(source_expr);
@@ -317,7 +317,7 @@ fn lower_transform_expression(
                     datafusion_functions::core::expr_fn::get_field(base.clone(), field_name.to_string())
                 }
                 None => {
-                    col(field_name)
+                    Expr::Column(Column::new(None::<String>, field_name.to_string()))
                 }
             };
             struct_args.push(source_expr);
@@ -346,7 +346,7 @@ fn lower_identity_transform(
                 datafusion_functions::core::expr_fn::get_field(base.clone(), field_name.to_string())
             }
             None => {
-                col(field_name)
+                Expr::Column(Column::new(None::<String>, field_name.to_string()))
             }
         };
         struct_args.push(source_expr);
@@ -399,20 +399,24 @@ fn lower_scalar(scalar: &Scalar) -> DfResult<Expr> {
 
 /// Lower a kernel ColumnName to a DataFusion column reference expression.
 /// Handles nested column paths like ["add", "path"] -> get_field(col("add"), "path").
+///
+/// Note: We use `Expr::Column(Column::new(...))` instead of `col()` because `col()` 
+/// normalizes column names to lowercase, but Delta table stats use camelCase field names
+/// (e.g., `nullCount`, `minValues`, `maxValues`).
 pub fn lower_column(col_name: &ColumnName) -> Expr {
     // ColumnName can be nested (e.g. ["add", "path"] for accessing add.path)
     let path = col_name.as_ref();
     if path.is_empty() {
         // Shouldn't happen, but handle gracefully
-        col("")
+        Expr::Column(Column::new(None::<String>, ""))
     } else if path.len() == 1 {
-        // Simple column reference
-        col(&path[0])
+        // Simple column reference - preserve case exactly
+        Expr::Column(Column::new(None::<String>, path[0].clone()))
     } else {
         // Nested column access: struct field access using get_field function
         // Example: ["add", "size"] -> get_field(col("add"), "size")
         // Start with the root column, then chain get_field for each nested field
-        let mut expr = col(&path[0]);
+        let mut expr = Expr::Column(Column::new(None::<String>, path[0].clone()));
         for field_name in path.iter().skip(1) {
             expr = datafusion_functions::core::expr_fn::get_field(expr, field_name.clone());
         }

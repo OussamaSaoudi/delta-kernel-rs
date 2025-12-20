@@ -15,7 +15,41 @@
 //! - Custom physical operators for KDFs with per-KDF concurrency policies
 //! - Custom operators for Delta-specific nodes (FileListing, SchemaQuery)
 //!
-//! # Example
+//! # High-Level API Example
+//!
+//! The recommended API mirrors delta-kernel-rs patterns with async builder methods:
+//!
+//! ```ignore
+//! use delta_kernel_datafusion::{DataFusionExecutor, SnapshotAsyncBuilderExt, ScanAsyncExt};
+//! use delta_kernel::Snapshot;
+//! use futures::StreamExt;
+//! use std::sync::Arc;
+//!
+//! let executor = Arc::new(DataFusionExecutor::new()?);
+//! let table_url = url::Url::parse("file:///path/to/delta/table/")?;
+//!
+//! // Build snapshot using async builder (mirrors Snapshot::builder_for())
+//! let snapshot = Snapshot::async_builder(table_url)
+//!     .with_version(5)  // optional: target specific version
+//!     .build(&executor)
+//!     .await?;
+//!
+//! // Build and execute scan
+//! let scan = Arc::new(snapshot).scan_builder()
+//!     .with_predicate(predicate)  // optional
+//!     .build()?;
+//!
+//! // Stream scan metadata asynchronously
+//! let mut stream = std::pin::pin!(scan.scan_metadata_async(executor));
+//! while let Some(result) = stream.next().await {
+//!     let metadata = result?;
+//!     // Process metadata.scan_files and metadata.scan_file_transforms
+//! }
+//! ```
+//!
+//! # Low-Level State Machine Example
+//!
+//! For advanced use cases, you can work directly with state machines:
 //!
 //! ```ignore
 //! use delta_kernel_datafusion::{DataFusionExecutor, results_stream};
@@ -39,6 +73,8 @@ pub mod json_parse;
 pub mod exec;
 pub mod driver;
 pub mod error;
+pub mod snapshot_builder;
+pub mod scan_ext;
 
 // Re-export main APIs
 pub use executor::DataFusionExecutor;
@@ -51,4 +87,8 @@ pub use driver::{
     scan_metadata_stream_async,
 };
 pub use error::{DfResult, DfError};
+
+// Re-export high-level async builder APIs
+pub use snapshot_builder::{AsyncSnapshotBuilder, SnapshotAsyncBuilderExt};
+pub use scan_ext::ScanAsyncExt;
 
