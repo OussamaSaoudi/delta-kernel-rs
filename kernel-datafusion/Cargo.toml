@@ -18,6 +18,13 @@ datafusion-common = "51"
 datafusion-expr = "51"
 datafusion-physical-plan = "51"
 datafusion-physical-expr = "51"
+datafusion-datasource = "51"
+datafusion-datasource-parquet = "51"
+datafusion-datasource-json = "51"
+datafusion-execution = "51"
+datafusion-functions = "51"
+datafusion-functions-aggregate = "51"
+datafusion-functions-json = "0.51"
 
 # Arrow deps - must match kernel's arrow-57
 arrow = { package = "arrow", version = "57" }
@@ -46,4 +53,5 @@ test_utils = { path = "../test-utils" }
 tokio = { version = "1.47", features = ["macros", "rt-multi-thread"] }
 test-log = { version = "0.2", default-features = false, features = ["trace"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
+tempfile = "3"
 

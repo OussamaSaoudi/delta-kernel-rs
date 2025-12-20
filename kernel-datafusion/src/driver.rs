@@ -5,9 +5,10 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use futures::StreamExt;
 
-use delta_kernel::plans::state_machines::{StateMachine, AdvanceResult};
+use delta_kernel::plans::state_machines::{StateMachine, AdvanceResult, SnapshotStateMachine};
 use delta_kernel::plans::DeclarativePlanNode;
 use delta_kernel::engine_data::FilteredEngineData;
+use delta_kernel::snapshot::Snapshot;
 use delta_kernel::DeltaResult;
 
 use crate::executor::DataFusionExecutor;
@@ -165,5 +166,143 @@ where
             }
         }
     }
+}
+
+/// Execute a state machine to completion asynchronously.
+///
+/// This is the async equivalent of `execute_state_machine` in the kernel.
+/// It drives the state machine by executing each plan via DataFusion
+/// and advancing until completion.
+///
+/// # Error Handling
+///
+/// Some state machine phases (like `CheckpointHint`) handle execution errors gracefully.
+/// For example, if `_last_checkpoint` doesn't exist, the state machine continues
+/// without the hint. This driver passes execution errors to `advance()` to let the
+/// state machine decide how to handle them.
+///
+/// # Example
+///
+/// ```ignore
+/// use delta_kernel_datafusion::{DataFusionExecutor, execute_state_machine_async};
+/// use delta_kernel::plans::state_machines::SnapshotStateMachine;
+///
+/// let executor = DataFusionExecutor::new()?;
+/// let sm = SnapshotStateMachine::new(table_root)?;
+/// let snapshot = execute_state_machine_async(&executor, sm).await?;
+/// ```
+pub async fn execute_state_machine_async<SM>(
+    executor: &DataFusionExecutor,
+    mut sm: SM,
+) -> DeltaResult<SM::Result>
+where
+    SM: StateMachine + Send,
+    SM::Result: Send,
+{
+    loop {
+        let plan = sm.get_plan()?;
+
+        // Try to compile and execute via DataFusion
+        // If execution fails, we pass the error to advance() to let the state machine
+        // decide how to handle it (e.g., CheckpointHint phase handles FileNotFound gracefully)
+        let execution_result = execute_plan_async(executor, plan.clone()).await;
+
+        // Advance with the execution result
+        // The state machine may handle certain errors gracefully (e.g., missing _last_checkpoint)
+        let advance_result = match execution_result {
+            Ok(()) => sm.advance(Ok(plan))?,
+            Err(e) => sm.advance(Err(e))?,
+        };
+
+        match advance_result {
+            AdvanceResult::Continue => continue,
+            AdvanceResult::Done(result) => return Ok(result),
+        }
+    }
+}
+
+/// Execute a single plan via DataFusion, draining the stream for side effects.
+///
+/// Returns Ok(()) if execution succeeded, or an appropriate kernel error.
+async fn execute_plan_async(
+    executor: &DataFusionExecutor,
+    plan: DeclarativePlanNode,
+) -> DeltaResult<()> {
+    // Compile and execute via DataFusion
+    let df_stream = executor
+        .execute_to_stream(plan)
+        .await
+        .map_err(|e| convert_datafusion_error(e))?;
+
+    // Drain the stream to trigger side effects (KDF state mutations)
+    futures::pin_mut!(df_stream);
+    while let Some(batch_result) = df_stream.next().await {
+        batch_result.map_err(|e| convert_datafusion_error(e))?;
+    }
+
+    Ok(())
+}
+
+/// Convert a DataFusion error to an appropriate kernel error type.
+///
+/// This ensures that file-not-found errors are properly typed so that
+/// state machines can handle them gracefully.
+fn convert_datafusion_error(e: impl std::fmt::Display) -> delta_kernel::Error {
+    let msg = e.to_string();
+    
+    // Check for common "not found" patterns in the error message
+    if msg.contains("not found") || msg.contains("No such file") || msg.contains("NotFound") {
+        delta_kernel::Error::file_not_found(msg)
+    } else {
+        delta_kernel::Error::generic(msg)
+    }
+}
+
+/// Build a snapshot asynchronously using DataFusion execution.
+///
+/// This is the recommended entry point for DataFusion-backed snapshot construction.
+/// It creates a `SnapshotStateMachine` and drives it to completion using DataFusion
+/// for plan execution.
+///
+/// # Example
+///
+/// ```ignore
+/// use delta_kernel_datafusion::{DataFusionExecutor, build_snapshot_async};
+///
+/// let executor = DataFusionExecutor::new()?;
+/// let table_url = url::Url::parse("file:///path/to/delta/table")?;
+/// let snapshot = build_snapshot_async(&executor, table_url).await?;
+/// println!("Table version: {}", snapshot.version());
+/// ```
+pub async fn build_snapshot_async(
+    executor: &DataFusionExecutor,
+    table_root: url::Url,
+) -> DeltaResult<Snapshot> {
+    let sm = SnapshotStateMachine::new(table_root)?;
+    execute_state_machine_async(executor, sm).await
+}
+
+/// Build a snapshot at a specific version asynchronously.
+///
+/// Similar to `build_snapshot_async`, but targets a specific table version
+/// instead of the latest version.
+///
+/// # Example
+///
+/// ```ignore
+/// use delta_kernel_datafusion::{DataFusionExecutor, build_snapshot_at_version_async};
+///
+/// let executor = DataFusionExecutor::new()?;
+/// let table_url = url::Url::parse("file:///path/to/delta/table")?;
+/// let snapshot = build_snapshot_at_version_async(&executor, table_url, 5).await?;
+/// assert_eq!(snapshot.version(), 5);
+/// ```
+pub async fn build_snapshot_at_version_async(
+    executor: &DataFusionExecutor,
+    table_root: url::Url,
+    version: i64,
+) -> DeltaResult<Snapshot> {
+    let sm = SnapshotStateMachine::with_version(table_root, version)?;
+    execute_state_machine_async(executor, sm).await
 }
 

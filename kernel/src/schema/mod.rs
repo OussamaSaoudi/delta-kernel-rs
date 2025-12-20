@@ -358,6 +358,16 @@ impl StructField {
         self.nullable
     }
 
+    /// Returns a copy of this field with the specified nullability.
+    pub fn with_nullable(&self, nullable: bool) -> Self {
+        Self {
+            name: self.name.clone(),
+            data_type: self.data_type.clone(),
+            nullable,
+            metadata: self.metadata.clone(),
+        }
+    }
+
     #[inline]
     pub const fn data_type(&self) -> &DataType {
         &self.data_type
@@ -1827,6 +1837,107 @@ impl<'a> SchemaTransform<'a> for SchemaDepthChecker {
     fn transform_map(&mut self, mtype: &'a MapType) -> Option<Cow<'a, MapType>> {
         self.depth_limited(Self::recurse_into_map, mtype)
     }
+}
+
+// ============================================================================
+// Schema Nullability Utilities for Reading
+// ============================================================================
+
+/// A schema transform that relaxes nullability for reading parquet files.
+///
+/// When a parent struct field is nullable, all its children are made nullable.
+/// This matches how parquet files store data - children of nullable structs
+/// are stored as nullable even if the logical schema says otherwise.
+///
+/// Example:
+/// ```text
+/// Input:  add (nullable) -> path (non-nullable), size (non-nullable)
+/// Output: add (nullable) -> path (nullable), size (nullable)
+/// ```
+struct NullabilityRelaxer {
+    /// Whether the current parent is nullable
+    parent_nullable: bool,
+}
+
+impl NullabilityRelaxer {
+    fn new() -> Self {
+        Self {
+            parent_nullable: false,
+        }
+    }
+}
+
+impl<'a> SchemaTransform<'a> for NullabilityRelaxer {
+    fn transform_struct_field(&mut self, field: &'a StructField) -> Option<Cow<'a, StructField>> {
+        // If parent is nullable, make this field nullable too
+        let should_be_nullable = self.parent_nullable || field.is_nullable();
+
+        // Save parent state and set new state for recursion
+        let prev_parent_nullable = self.parent_nullable;
+        self.parent_nullable = should_be_nullable;
+
+        // Recurse to handle nested types
+        let transformed = self.recurse_into_struct_field(field);
+
+        // Restore parent state
+        self.parent_nullable = prev_parent_nullable;
+
+        // Apply nullability change if needed
+        if should_be_nullable && !field.is_nullable() {
+            let base = transformed.unwrap_or(Cow::Borrowed(field));
+            Some(Cow::Owned(base.into_owned().with_nullable(true)))
+        } else {
+            transformed
+        }
+    }
+}
+
+/// Relax nullability for reading parquet files.
+///
+/// When a parent struct field is nullable, all its children are made nullable.
+/// This is necessary because parquet files store nullable parents' children
+/// as nullable, even if the kernel schema says they are non-nullable.
+///
+/// Use [`collect_fields_needing_validation`] to get the list of fields that
+/// need runtime validation after reading.
+pub fn relax_nullability_for_reading(schema: &StructType) -> StructType {
+    let mut relaxer = NullabilityRelaxer::new();
+    relaxer
+        .transform_struct(schema)
+        .map(|cow| cow.into_owned())
+        .unwrap_or_else(|| schema.clone())
+}
+
+/// Collect non-nullable fields under nullable top-level struct parents.
+///
+/// Only validates immediate children of top-level nullable structs.
+/// Does NOT recurse into nested structs (e.g., `add.deletionVector.storageType`).
+///
+/// Returns: Vec of (parent_column_name, child_field_name) pairs.
+///
+/// At runtime, for each (parent, child) pair, validate:
+/// - If parent struct IS NOT NULL, then child field must be NOT NULL
+pub fn collect_fields_needing_validation(schema: &StructType) -> Vec<(String, String)> {
+    let mut validations = Vec::new();
+
+    // Only check top-level fields
+    for field in schema.fields() {
+        // Only interested in nullable struct fields
+        if !field.is_nullable() {
+            continue;
+        }
+
+        if let DataType::Struct(inner_struct) = field.data_type() {
+            // Collect non-nullable children of this nullable struct
+            for child in inner_struct.fields() {
+                if !child.is_nullable() {
+                    validations.push((field.name().to_string(), child.name().to_string()));
+                }
+            }
+        }
+    }
+
+    validations
 }
 
 #[cfg(test)]

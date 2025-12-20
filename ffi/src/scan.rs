@@ -247,9 +247,20 @@ fn scan_metadata_iter_init_impl(
     engine: &Arc<dyn ExternEngine>,
     scan: &Scan,
 ) -> DeltaResult<Handle<SharedScanMetadataIterator>> {
-    let scan_metadata = scan.scan_metadata(engine.engine().as_ref())?;
+    // Clone the Arc to extend its lifetime
+    let engine_arc = engine.clone();
+    let engine_ref = engine_arc.engine();
+    
+    // The scan_metadata iterator borrows from engine, so we need to keep engine alive
+    // by storing it in the iterator struct
+    let scan_metadata = scan.scan_metadata(engine_ref.as_ref())?;
+    
+    // Collect into a Vec to avoid lifetime issues
+    let collected: Vec<_> = scan_metadata.collect();
+    let static_iter = collected.into_iter();
+    
     let data = ScanMetadataIterator {
-        data: Mutex::new(Box::new(scan_metadata)),
+        data: Mutex::new(Box::new(static_iter)),
         engine: engine.clone(),
     };
     Ok(Arc::new(data).into())

@@ -33,7 +33,7 @@ pub struct FileActionKey {
 }
 
 impl FileActionKey {
-    pub(crate) fn new(path: impl Into<String>, dv_unique_id: Option<String>) -> Self {
+    pub fn new(path: impl Into<String>, dv_unique_id: Option<String>) -> Self {
         let path = path.into();
         Self { path, dv_unique_id }
     }

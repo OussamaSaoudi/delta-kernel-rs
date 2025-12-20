@@ -35,12 +35,19 @@ pub mod executor;
 pub mod compile;
 pub mod scan;
 pub mod expr;
+pub mod json_parse;
 pub mod exec;
 pub mod driver;
 pub mod error;
 
 // Re-export main APIs
 pub use executor::DataFusionExecutor;
-pub use driver::{results_stream, ResultsStreamDriver};
+pub use driver::{
+    results_stream,
+    ResultsStreamDriver,
+    execute_state_machine_async,
+    build_snapshot_async,
+    build_snapshot_at_version_async,
+};
 pub use error::{DfResult, DfError};
 

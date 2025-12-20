@@ -136,15 +136,23 @@ fn lower_scalar(scalar: &Scalar) -> DfResult<Expr> {
 
 // Helper: lower kernel ColumnName to DataFusion column reference
 fn lower_column(col_name: &ColumnName) -> Expr {
-    // ColumnName can be nested (e.g. "add.path")
+    // ColumnName can be nested (e.g. ["add", "path"] for accessing add.path)
     let path = col_name.as_ref();
-    if path.len() == 1 {
+    if path.is_empty() {
+        // Shouldn't happen, but handle gracefully
+        col("")
+    } else if path.len() == 1 {
+        // Simple column reference
         col(&path[0])
     } else {
-        // Nested column access: use compound identifier
-        Expr::Column(datafusion_common::Column::from_qualified_name(
-            path.join(".")
-        ))
+        // Nested column access: struct field access using get_field function
+        // Example: ["add", "size"] -> get_field(col("add"), "size")
+        // Start with the root column, then chain get_field for each nested field
+        let mut expr = col(&path[0]);
+        for field_name in path.iter().skip(1) {
+            expr = datafusion_functions::core::expr_fn::get_field(expr, field_name.clone());
+        }
+        expr
     }
 }
 
@@ -221,10 +229,25 @@ fn lower_variadic_expression(
     match op {
         VariadicExpressionOp::Coalesce => {
             let args: Result<Vec<_>, _> = exprs.iter().map(lower_expression).collect();
-            // DataFusion doesn't have Expr::coalesce, use case expression
-            // COALESCE(a, b, c) = CASE WHEN a IS NOT NULL THEN a WHEN b IS NOT NULL THEN b ELSE c END
-            // For simplicity, error out for now - will implement proper lowering later
-            Err(DfError::Unsupported("COALESCE lowering not yet implemented".to_string()))
+            // Build nested CASE WHEN: COALESCE(a, b, c) -> CASE WHEN a IS NOT NULL THEN a ... ELSE c
+            let args = args?;
+            if args.is_empty() {
+                return Err(DfError::ExpressionLowering("COALESCE with no arguments".to_string()));
+            }
+            
+            // Use recursive pattern: coalesce(a, b, c) = CASE WHEN a IS NOT NULL THEN a ELSE coalesce(b, c)
+            let mut result = args.last().unwrap().clone();
+            for arg in args.iter().rev().skip(1) {
+                result = Expr::Case(datafusion_expr::Case {
+                    expr: None,
+                    when_then_expr: vec![(
+                        Box::new(Expr::IsNotNull(Box::new(arg.clone()))),
+                        Box::new(arg.clone()),
+                    )],
+                    else_expr: Some(Box::new(result)),
+                });
+            }
+            Ok(result)
         }
     }
 }
@@ -280,12 +303,22 @@ fn lower_binary_predicate(
         }
         BinaryPredicateOp::In => {
             // IN operator: left IN (right)
-            // Right should be a list/array - for now assume it's an array literal
-            // This is tricky; DataFusion InList expects Vec<Expr>
-            // For simplicity, error out for now
-            Err(DfError::ExpressionLowering(
-                "IN predicate lowering not yet fully implemented".to_string()
-            ))
+            // Right should be an array literal
+            match right {
+                Expression::Literal(Scalar::Array(array_data)) => {
+                    let list: Vec<Expr> = array_data.array_elements().iter()
+                        .map(|s| lower_expression(&Expression::Literal(s.clone())))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(Expr::InList(datafusion_expr::expr::InList {
+                        expr: Box::new(left_expr),
+                        list,
+                        negated: false,
+                    }))
+                }
+                _ => Err(DfError::ExpressionLowering(
+                    "IN predicate right side must be array literal".to_string()
+                ))
+            }
         }
     }
 }

@@ -1,10 +1,4 @@
 //! KdfFilterExec - applies FilterByKDF to filter rows.
-///
-/// ORDERING REQUIREMENT: This exec requires input batches to be ordered by
-/// version in DESCENDING order (newest first). Violating this will cause
-/// incorrect deduplication results.
-///
-/// Enforcement: Single partition + runtime validation.
 
 use std::any::Any;
 use std::fmt;
@@ -12,23 +6,18 @@ use std::sync::Arc;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use arrow::datatypes::{SchemaRef as ArrowSchemaRef, Int64Type};
+use arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use arrow::record_batch::RecordBatch;
-use arrow::array::{BooleanArray, Array, PrimitiveArray};
-use arrow::compute::filter_record_batch;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
     RecordBatchStream, SendableRecordBatchStream,
 };
-use datafusion_physical_plan::execution_plan::{EmissionType, Boundedness};
-use datafusion_physical_plan::Partitioning;
 use datafusion_common::{Result as DfResult, DataFusionError};
 use datafusion_physical_expr::EquivalenceProperties;
 use futures::{Stream, StreamExt};
 
 use delta_kernel::plans::FilterByKDF;
 use delta_kernel::plans::kdf_state::FilterKdfState;
-use delta_kernel::engine::arrow_data::ArrowEngineData;
 
 /// ExecutionPlan that applies a FilterByKDF to its child stream.
 ///
@@ -53,12 +42,11 @@ impl KdfFilterExec {
             EquivalenceProperties::new(child.schema()),
             // Single partition if not parallel-safe
             if is_parallel_safe {
-                child.properties().output_partitioning().clone()
+                child.output_partitioning().clone()
             } else {
-                Partitioning::UnknownPartitioning(1)
+                datafusion::physical_plan::Partitioning::UnknownPartitioning(1)
             },
-            EmissionType::Incremental,
-            Boundedness::Bounded,
+            ExecutionMode::Bounded,
         );
         
         Self {
@@ -126,21 +114,15 @@ impl ExecutionPlan for KdfFilterExec {
             schema,
             input: child_stream,
             kdf_state,
-            selection_vector: None, // Allocated on first batch
-            last_seen_version: None,
         }))
     }
 }
 
-/// Stream that applies FilterKDF to batches with ordering validation.
+/// Stream that applies FilterKDF to batches.
 struct KdfFilterStream {
     schema: ArrowSchemaRef,
     input: SendableRecordBatchStream,
     kdf_state: Arc<std::sync::Mutex<FilterKdfState>>,
-    /// Reusable selection vector to minimize allocations
-    selection_vector: Option<BooleanArray>,
-    /// Track last seen version for ordering validation
-    last_seen_version: Option<i64>,
 }
 
 impl Stream for KdfFilterStream {
@@ -149,48 +131,11 @@ impl Stream for KdfFilterStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.input.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(batch))) => {
-                // 1. VALIDATE ORDERING (if version column present)
-                if let Some(version_col) = batch.column_by_name("version") {
-                    if let Some(versions) = version_col.as_any().downcast_ref::<PrimitiveArray<Int64Type>>() {
-                        if versions.len() > 0 && !versions.is_null(0) {
-                            let first_version = versions.value(0);
-                            if let Some(last) = self.last_seen_version {
-                                if first_version >= last {
-                                    return Poll::Ready(Some(Err(DataFusionError::Internal(
-                                        format!(
-                                            "KDF ordering violation: expected version < {}, got {}. \
-                                             Batches must be ordered by version DESC (newest first).",
-                                            last, first_version
-                                        )
-                                    ))));
-                                }
-                            }
-                            self.last_seen_version = Some(first_version);
-                        }
-                    }
-                }
-                
-                // 2. Initialize or reuse selection vector
-                let batch_len = batch.num_rows();
-                let selection = BooleanArray::from(vec![true; batch_len]);
-                
-                // 3. APPLY KDF FILTER
-                let engine_data = ArrowEngineData::new(batch.clone());
-                let filtered_selection = {
-                    let mut state = self.kdf_state.lock().unwrap();
-                    match state.apply(&engine_data, selection) {
-                        Ok(sel) => sel,
-                        Err(e) => return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
-                    }
-                };
-                
-                // Store for potential reuse (future optimization)
-                self.selection_vector = Some(filtered_selection.clone());
-                
-                // 4. FILTER BATCH using selection vector
-                match filter_record_batch(&batch, &filtered_selection) {
+                // Apply KDF filter
+                let mut state = self.kdf_state.lock().unwrap();
+                match state.apply(&batch) {
                     Ok(filtered_batch) => Poll::Ready(Some(Ok(filtered_batch))),
-                    Err(e) => Poll::Ready(Some(Err(DataFusionError::ArrowError(Box::new(e), None)))),
+                    Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
                 }
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
@@ -215,4 +160,5 @@ fn is_filter_kdf_parallel_safe(kdf: &FilterByKDF) -> bool {
         FilterKdfState::PartitionPrune(_) => true,  // Stateless, can parallelize
     }
 }
+
 

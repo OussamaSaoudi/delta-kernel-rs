@@ -47,13 +47,26 @@ pub enum FileType {
 /// Scan files from storage.
 ///
 /// Reads Parquet or JSON files and produces record batches.
+///
+/// # Schema Semantics
+///
+/// The `schema` field specifies the desired output schema with nullability semantics
+/// that match the kernel's `ParquetHandler::read_parquet_files` contract:
+///
+/// - **Missing nullable columns**: Filled with NULL values
+/// - **Missing non-nullable columns**: Returns an error
+/// - **Type differences**: Cast to the specified type
+/// - **Column reordering**: Columns are reordered to match the schema
+///
+/// When compiled to DataFusion, the `DefaultSchemaAdapterFactory` automatically
+/// enforces these semantics by adapting file-level record batches to the table schema.
 #[derive(Debug, Clone)]
 pub struct ScanNode {
     /// Type of files to read
     pub file_type: FileType,
     /// Files to scan
     pub files: Vec<FileMeta>,
-    /// Schema to read
+    /// Schema specifying the desired output structure and nullability constraints
     pub schema: SchemaRef,
 }
 
