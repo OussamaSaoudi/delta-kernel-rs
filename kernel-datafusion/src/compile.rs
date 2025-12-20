@@ -10,10 +10,42 @@ use datafusion_physical_expr::expressions::Column;
 use datafusion_functions_aggregate::first_last::first_value_udaf;
 
 use delta_kernel::plans::DeclarativePlanNode;
+use delta_kernel::schema::SchemaRef;
 use crate::error::{DfResult, DfError};
-use crate::expr::lower_expression;
+use crate::expr::{lower_expression, lower_column};
 use crate::scan::compile_scan as compile_scan_impl;
 use crate::exec::{KdfFilterExec, ConsumeKdfExec, FileListingExec, SchemaQueryExec};
+
+/// Infer the output schema for a declarative plan node.
+///
+/// This mirrors the kernel executor's `infer_output_schema` method. It's used to get
+/// the input schema for nodes that need it (like Select with Transform expressions).
+fn infer_output_schema(plan: &DeclarativePlanNode) -> DfResult<SchemaRef> {
+    use delta_kernel::schema::{DataType, StructField, StructType};
+    
+    Ok(match plan {
+        DeclarativePlanNode::Scan(node) => node.schema.clone(),
+        DeclarativePlanNode::FileListing(_) => {
+            // Must match the schema produced by FileListingExec
+            Arc::new(StructType::try_new(vec![
+                StructField::nullable("path", DataType::STRING),
+                StructField::nullable("size", DataType::LONG),
+                StructField::nullable("modificationTime", DataType::LONG),
+            ]).map_err(|e| DfError::Internal(format!("Failed to create FileListing schema: {}", e)))?)
+        }
+        DeclarativePlanNode::SchemaQuery(_) => {
+            Arc::new(StructType::try_new(vec![])
+                .map_err(|e| DfError::Internal(format!("Failed to create empty schema: {}", e)))?)
+        }
+        DeclarativePlanNode::FilterByKDF { child, .. }
+        | DeclarativePlanNode::ConsumeByKDF { child, .. }
+        | DeclarativePlanNode::FilterByExpression { child, .. }
+        | DeclarativePlanNode::FirstNonNull { child, .. }
+        | DeclarativePlanNode::ParseJson { child, .. }
+        | DeclarativePlanNode::Sink { child, .. } => infer_output_schema(child)?,
+        DeclarativePlanNode::Select { node, .. } => node.output_schema.clone(),
+    })
+}
 
 /// Compile a declarative plan node into a DataFusion physical plan.
 pub fn compile_plan(
@@ -123,8 +155,8 @@ fn compile_filter_by_expr(
     let child_plan = compile_plan(child, session_state)?;
     
     // FilterByExpressionNode stores the predicate as Arc<Expression>
-    // Lower it to a DataFusion Expr
-    let predicate_expr = lower_expression(&node.predicate)?;
+    // Lower it to a DataFusion Expr (predicates don't need output type or input schema)
+    let predicate_expr = lower_expression(&node.predicate, None, None)?;
     
     // Convert logical Expr to physical PhysicalExpr
     // This requires the schema from the child plan
@@ -146,27 +178,174 @@ fn compile_select(
     node: &delta_kernel::plans::SelectNode,
     session_state: &SessionState,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
+    use delta_kernel::Expression;
+    use delta_kernel::schema::DataType;
+    
+    // Get input schema from child node for Transform expressions
+    let input_schema = infer_output_schema(child)?;
+    
     let child_plan = compile_plan(child, session_state)?;
     let schema = child_plan.schema();
     let df_schema = datafusion_common::DFSchema::try_from_qualified_schema("", &schema)?;
     
-    // Lower each expression and convert to physical
-    let proj_exprs: Result<Vec<_>, DfError> = node.columns.iter()
-        .enumerate()
-        .map(|(i, expr)| {
-            let df_expr = lower_expression(expr)?;
+    let mut proj_exprs: Vec<(Arc<dyn datafusion_physical_expr::PhysicalExpr>, String)> = Vec::new();
+    let mut output_field_idx = 0;
+    
+    for expr in node.columns.iter() {
+        // Check if this is a Transform expression that should be flattened
+        if let Expression::Transform(transform) = expr.as_ref() {
+            // Flatten Transform: expand it into individual column expressions
+            // Each field in the transform's output becomes a separate projection column
+            let flattened = flatten_transform_to_exprs(
+                transform,
+                input_schema.as_ref(),
+                &node.output_schema,
+                output_field_idx,
+            )?;
+            
+            for (df_expr, field_name) in flattened {
+                let physical_expr = datafusion_physical_expr::create_physical_expr(
+                    &df_expr,
+                    &df_schema,
+                    session_state.execution_props(),
+                )?;
+                proj_exprs.push((physical_expr, field_name));
+                output_field_idx += 1;
+            }
+        } else if let Expression::Struct(fields) = expr.as_ref() {
+            // Flatten Struct: each field expression becomes a separate output column
+            // This matches the kernel's SelectNode semantics where a Struct expression
+            // with N fields and an output_schema with N fields produces N separate columns
+            for field_expr in fields {
+                let output_field = node.output_schema.field_at_index(output_field_idx).ok_or_else(|| {
+                    DfError::ExpressionLowering("Output schema has fewer fields than Struct expression produces".to_string())
+                })?;
+                
+                let df_expr = lower_expression(field_expr, Some(output_field.data_type()), Some(input_schema.as_ref()))?;
+                let physical_expr = datafusion_physical_expr::create_physical_expr(
+                    &df_expr,
+                    &df_schema,
+                    session_state.execution_props(),
+                )?;
+                
+                proj_exprs.push((physical_expr, output_field.name().to_string()));
+                output_field_idx += 1;
+            }
+        } else {
+            // Non-Transform, non-Struct expression: process normally (one expression -> one column)
+            let output_type: Option<&DataType> = node.output_schema
+                .field_at_index(output_field_idx)
+                .map(|f| f.data_type());
+            
+            let df_expr = lower_expression(expr, output_type, Some(input_schema.as_ref()))?;
             let physical_expr = datafusion_physical_expr::create_physical_expr(
                 &df_expr,
                 &df_schema,
                 session_state.execution_props(),
             )?;
-            // ProjectionExec needs (PhysicalExpr, name) pairs
-            Ok::<_, DfError>((physical_expr, format!("col_{}", i)))
-        })
-        .collect();
+            
+            let field_name = node.output_schema
+                .field_at_index(output_field_idx)
+                .map(|f| f.name().to_string())
+                .unwrap_or_else(|| format!("col_{}", output_field_idx));
+            
+            proj_exprs.push((physical_expr, field_name));
+            output_field_idx += 1;
+        }
+    }
     
-    let projection_exec = ProjectionExec::try_new(proj_exprs?, child_plan)?;
+    let projection_exec = ProjectionExec::try_new(proj_exprs, child_plan)?;
     Ok(Arc::new(projection_exec))
+}
+
+/// Flatten a Transform expression into individual column expressions.
+/// Returns a Vec of (DataFusion Expr, column_name) pairs.
+fn flatten_transform_to_exprs(
+    transform: &delta_kernel::expressions::Transform,
+    input_schema: &delta_kernel::schema::StructType,
+    output_schema: &delta_kernel::schema::StructType,
+    start_field_idx: usize,
+) -> DfResult<Vec<(datafusion_expr::Expr, String)>> {
+    use datafusion_expr::col;
+    
+    let mut results = Vec::new();
+    let mut output_idx = start_field_idx;
+    
+    // Helper to get source column expression (handles input_path for nested structs)
+    let get_source_col = |field_name: &str| -> datafusion_expr::Expr {
+        match &transform.input_path {
+            Some(path) => {
+                let base = lower_column(path);
+                datafusion_functions::core::expr_fn::get_field(base, field_name.to_string())
+            }
+            None => col(field_name),
+        }
+    };
+    
+    // 1. Emit prepended fields first
+    for prepend_expr in &transform.prepended_fields {
+        let output_field = output_schema.field_at_index(output_idx).ok_or_else(|| {
+            DfError::ExpressionLowering("Output schema has fewer fields than transform produces".to_string())
+        })?;
+        
+        let df_expr = lower_expression(prepend_expr, Some(output_field.data_type()), Some(input_schema))?;
+        results.push((df_expr, output_field.name().to_string()));
+        output_idx += 1;
+    }
+    
+    // 2. Iterate over input schema fields and apply transforms
+    for input_field in input_schema.fields() {
+        let field_name = input_field.name();
+        let ft = transform.field_transforms.get(field_name);
+        
+        // Check if this field is dropped (is_replace=true with empty exprs)
+        if ft.is_some_and(|t| t.is_replace && t.exprs.is_empty()) {
+            continue; // Skip dropped field
+        }
+        
+        // Check if this field is replaced (is_replace=true with exprs)
+        if let Some(t) = ft {
+            if t.is_replace && !t.exprs.is_empty() {
+                // Field is replaced - emit replacement expressions
+                for replace_expr in &t.exprs {
+                    let output_field = output_schema.field_at_index(output_idx).ok_or_else(|| {
+                        DfError::ExpressionLowering("Output schema has fewer fields than transform produces".to_string())
+                    })?;
+                    
+                    let df_expr = lower_expression(replace_expr, Some(output_field.data_type()), Some(input_schema))?;
+                    results.push((df_expr, output_field.name().to_string()));
+                    output_idx += 1;
+                }
+                continue;
+            }
+        }
+        
+        // Field passes through unchanged
+        let output_field = output_schema.field_at_index(output_idx).ok_or_else(|| {
+            DfError::ExpressionLowering("Output schema has fewer fields than transform produces".to_string())
+        })?;
+        
+        let source_expr = get_source_col(field_name);
+        results.push((source_expr, output_field.name().to_string()));
+        output_idx += 1;
+        
+        // Check if there are insertions after this field (is_replace=false with exprs)
+        if let Some(t) = ft {
+            if !t.is_replace {
+                for insert_expr in &t.exprs {
+                    let output_field = output_schema.field_at_index(output_idx).ok_or_else(|| {
+                        DfError::ExpressionLowering("Output schema has fewer fields than transform produces".to_string())
+                    })?;
+                    
+                    let df_expr = lower_expression(insert_expr, Some(output_field.data_type()), Some(input_schema))?;
+                    results.push((df_expr, output_field.name().to_string()));
+                    output_idx += 1;
+                }
+            }
+        }
+    }
+    
+    Ok(results)
 }
 
 fn compile_parse_json(

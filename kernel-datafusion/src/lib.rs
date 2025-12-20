@@ -48,6 +48,7 @@ pub use driver::{
     execute_state_machine_async,
     build_snapshot_async,
     build_snapshot_at_version_async,
+    scan_metadata_stream_async,
 };
 pub use error::{DfResult, DfError};
 

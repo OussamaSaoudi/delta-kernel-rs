@@ -38,7 +38,39 @@ pub(crate) mod field_classifiers;
 pub mod log_replay;
 pub mod state;
 pub(crate) mod state_info;
-pub(crate) mod transform;
+pub mod transform;
+
+// Re-export transform types for external use
+pub use transform::TransformComputer;
+
+// Re-export state machine types for connector use
+#[cfg(feature = "arrow")]
+pub use crate::plans::state_machines::ScanStateMachine;
+#[cfg(feature = "arrow")]
+pub use crate::plans::executor::ResultsDriver;
+
+/// State for driving a scan with a custom executor.
+///
+/// This struct bundles the primitives needed to execute a scan:
+/// - `state_machine`: Drive this to produce batches of scan file metadata
+/// - `transform_computer`: Compute row-level transforms for each batch
+///
+/// # Example
+/// ```ignore
+/// let scan_state = scan.into_scan_state()?;
+/// let driver = ResultsDriver::new(engine, scan_state.state_machine);
+/// for batch in driver {
+///     let transforms = scan_state.transform_computer.compute_transforms(batch.data())?;
+///     // Process batch with transforms...
+/// }
+/// ```
+#[cfg(feature = "arrow")]
+pub struct ScanState {
+    /// The state machine that drives scan phases
+    pub state_machine: ScanStateMachine,
+    /// Computes row-level transforms for each batch
+    pub transform_computer: TransformComputer,
+}
 
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -408,6 +440,52 @@ impl Scan {
     /// [`TransformComputer`]: crate::scan::transform::TransformComputer
     pub(crate) fn state_info(&self) -> Arc<StateInfo> {
         self.state_info.clone()
+    }
+
+    /// Create a [`TransformComputer`] for computing row-level transforms from scan
+    /// batches.
+    ///
+    /// The `TransformComputer` encapsulates the scan's `StateInfo` and provides a
+    /// method to compute transforms for each batch of scan file metadata.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let computer = scan.create_transform_computer();
+    /// for batch in scan_batches {
+    ///     let transforms = computer.compute_transforms(batch.data())?;
+    ///     // Use transforms with batch...
+    /// }
+    /// ```
+    pub fn create_transform_computer(&self) -> TransformComputer {
+        TransformComputer::new(self.state_info.clone())
+    }
+
+    /// Create scan state for driving this scan with a custom executor.
+    ///
+    /// Returns a [`ScanState`] containing primitives that allow connectors to execute
+    /// the scan using their own execution engine rather than the built-in [`scan_metadata`].
+    ///
+    /// # Example
+    /// ```ignore
+    /// let scan_state = scan.into_scan_state()?;
+    /// let driver = ResultsDriver::new(engine, scan_state.state_machine);
+    /// for batch in driver {
+    ///     let transforms = scan_state.transform_computer.compute_transforms(batch.data())?;
+    ///     // Process batch with transforms...
+    /// }
+    /// ```
+    ///
+    /// [`scan_metadata`]: Self::scan_metadata
+    #[cfg(feature = "arrow")]
+    pub fn into_scan_state(&self) -> DeltaResult<ScanState> {
+        use crate::plans::state_machines::ScanStateMachine;
+
+        let transform_computer = self.create_transform_computer();
+        let state_machine = ScanStateMachine::from_scan(self)?;
+        Ok(ScanState {
+            state_machine,
+            transform_computer,
+        })
     }
 
     /// Get an iterator of [`ScanMetadata`]s that should be used to facilitate a scan. This handles

@@ -48,13 +48,13 @@ macro_rules! column_names_and_types {
 ///
 /// This is stateless - each batch is processed independently.
 #[derive(Debug, Clone)]
-pub(crate) struct TransformComputer {
+pub struct TransformComputer {
     state_info: Arc<StateInfo>,
 }
 
 impl TransformComputer {
     /// Create a new `TransformComputer` with the given state info.
-    pub(crate) fn new(state_info: Arc<StateInfo>) -> Self {
+    pub fn new(state_info: Arc<StateInfo>) -> Self {
         Self { state_info }
     }
 
@@ -66,7 +66,7 @@ impl TransformComputer {
     /// - `None` - No transform needed (data is already in correct form)
     ///
     /// The vector may be shorter than the batch length if trailing rows have no transforms.
-    pub(crate) fn compute_transforms(
+    pub fn compute_transforms(
         &self,
         data: &dyn EngineData,
     ) -> DeltaResult<Vec<Option<ExpressionRef>>> {

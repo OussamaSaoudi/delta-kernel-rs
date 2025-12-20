@@ -7,13 +7,25 @@ use delta_kernel::expressions::{
     Expression, Predicate, Scalar,
     UnaryPredicateOp, BinaryPredicateOp, JunctionPredicateOp,
     UnaryExpressionOp, BinaryExpressionOp, VariadicExpressionOp,
-    ColumnName,
+    ColumnName, Transform, ExpressionRef,
 };
+use delta_kernel::schema::{DataType, StructType};
 
 use crate::error::{DfResult, DfError};
 
 /// Lower a kernel Expression to a DataFusion Expr.
-pub fn lower_expression(expr: &Expression) -> DfResult<Expr> {
+///
+/// Parameters:
+/// - `expr`: The kernel expression to lower
+/// - `output_type`: Optional output type for expressions that need schema context (Struct, Transform)
+/// - `input_schema`: Optional input schema for Transform expressions to iterate over input fields
+///
+/// For simple expressions like literals, columns, and predicates, both optional params can be `None`.
+pub fn lower_expression(
+    expr: &Expression,
+    output_type: Option<&DataType>,
+    input_schema: Option<&StructType>,
+) -> DfResult<Expr> {
     match expr {
         Expression::Literal(scalar) => lower_scalar(scalar),
         Expression::Column(col_name) => Ok(lower_column(col_name)),
@@ -22,16 +34,10 @@ pub fn lower_expression(expr: &Expression) -> DfResult<Expr> {
             lower_predicate(pred)
         }
         Expression::Struct(fields) => {
-            // Struct expression - not commonly used in filters/projections at this level
-            // For now, we'll treat as unsupported
-            Err(DfError::Unsupported(
-                "Struct expression lowering not yet implemented".to_string()
-            ))
+            lower_struct_expression(fields, output_type, input_schema)
         }
-        Expression::Transform(_) => {
-            Err(DfError::Unsupported(
-                "Transform expression lowering not yet implemented".to_string()
-            ))
+        Expression::Transform(transform) => {
+            lower_transform_expression(transform, output_type, input_schema)
         }
         Expression::Unary(unary) => {
             lower_unary_expression(unary.op, &unary.expr)
@@ -62,7 +68,7 @@ pub fn lower_expression(expr: &Expression) -> DfResult<Expr> {
 pub fn lower_predicate(pred: &Predicate) -> DfResult<Expr> {
     match pred {
         Predicate::BooleanExpression(expr) => {
-            lower_expression(expr)
+            lower_expression(expr, None, None)
         }
         Predicate::Not(inner) => {
             let inner_expr = lower_predicate(inner)?;
@@ -90,6 +96,263 @@ pub fn lower_predicate(pred: &Predicate) -> DfResult<Expr> {
             ))
         }
     }
+}
+
+/// Lower a Struct expression to a DataFusion named_struct call.
+///
+/// If an output schema is provided, field names and types come from it.
+/// Otherwise, we generate default field names (c0, c1, ...).
+fn lower_struct_expression(
+    fields: &[ExpressionRef],
+    output_type: Option<&DataType>,
+    input_schema: Option<&StructType>,
+) -> DfResult<Expr> {
+    // Build named_struct arguments: alternating [name, value, name, value, ...]
+    let mut struct_args = Vec::with_capacity(fields.len() * 2);
+
+    match output_type {
+        Some(DataType::Struct(struct_type)) => {
+            // We have a struct schema - use it for field names and types
+            if fields.len() != struct_type.fields().count() {
+                return Err(DfError::ExpressionLowering(format!(
+                    "Struct expression has {} fields but output schema has {} fields",
+                    fields.len(),
+                    struct_type.fields().count()
+                )));
+            }
+
+            for (field_expr, schema_field) in fields.iter().zip(struct_type.fields()) {
+                // Add field name as literal string
+                struct_args.push(lit(schema_field.name().to_string()));
+
+                // Recursively lower the field expression with its expected type
+                // Pass input_schema through for nested transforms
+                let lowered = lower_expression(
+                    field_expr.as_ref(),
+                    Some(schema_field.data_type()),
+                    input_schema,
+                )?;
+                struct_args.push(lowered);
+            }
+        }
+        _ => {
+            // No struct schema available - use generated field names and no type hints
+            for (i, field_expr) in fields.iter().enumerate() {
+                struct_args.push(lit(format!("c{}", i)));
+                let lowered = lower_expression(field_expr.as_ref(), None, input_schema)?;
+                struct_args.push(lowered);
+            }
+        }
+    }
+
+    // Use DataFusion's named_struct function
+    Ok(datafusion_functions::core::expr_fn::named_struct(struct_args))
+}
+
+/// Lower a Transform expression to a DataFusion expression.
+///
+/// Transform expressions represent sparse modifications to struct schemas.
+/// They support:
+/// - `input_path`: Optional path to a nested struct to transform
+/// - `prepended_fields`: Fields to emit before the first input field
+/// - `field_transforms`: Per-field modifications (drop, replace, insert after)
+///
+/// The transform is converted to an equivalent named_struct expression by iterating
+/// over the input schema fields and applying transformations.
+fn lower_transform_expression(
+    transform: &Transform,
+    output_type: Option<&DataType>,
+    input_schema: Option<&StructType>,
+) -> DfResult<Expr> {
+    // Require struct output type for field names
+    let output_struct = match output_type {
+        Some(DataType::Struct(st)) => st,
+        Some(other) => {
+            return Err(DfError::ExpressionLowering(format!(
+                "Transform expression requires DataType::Struct output, got {:?}",
+                other
+            )));
+        }
+        None => {
+            return Err(DfError::ExpressionLowering(
+                "Transform expression requires output_type to determine output schema".to_string()
+            ));
+        }
+    };
+
+    // For identity transforms, just build a simple projection
+    if transform.is_identity() {
+        return lower_identity_transform(transform, output_struct);
+    }
+
+    // Determine the input struct to iterate over
+    // If input_path is set, we need to find that nested struct in the input schema
+    // Otherwise, we use the top-level input schema
+    let source_struct: Option<&StructType> = match (&transform.input_path, input_schema) {
+        (None, schema) => schema,
+        (Some(path), Some(schema)) => {
+            // Navigate to the nested struct
+            let mut current: &StructType = schema;
+            for field_name in path.as_ref().iter() {
+                match current.field(field_name) {
+                    Some(field) => match field.data_type() {
+                        DataType::Struct(nested) => current = nested,
+                        _ => return Err(DfError::ExpressionLowering(format!(
+                            "Transform input_path '{}' does not lead to a struct",
+                            path
+                        ))),
+                    },
+                    None => return Err(DfError::ExpressionLowering(format!(
+                        "Transform input_path field '{}' not found in schema",
+                        field_name
+                    ))),
+                }
+            }
+            Some(current)
+        }
+        (Some(_), None) => None,
+    };
+
+    // Helper to get the base expression for accessing source fields
+    let source_base: Option<Expr> = transform.input_path.as_ref().map(|path| lower_column(path));
+
+    // Build the result by iterating over the OUTPUT schema fields
+    // We track an iterator over output field types for type context
+    let mut output_field_iter = output_struct.fields();
+    let mut struct_args = Vec::new();
+
+    // 1. Emit prepended_fields first
+    for prepend_expr in &transform.prepended_fields {
+        let output_field = output_field_iter.next().ok_or_else(|| {
+            DfError::ExpressionLowering("Output schema has fewer fields than transform produces".to_string())
+        })?;
+        
+        struct_args.push(lit(output_field.name().to_string()));
+        let lowered = lower_expression(prepend_expr.as_ref(), Some(output_field.data_type()), input_schema)?;
+        struct_args.push(lowered);
+    }
+
+    // 2. Iterate over INPUT schema fields and apply transforms
+    if let Some(input_struct) = source_struct {
+        let field_transforms = &transform.field_transforms;
+
+        for input_field in input_struct.fields() {
+            let field_name = input_field.name();
+            let ft = field_transforms.get(field_name);
+
+            // Check if this field is dropped (is_replace=true with empty exprs)
+            if ft.is_some_and(|t| t.is_replace && t.exprs.is_empty()) {
+                // Field is dropped - don't emit anything, don't consume output field
+                continue;
+            }
+
+            // Check if this field is replaced (is_replace=true with exprs)
+            if let Some(t) = ft {
+                if t.is_replace && !t.exprs.is_empty() {
+                    // Field is replaced - emit replacement expressions
+                    for replace_expr in &t.exprs {
+                        let output_field = output_field_iter.next().ok_or_else(|| {
+                            DfError::ExpressionLowering("Output schema has fewer fields than transform produces".to_string())
+                        })?;
+                        
+                        struct_args.push(lit(output_field.name().to_string()));
+                        let lowered = lower_expression(replace_expr.as_ref(), Some(output_field.data_type()), input_schema)?;
+                        struct_args.push(lowered);
+                    }
+                    continue;
+                }
+            }
+
+            // Field passes through unchanged
+            let output_field = output_field_iter.next().ok_or_else(|| {
+                DfError::ExpressionLowering("Output schema has fewer fields than transform produces".to_string())
+            })?;
+
+            struct_args.push(lit(output_field.name().to_string()));
+            let source_expr = match &source_base {
+                Some(base) => {
+                    datafusion_functions::core::expr_fn::get_field(base.clone(), field_name.to_string())
+                }
+                None => {
+                    col(field_name)
+                }
+            };
+            struct_args.push(source_expr);
+
+            // Check if there are insertions after this field (is_replace=false with exprs)
+            if let Some(t) = ft {
+                if !t.is_replace {
+                    for insert_expr in &t.exprs {
+                        let output_field = output_field_iter.next().ok_or_else(|| {
+                            DfError::ExpressionLowering("Output schema has fewer fields than transform produces".to_string())
+                        })?;
+                        
+                        struct_args.push(lit(output_field.name().to_string()));
+                        let lowered = lower_expression(insert_expr.as_ref(), Some(output_field.data_type()), input_schema)?;
+                        struct_args.push(lowered);
+                    }
+                }
+            }
+        }
+    } else {
+        // No input schema available - fall back to output-schema-based iteration
+        // This is the old behavior for backwards compatibility
+        for field in output_field_iter {
+            let field_name = field.name();
+            struct_args.push(lit(field_name.to_string()));
+
+            // Check if this is a transformed field
+            if let Some(ft) = transform.field_transforms.get(field_name) {
+                if ft.is_replace && !ft.exprs.is_empty() {
+                    let expr = &ft.exprs[0];
+                    let lowered = lower_expression(expr.as_ref(), Some(field.data_type()), None)?;
+                    struct_args.push(lowered);
+                    continue;
+                }
+            }
+
+            // Pass-through field
+            let source_expr = match &source_base {
+                Some(base) => {
+                    datafusion_functions::core::expr_fn::get_field(base.clone(), field_name.to_string())
+                }
+                None => {
+                    col(field_name)
+                }
+            };
+            struct_args.push(source_expr);
+        }
+    }
+
+    // Build the named_struct
+    Ok(datafusion_functions::core::expr_fn::named_struct(struct_args))
+}
+
+/// Lower an identity transform (no modifications, just schema application).
+fn lower_identity_transform(
+    transform: &Transform,
+    output_struct: &StructType,
+) -> DfResult<Expr> {
+    let source_base: Option<Expr> = transform.input_path.as_ref().map(|path| lower_column(path));
+
+    let mut struct_args = Vec::new();
+
+    for field in output_struct.fields() {
+        let field_name = field.name();
+        struct_args.push(lit(field_name.to_string()));
+
+        let source_expr = match &source_base {
+            Some(base) => {
+                datafusion_functions::core::expr_fn::get_field(base.clone(), field_name.to_string())
+            }
+            None => {
+                col(field_name)
+            }
+        };
+        struct_args.push(source_expr);
+    }
+
+    Ok(datafusion_functions::core::expr_fn::named_struct(struct_args))
 }
 
 // Helper: lower kernel Scalar to DataFusion ScalarValue + lit()
@@ -134,8 +397,9 @@ fn lower_scalar(scalar: &Scalar) -> DfResult<Expr> {
     Ok(lit(value))
 }
 
-// Helper: lower kernel ColumnName to DataFusion column reference
-fn lower_column(col_name: &ColumnName) -> Expr {
+/// Lower a kernel ColumnName to a DataFusion column reference expression.
+/// Handles nested column paths like ["add", "path"] -> get_field(col("add"), "path").
+pub fn lower_column(col_name: &ColumnName) -> Expr {
     // ColumnName can be nested (e.g. ["add", "path"] for accessing add.path)
     let path = col_name.as_ref();
     if path.is_empty() {
@@ -157,12 +421,12 @@ fn lower_column(col_name: &ColumnName) -> Expr {
 }
 
 // Helper: convert kernel DataType to Arrow DataType
-fn kernel_type_to_arrow(dt: &delta_kernel::schema::DataType) -> DfResult<arrow::datatypes::DataType> {
-    use delta_kernel::schema::{DataType as KernelType, PrimitiveType};
+fn kernel_type_to_arrow(dt: &DataType) -> DfResult<arrow::datatypes::DataType> {
+    use delta_kernel::schema::PrimitiveType;
     use arrow::datatypes::DataType as ArrowType;
     
     Ok(match dt {
-        KernelType::Primitive(prim) => match prim {
+        DataType::Primitive(prim) => match prim {
             PrimitiveType::Boolean => ArrowType::Boolean,
             PrimitiveType::Byte => ArrowType::Int8,
             PrimitiveType::Short => ArrowType::Int16,
@@ -179,7 +443,7 @@ fn kernel_type_to_arrow(dt: &delta_kernel::schema::DataType) -> DfResult<arrow::
                 ArrowType::Decimal128(dec_type.precision(), dec_type.scale() as i8)
             }
         },
-        KernelType::Struct(_) | KernelType::Array(_) | KernelType::Map(_) | KernelType::Variant(_) => {
+        DataType::Struct(_) | DataType::Array(_) | DataType::Map(_) | DataType::Variant(_) => {
             return Err(DfError::ExpressionLowering(
                 format!("Complex type {:?} not yet supported in expression lowering", dt)
             ));
@@ -189,10 +453,10 @@ fn kernel_type_to_arrow(dt: &delta_kernel::schema::DataType) -> DfResult<arrow::
 
 // Unary expression lowering
 fn lower_unary_expression(op: UnaryExpressionOp, expr: &Expression) -> DfResult<Expr> {
-    let inner = lower_expression(expr)?;
+    let _inner = lower_expression(expr, None, None)?;
     match op {
         UnaryExpressionOp::ToJson => {
-            // Map to DataFusion's to_json function if available
+            // TODO: Map to DataFusion's to_json function when available
             Err(DfError::Unsupported("ToJson unary op not yet implemented".to_string()))
         }
     }
@@ -204,8 +468,8 @@ fn lower_binary_expression(
     left: &Expression,
     right: &Expression,
 ) -> DfResult<Expr> {
-    let left_expr = lower_expression(left)?;
-    let right_expr = lower_expression(right)?;
+    let left_expr = lower_expression(left, None, None)?;
+    let right_expr = lower_expression(right, None, None)?;
     
     let df_op = match op {
         BinaryExpressionOp::Plus => Operator::Plus,
@@ -228,7 +492,7 @@ fn lower_variadic_expression(
 ) -> DfResult<Expr> {
     match op {
         VariadicExpressionOp::Coalesce => {
-            let args: Result<Vec<_>, _> = exprs.iter().map(lower_expression).collect();
+            let args: Result<Vec<_>, _> = exprs.iter().map(|e| lower_expression(e, None, None)).collect();
             // Build nested CASE WHEN: COALESCE(a, b, c) -> CASE WHEN a IS NOT NULL THEN a ... ELSE c
             let args = args?;
             if args.is_empty() {
@@ -254,7 +518,7 @@ fn lower_variadic_expression(
 
 // Unary predicate lowering
 fn lower_unary_predicate(op: UnaryPredicateOp, expr: &Expression) -> DfResult<Expr> {
-    let inner = lower_expression(expr)?;
+    let inner = lower_expression(expr, None, None)?;
     match op {
         UnaryPredicateOp::IsNull => Ok(Expr::IsNull(Box::new(inner))),
     }
@@ -266,8 +530,8 @@ fn lower_binary_predicate(
     left: &Expression,
     right: &Expression,
 ) -> DfResult<Expr> {
-    let left_expr = lower_expression(left)?;
-    let right_expr = lower_expression(right)?;
+    let left_expr = lower_expression(left, None, None)?;
+    let right_expr = lower_expression(right, None, None)?;
     
     match op {
         BinaryPredicateOp::Equal => {
@@ -307,7 +571,7 @@ fn lower_binary_predicate(
             match right {
                 Expression::Literal(Scalar::Array(array_data)) => {
                     let list: Vec<Expr> = array_data.array_elements().iter()
-                        .map(|s| lower_expression(&Expression::Literal(s.clone())))
+                        .map(|s| lower_expression(&Expression::Literal(s.clone()), None, None))
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(Expr::InList(datafusion_expr::expr::InList {
                         expr: Box::new(left_expr),

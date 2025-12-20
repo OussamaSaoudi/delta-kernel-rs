@@ -1,6 +1,22 @@
 //! Async streaming driver for state machines.
+//!
+//! This module provides async drivers for executing Delta kernel state machines
+//! via DataFusion. It supports:
+//!
+//! - **Snapshot construction**: `build_snapshot_async`, `build_snapshot_at_version_async`
+//! - **Scan metadata streaming**: `scan_metadata_stream_async`
+//! - **Generic state machine execution**: `execute_state_machine_async`, `results_stream`
+//!
+//! # Sink Handling
+//!
+//! State machine plans can have two sink types:
+//! - **Results sink**: Yields `FilteredEngineData` batches to the caller
+//! - **Drop sink**: Drains silently for side effects (e.g., dedup state accumulation)
+//!
+//! The drivers in this module automatically handle both sink types correctly.
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use futures::Stream;
 use futures::StreamExt;
@@ -8,6 +24,7 @@ use futures::StreamExt;
 use delta_kernel::plans::state_machines::{StateMachine, AdvanceResult, SnapshotStateMachine};
 use delta_kernel::plans::DeclarativePlanNode;
 use delta_kernel::engine_data::FilteredEngineData;
+use delta_kernel::scan::{ScanMetadata, ScanState, ScanStateMachine, TransformComputer};
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::DeltaResult;
 
@@ -304,5 +321,102 @@ pub async fn build_snapshot_at_version_async(
 ) -> DeltaResult<Snapshot> {
     let sm = SnapshotStateMachine::with_version(table_root, version)?;
     execute_state_machine_async(executor, sm).await
+}
+
+// =============================================================================
+// Scan Metadata Streaming
+// =============================================================================
+
+/// Create an async stream of [`ScanMetadata`] from a [`ScanState`].
+///
+/// This is the async equivalent of [`Scan::scan_metadata`] but uses DataFusion
+/// for plan execution instead of the sync kernel engine.
+///
+/// Takes **ownership** of `ScanState` and `Arc<DataFusionExecutor>` to avoid
+/// lifetime complications. The stream owns all its data.
+///
+/// # Usage
+///
+/// ```ignore
+/// use delta_kernel_datafusion::{DataFusionExecutor, scan_metadata_stream_async};
+/// use futures::StreamExt;
+/// use std::sync::Arc;
+///
+/// let executor = Arc::new(DataFusionExecutor::new()?);
+/// let snapshot = build_snapshot_async(&executor, table_url).await?;
+/// let scan = snapshot.scan_builder().build()?;
+/// let scan_state = scan.into_scan_state()?;
+///
+/// let mut stream = scan_metadata_stream_async(scan_state, executor);
+/// while let Some(result) = stream.next().await {
+///     let scan_metadata = result?;
+///     // Process scan_metadata.scan_files and scan_metadata.scan_file_transforms
+/// }
+/// ```
+pub fn scan_metadata_stream_async(
+    scan_state: ScanState,
+    executor: Arc<DataFusionExecutor>,
+) -> impl Stream<Item = DeltaResult<ScanMetadata>> + Send {
+    let ScanState { state_machine, transform_computer } = scan_state;
+    
+    async_stream::try_stream! {
+        let mut sm = state_machine;
+        let computer = transform_computer;
+        
+        loop {
+            let plan = sm.get_plan()?;
+            
+            // Execute the plan via DataFusion
+            let df_stream = executor.execute_to_stream(plan.clone()).await
+                .map_err(|e| delta_kernel::Error::generic(e.to_string()))?;
+            
+            if plan.is_results_sink() {
+                // Results sink: process batches and yield ScanMetadata
+                futures::pin_mut!(df_stream);
+                while let Some(batch_result) = df_stream.next().await {
+                    let batch = batch_result
+                        .map_err(|e| delta_kernel::Error::generic(e.to_string()))?;
+                    
+                    // Convert RecordBatch to FilteredEngineData
+                    let engine_data: Box<dyn delta_kernel::EngineData> = 
+                        Box::new(delta_kernel::engine::arrow_data::ArrowEngineData::new(batch));
+                    let len = engine_data.len();
+                    let filtered = delta_kernel::engine_data::FilteredEngineData::try_new(
+                        engine_data,
+                        vec![true; len],
+                    )?;
+                    
+                    // Skip empty batches (all rows filtered)
+                    if !filtered.selection_vector().contains(&true) {
+                        continue;
+                    }
+                    
+                    // Compute transforms for this batch
+                    let transforms = computer.compute_transforms(filtered.data())?;
+                    
+                    // Create ScanMetadata combining batch + transforms
+                    let scan_metadata = ScanMetadata::from_filtered_with_transforms(
+                        filtered,
+                        transforms,
+                    )?;
+                    
+                    yield scan_metadata;
+                }
+            } else {
+                // Drop sink: drain for side effects
+                futures::pin_mut!(df_stream);
+                while let Some(batch_result) = df_stream.next().await {
+                    let _batch = batch_result
+                        .map_err(|e| delta_kernel::Error::generic(e.to_string()))?;
+                }
+            }
+            
+            // Advance the state machine
+            match sm.advance(Ok(plan))? {
+                AdvanceResult::Continue => {}
+                AdvanceResult::Done(_) => break,
+            }
+        }
+    }
 }
 

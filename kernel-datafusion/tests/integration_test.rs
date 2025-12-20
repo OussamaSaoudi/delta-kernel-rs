@@ -5,13 +5,21 @@ use std::path::PathBuf;
 use std::collections::HashSet;
 use delta_kernel::plans::{DeclarativePlanNode, ScanNode, FileType, FilterByExpressionNode, SelectNode, FilterByKDF, ParseJsonNode, FirstNonNullNode};
 use delta_kernel::schema::{StructType, StructField, DataType};
-use delta_kernel::{Expression, FileMeta, Predicate};
+use delta_kernel::{Expression, FileMeta, Predicate, DeltaResult};
 use delta_kernel::log_replay::FileActionKey;
+use delta_kernel::scan::{ScanMetadata, ResultsDriver};
+use delta_kernel::engine::arrow_data::ArrowEngineData;
+use delta_kernel::engine::default::DefaultEngine;
+use delta_kernel::engine::default::storage::store_from_url;
+use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
+use delta_kernel::snapshot::Snapshot;
 use datafusion::prelude::SessionContext;
 use datafusion::execution::TaskContext;
 use datafusion::assert_batches_eq;
 use datafusion::physical_plan::SendableRecordBatchStream;
-use arrow::array::{StringArray, Int64Array, Array, RecordBatch};
+use arrow::array::{StringArray, Int64Array, Array, RecordBatch, BooleanArray};
+use arrow::compute::{concat_batches, filter_record_batch};
+use arrow::util::pretty::pretty_format_batches;
 use futures::TryStreamExt;
 
 // ============================================================================
@@ -26,6 +34,244 @@ async fn collect_batches(stream: SendableRecordBatchStream) -> Vec<RecordBatch> 
 // Path to real Delta table test data
 fn test_data_path(relative_path: &str) -> PathBuf {
     PathBuf::from(format!("../acceptance/tests/dat/out/reader_tests/generated/{}", relative_path))
+}
+
+// ============================================================================
+// ScanMetadata Comparison Helpers
+// ============================================================================
+
+/// Extract selected rows from ScanMetadata and concatenate into a single batch.
+/// 
+/// This applies the selection vector to filter only selected rows, then concatenates
+/// all batches. This allows comparing results across executors that may have different
+/// batch boundaries.
+fn extract_selected_rows(metadata_list: &[ScanMetadata]) -> RecordBatch {
+    let batches: Vec<RecordBatch> = metadata_list
+        .iter()
+        .map(|meta| {
+            let batch = meta.scan_files.data()
+                .any_ref()
+                .downcast_ref::<ArrowEngineData>()
+                .expect("Should be ArrowEngineData")
+                .record_batch()
+                .clone();
+            
+            // Apply selection vector to filter only selected rows
+            let selection = BooleanArray::from(meta.scan_files.selection_vector().to_vec());
+            filter_record_batch(&batch, &selection).expect("filter should succeed")
+        })
+        .filter(|b| b.num_rows() > 0)
+        .collect();
+    
+    if batches.is_empty() {
+        // Return empty batch with correct schema if available
+        if let Some(first) = metadata_list.first() {
+            let batch = first.scan_files.data()
+                .any_ref()
+                .downcast_ref::<ArrowEngineData>()
+                .expect("Should be ArrowEngineData")
+                .record_batch();
+            return RecordBatch::new_empty(batch.schema());
+        }
+        panic!("No metadata to extract schema from");
+    }
+    concat_batches(&batches[0].schema(), &batches).expect("concat should succeed")
+}
+
+/// Compare ScanMetadata results from DataFusion vs DefaultEngine.
+///
+/// This function:
+/// 1. Runs scan_metadata via DefaultEngine (ground truth)
+/// 2. Runs scan_metadata_stream_async via DataFusion
+/// 3. Extracts selected rows from both and compares contents
+async fn compare_scan_metadata_results(table_url: url::Url) -> DeltaResult<()> {
+    use delta_kernel_datafusion::{scan_metadata_stream_async, build_snapshot_async, DataFusionExecutor};
+    use futures::StreamExt;
+    
+    // === DefaultEngine ground truth ===
+    let store = store_from_url(&table_url)?;
+    let default_engine: Arc<DefaultEngine<TokioBackgroundExecutor>> = Arc::new(DefaultEngine::new(store));
+    let snapshot = Snapshot::builder_for(table_url.clone())
+        .build(default_engine.as_ref())?;
+    let scan = snapshot.scan_builder().build()?;
+    let expected: Vec<ScanMetadata> = scan.scan_metadata(default_engine.as_ref())?
+        .collect::<DeltaResult<Vec<_>>>()?;
+    
+    // === DataFusion path ===
+    let executor = Arc::new(DataFusionExecutor::new()
+        .expect("DataFusionExecutor creation should succeed"));
+    let df_snapshot = Arc::new(build_snapshot_async(&executor, table_url).await?);
+    let df_scan = df_snapshot.scan_builder().build()?;
+    let scan_state = df_scan.into_scan_state()?;
+    
+    let mut stream = std::pin::pin!(scan_metadata_stream_async(scan_state, executor));
+    let mut actual: Vec<ScanMetadata> = Vec::new();
+    
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(meta) => actual.push(meta),
+            Err(e) => return Err(e),  // Fail on any error - no silent passes
+        }
+    }
+    
+    // === Compare CONTENTS (not batch counts) ===
+    let expected_batch = extract_selected_rows(&expected);
+    let actual_batch = extract_selected_rows(&actual);
+    
+    // Format both batches as strings for comparison
+    let expected_formatted = pretty_format_batches(&[expected_batch.clone()])
+        .expect("format should succeed")
+        .to_string();
+    let actual_formatted = pretty_format_batches(&[actual_batch.clone()])
+        .expect("format should succeed")
+        .to_string();
+    
+    // Print the comparison results
+    println!("\n=== DefaultEngine ({} rows) ===\n{}", expected_batch.num_rows(), expected_formatted);
+    println!("\n=== DataFusion ({} rows) ===\n{}", actual_batch.num_rows(), actual_formatted);
+    
+    // Compare the formatted output
+    assert_eq!(
+        expected_formatted,
+        actual_formatted,
+        "Scan metadata contents mismatch.\n\nExpected (DefaultEngine):\n{}\n\nActual (DataFusion):\n{}",
+        expected_formatted,
+        actual_formatted
+    );
+    
+    // Additionally verify row counts match
+    assert_eq!(
+        expected_batch.num_rows(), 
+        actual_batch.num_rows(),
+        "Total selected row count mismatch"
+    );
+    
+    Ok(())
+}
+
+/// Performance comparison between DefaultEngine and DataFusion executor.
+/// 
+/// This function runs both approaches with detailed timing breakdown.
+async fn benchmark_scan_metadata(table_url: url::Url, iterations: usize) -> DeltaResult<()> {
+    use delta_kernel_datafusion::{scan_metadata_stream_async, build_snapshot_async, DataFusionExecutor};
+    use futures::StreamExt;
+    use std::time::Instant;
+    
+    println!("\n=== Performance Benchmark ({} iterations) ===", iterations);
+    
+    // === Warm-up: Build engines once ===
+    let store = store_from_url(&table_url)?;
+    let default_engine: Arc<DefaultEngine<TokioBackgroundExecutor>> = Arc::new(DefaultEngine::new(store));
+    let executor = Arc::new(DataFusionExecutor::new().expect("DataFusionExecutor creation should succeed"));
+    
+    // === Detailed Benchmark DefaultEngine ===
+    let mut de_snapshot_times: Vec<u128> = Vec::new();
+    let mut de_scan_build_times: Vec<u128> = Vec::new();
+    let mut de_execute_times: Vec<u128> = Vec::new();
+    
+    for _ in 0..iterations {
+        let t0 = Instant::now();
+        let snapshot = Snapshot::builder_for(table_url.clone())
+            .build(default_engine.as_ref())?;
+        de_snapshot_times.push(t0.elapsed().as_micros());
+        
+        let t1 = Instant::now();
+        let scan = snapshot.scan_builder().build()?;
+        de_scan_build_times.push(t1.elapsed().as_micros());
+        
+        let t2 = Instant::now();
+        let _results: Vec<ScanMetadata> = scan.scan_metadata(default_engine.as_ref())?
+            .collect::<DeltaResult<Vec<_>>>()?;
+        de_execute_times.push(t2.elapsed().as_micros());
+    }
+    
+    // === Detailed Benchmark DataFusion ===
+    let mut df_snapshot_times: Vec<u128> = Vec::new();
+    let mut df_scan_build_times: Vec<u128> = Vec::new();
+    let mut df_into_state_times: Vec<u128> = Vec::new();
+    let mut df_execute_times: Vec<u128> = Vec::new();
+    
+    for _ in 0..iterations {
+        let t0 = Instant::now();
+        let df_snapshot = Arc::new(build_snapshot_async(&executor, table_url.clone()).await?);
+        df_snapshot_times.push(t0.elapsed().as_micros());
+        
+        let t1 = Instant::now();
+        let df_scan = df_snapshot.scan_builder().build()?;
+        df_scan_build_times.push(t1.elapsed().as_micros());
+        
+        let t2 = Instant::now();
+        let scan_state = df_scan.into_scan_state()?;
+        df_into_state_times.push(t2.elapsed().as_micros());
+        
+        let t3 = Instant::now();
+        let mut stream = std::pin::pin!(scan_metadata_stream_async(scan_state, executor.clone()));
+        let mut _results: Vec<ScanMetadata> = Vec::new();
+        while let Some(result) = stream.next().await {
+            _results.push(result?);
+        }
+        df_execute_times.push(t3.elapsed().as_micros());
+    }
+    
+    // === Calculate averages ===
+    let avg = |v: &[u128]| v.iter().sum::<u128>() / v.len() as u128;
+    
+    let de_total = avg(&de_snapshot_times) + avg(&de_scan_build_times) + avg(&de_execute_times);
+    let df_total = avg(&df_snapshot_times) + avg(&df_scan_build_times) + avg(&df_into_state_times) + avg(&df_execute_times);
+    
+    println!("\n┌─────────────────────┬──────────────┬──────────────┐");
+    println!("│ Phase               │ DefaultEngine│  DataFusion  │");
+    println!("├─────────────────────┼──────────────┼──────────────┤");
+    println!("│ build_snapshot      │ {:>8} µs  │ {:>8} µs  │", avg(&de_snapshot_times), avg(&df_snapshot_times));
+    println!("│ scan_builder.build  │ {:>8} µs  │ {:>8} µs  │", avg(&de_scan_build_times), avg(&df_scan_build_times));
+    println!("│ into_scan_state     │ {:>8}     │ {:>8} µs  │", "N/A", avg(&df_into_state_times));
+    println!("│ execute (stream)    │ {:>8} µs  │ {:>8} µs  │", avg(&de_execute_times), avg(&df_execute_times));
+    println!("├─────────────────────┼──────────────┼──────────────┤");
+    println!("│ TOTAL               │ {:>8} µs  │ {:>8} µs  │", de_total, df_total);
+    println!("└─────────────────────┴──────────────┴──────────────┘");
+    println!("\nRatio: {:.2}x ({})", 
+        de_total as f64 / df_total as f64,
+        if de_total < df_total { "DefaultEngine faster" } else { "DataFusion faster" }
+    );
+    
+    Ok(())
+}
+
+/// Performance benchmark test for scan_metadata operations.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_performance_comparison() {
+    let table_path = test_data_path("basic_append/delta");
+    assert!(table_path.exists(), "Delta table should exist: {:?}", table_path);
+    
+    let mut table_url = url::Url::from_file_path(table_path.canonicalize().unwrap()).unwrap();
+    if !table_url.path().ends_with('/') {
+        table_url.set_path(&format!("{}/", table_url.path()));
+    }
+    
+    println!("\n--- basic_append ---");
+    benchmark_scan_metadata(table_url, 5).await.expect("Benchmark should succeed");
+    
+    // Also benchmark a larger table if available
+    let partitioned_path = test_data_path("basic_partitioned/delta");
+    if partitioned_path.exists() {
+        let mut partitioned_url = url::Url::from_file_path(partitioned_path.canonicalize().unwrap()).unwrap();
+        if !partitioned_url.path().ends_with('/') {
+            partitioned_url.set_path(&format!("{}/", partitioned_url.path()));
+        }
+        println!("\n--- basic_partitioned ---");
+        benchmark_scan_metadata(partitioned_url, 5).await.expect("Benchmark should succeed");
+    }
+    
+    // Checkpoint table
+    let checkpoint_path = test_data_path("with_checkpoint/delta");
+    if checkpoint_path.exists() {
+        let mut checkpoint_url = url::Url::from_file_path(checkpoint_path.canonicalize().unwrap()).unwrap();
+        if !checkpoint_url.path().ends_with('/') {
+            checkpoint_url.set_path(&format!("{}/", checkpoint_url.path()));
+        }
+        println!("\n--- with_checkpoint ---");
+        benchmark_scan_metadata(checkpoint_url, 5).await.expect("Benchmark should succeed");
+    }
 }
 
 // ============================================================================
@@ -198,15 +444,16 @@ async fn test_real_parquet_with_projection_exact_columns() {
     let batches = collect_batches(stream).await;
     
     // SELECT letter, number (2 columns, a_float dropped)
+    // Column names come from the output_schema field names
     assert_batches_eq!(
         &[
-            "+-------+-------+",
-            "| col_0 | col_1 |",
-            "+-------+-------+",
-            "| a     | 1     |",
-            "| b     | 2     |",
-            "| c     | 3     |",
-            "+-------+-------+",
+            "+--------+--------+",
+            "| letter | number |",
+            "+--------+--------+",
+            "| a      | 1      |",
+            "| b      | 2      |",
+            "| c      | 3      |",
+            "+--------+--------+",
         ],
         &batches
     );
@@ -264,14 +511,15 @@ async fn test_real_parquet_composite_exact_results() {
     
     // SELECT letter WHERE number > 1
     // Original: [(a,1), (b,2), (c,3)] -> Filtered: [(b,2), (c,3)] -> Projected: [b, c]
+    // Column name comes from the output_schema field name
     assert_batches_eq!(
         &[
-            "+-------+",
-            "| col_0 |",
-            "+-------+",
-            "| b     |",
-            "| c     |",
-            "+-------+",
+            "+--------+",
+            "| letter |",
+            "+--------+",
+            "| b      |",
+            "| c      |",
+            "+--------+",
         ],
         &batches
     );
@@ -337,15 +585,241 @@ async fn test_real_parquet_with_transform_expressions_exact_results() {
     // SELECT number * 10, a_float + 100.0
     // Original: [(1, 1.1), (2, 2.2), (3, 3.3)]
     // Transformed: [(10, 101.1), (20, 102.2), (30, 103.3)]
+    // Column names come from the output_schema field names
     assert_batches_eq!(
         &[
-            "+-------+-------+",
-            "| col_0 | col_1 |",
-            "+-------+-------+",
-            "| 10    | 101.1 |",
-            "| 20    | 102.2 |",
-            "| 30    | 103.3 |",
-            "+-------+-------+",
+            "+------------+----------------+",
+            "| number_x10 | float_plus_100 |",
+            "+------------+----------------+",
+            "| 10         | 101.1          |",
+            "| 20         | 102.2          |",
+            "| 30         | 103.3          |",
+            "+------------+----------------+",
+        ],
+        &batches
+    );
+}
+
+/// Test 5b: Expression::Transform with insert and replace operations
+///
+/// This tests the Transform expression type, which efficiently represents sparse
+/// schema modifications. Transform expressions are FLATTENED in SelectNode, producing
+/// individual columns instead of a nested struct.
+///
+/// Given input schema (letter, number, a_float), we:
+/// - Replace `letter` with the literal string "hello"
+/// - Keep `number` as pass-through
+/// - Insert a new column `inserted_val` (literal 42) after `number`
+/// - Drop `a_float`
+///
+/// Input:  (letter: String, number: Long, a_float: Double)
+/// Output: (letter: String, number: Long, inserted_val: Long)
+#[tokio::test]
+async fn test_expression_transform_insert_and_replace() {
+    use delta_kernel::expressions::Transform;
+    
+    let file_path = test_data_path("basic_append/delta/part-00000-c9f44819-b06d-45dd-b33d-ae9aa1b96909-c000.snappy.parquet");
+    assert!(file_path.exists(), "Real Delta table file should exist");
+    
+    let scan_node = ScanNode {
+        file_type: FileType::Parquet,
+        files: vec![FileMeta {
+            location: url::Url::parse(&format!("file://{}", file_path.canonicalize().unwrap().display())).unwrap(),
+            size: std::fs::metadata(&file_path).unwrap().len(),
+            last_modified: 0,
+        }],
+        schema: basic_append_schema(),
+    };
+    
+    // Build the Transform expression:
+    // - Replace "letter" with literal "hello"
+    // - Pass through "number" unchanged
+    // - Insert literal 42 after "number"
+    // - Drop "a_float" (replace with nothing)
+    let transform = Transform::new_top_level()
+        .with_replaced_field("letter", Arc::new(Expression::literal("hello")))
+        .with_inserted_field(Some("number"), Arc::new(Expression::literal(42i64)))
+        .with_dropped_field("a_float");
+    
+    let transform_expr = Expression::Transform(transform);
+    
+    // Output schema: flattened columns (not a nested struct)
+    let output_schema = Arc::new(StructType::new_unchecked(vec![
+        StructField::new("letter", DataType::STRING, true),
+        StructField::new("number", DataType::LONG, true),
+        StructField::new("inserted_val", DataType::LONG, true),
+    ]));
+    
+    let select_node = SelectNode {
+        columns: vec![Arc::new(transform_expr)],
+        output_schema: output_schema.clone(),
+    };
+    
+    let plan = DeclarativePlanNode::Select {
+        child: Box::new(DeclarativePlanNode::Scan(scan_node)),
+        node: select_node,
+    };
+    
+    let ctx = SessionContext::new();
+    let exec_plan = delta_kernel_datafusion::compile::compile_plan(&plan, &ctx.state())
+        .expect("Transform expression should compile");
+    
+    let task_ctx = Arc::new(TaskContext::default());
+    let stream = exec_plan.execute(0, task_ctx).unwrap();
+    let batches = collect_batches(stream).await;
+    
+    // Input: [(a,1,1.1), (b,2,2.2), (c,3,3.3)]
+    // After transform (flattened to individual columns):
+    //   letter -> "hello" (replaced)
+    //   number -> pass-through (1, 2, 3)
+    //   inserted_val -> 42 (inserted after number)
+    //   a_float -> dropped
+    assert_batches_eq!(
+        &[
+            "+--------+--------+--------------+",
+            "| letter | number | inserted_val |",
+            "+--------+--------+--------------+",
+            "| hello  | 1      | 42           |",
+            "| hello  | 2      | 42           |",
+            "| hello  | 3      | 42           |",
+            "+--------+--------+--------------+",
+        ],
+        &batches
+    );
+}
+
+/// Test 5c: Expression::Transform with prepended fields
+///
+/// Tests prepending new fields before all existing fields.
+/// Transform is flattened to individual columns.
+///
+/// Input:  (letter: String, number: Long, a_float: Double)
+/// Output: (prepended_col: String, letter: String, number: Long, a_float: Double)
+#[tokio::test]
+async fn test_expression_transform_with_prepend() {
+    use delta_kernel::expressions::Transform;
+    
+    let file_path = test_data_path("basic_append/delta/part-00000-c9f44819-b06d-45dd-b33d-ae9aa1b96909-c000.snappy.parquet");
+    assert!(file_path.exists(), "Real Delta table file should exist");
+    
+    let scan_node = ScanNode {
+        file_type: FileType::Parquet,
+        files: vec![FileMeta {
+            location: url::Url::parse(&format!("file://{}", file_path.canonicalize().unwrap().display())).unwrap(),
+            size: std::fs::metadata(&file_path).unwrap().len(),
+            last_modified: 0,
+        }],
+        schema: basic_append_schema(),
+    };
+    
+    // Build the Transform expression:
+    // - Prepend a new column with literal "FIRST"
+    // - Pass through all other columns unchanged
+    let transform = Transform::new_top_level()
+        .with_inserted_field(None::<String>, Arc::new(Expression::literal("FIRST")));
+    
+    let transform_expr = Expression::Transform(transform);
+    
+    // Output schema: flattened columns with prepended_col first
+    let output_schema = Arc::new(StructType::new_unchecked(vec![
+        StructField::new("prepended_col", DataType::STRING, true),
+        StructField::new("letter", DataType::STRING, true),
+        StructField::new("number", DataType::LONG, true),
+        StructField::new("a_float", DataType::DOUBLE, true),
+    ]));
+    
+    let select_node = SelectNode {
+        columns: vec![Arc::new(transform_expr)],
+        output_schema: output_schema.clone(),
+    };
+    
+    let plan = DeclarativePlanNode::Select {
+        child: Box::new(DeclarativePlanNode::Scan(scan_node)),
+        node: select_node,
+    };
+    
+    let ctx = SessionContext::new();
+    let exec_plan = delta_kernel_datafusion::compile::compile_plan(&plan, &ctx.state())
+        .expect("Transform with prepend should compile");
+    
+    let task_ctx = Arc::new(TaskContext::default());
+    let stream = exec_plan.execute(0, task_ctx).unwrap();
+    let batches = collect_batches(stream).await;
+    
+    // Input: [(a,1,1.1), (b,2,2.2), (c,3,3.3)]
+    // After transform: [("FIRST",a,1,1.1), ("FIRST",b,2,2.2), ("FIRST",c,3,3.3)]
+    assert_batches_eq!(
+        &[
+            "+---------------+--------+--------+---------+",
+            "| prepended_col | letter | number | a_float |",
+            "+---------------+--------+--------+---------+",
+            "| FIRST         | a      | 1      | 1.1     |",
+            "| FIRST         | b      | 2      | 2.2     |",
+            "| FIRST         | c      | 3      | 3.3     |",
+            "+---------------+--------+--------+---------+",
+        ],
+        &batches
+    );
+}
+
+/// Test 5d: Expression::Transform identity (pass-through)
+///
+/// Tests that an identity transform (no modifications) correctly passes all fields.
+/// Identity transforms are also flattened to individual columns.
+#[tokio::test]
+async fn test_expression_transform_identity() {
+    use delta_kernel::expressions::Transform;
+    
+    let file_path = test_data_path("basic_append/delta/part-00000-c9f44819-b06d-45dd-b33d-ae9aa1b96909-c000.snappy.parquet");
+    assert!(file_path.exists(), "Real Delta table file should exist");
+    
+    let scan_node = ScanNode {
+        file_type: FileType::Parquet,
+        files: vec![FileMeta {
+            location: url::Url::parse(&format!("file://{}", file_path.canonicalize().unwrap().display())).unwrap(),
+            size: std::fs::metadata(&file_path).unwrap().len(),
+            last_modified: 0,
+        }],
+        schema: basic_append_schema(),
+    };
+    
+    // Identity transform - no modifications
+    let transform = Transform::new_top_level();
+    assert!(transform.is_identity(), "Should be identity transform");
+    
+    let transform_expr = Expression::Transform(transform);
+    
+    // Output schema is same as input (flattened)
+    let output_schema = basic_append_schema();
+    
+    let select_node = SelectNode {
+        columns: vec![Arc::new(transform_expr)],
+        output_schema: output_schema.clone(),
+    };
+    
+    let plan = DeclarativePlanNode::Select {
+        child: Box::new(DeclarativePlanNode::Scan(scan_node)),
+        node: select_node,
+    };
+    
+    let ctx = SessionContext::new();
+    let exec_plan = delta_kernel_datafusion::compile::compile_plan(&plan, &ctx.state())
+        .expect("Identity transform should compile");
+    
+    let task_ctx = Arc::new(TaskContext::default());
+    let stream = exec_plan.execute(0, task_ctx).unwrap();
+    let batches = collect_batches(stream).await;
+    
+    // Identity transform: output same as input (flattened columns)
+    assert_batches_eq!(
+        &[
+            "+--------+--------+---------+",
+            "| letter | number | a_float |",
+            "+--------+--------+---------+",
+            "| a      | 1      | 1.1     |",
+            "| b      | 2      | 2.2     |",
+            "| c      | 3      | 3.3     |",
+            "+--------+--------+---------+",
         ],
         &batches
     );
@@ -2040,4 +2514,256 @@ async fn test_file_listing_to_log_segment_builder() {
         }
         _ => panic!("Expected LogSegmentBuilder state"),
     }
+}
+
+// ============================================================================
+// SCAN METADATA STREAM TESTS
+// ============================================================================
+
+/// Test: scan_metadata_stream_async produces same results as DefaultEngine for basic_append table.
+///
+/// This test compares the scan metadata from DataFusion executor against
+/// the DefaultEngine ground truth to verify correctness.
+#[tokio::test]
+async fn test_scan_metadata_stream_simple_table() {
+    let table_path = test_data_path("basic_append/delta");
+    assert!(table_path.exists(), "Delta table should exist: {:?}", table_path);
+    
+    // Table URL must end with "/" for join() to work correctly
+    let mut table_url = url::Url::from_file_path(table_path.canonicalize().unwrap()).unwrap();
+    if !table_url.path().ends_with('/') {
+        table_url.set_path(&format!("{}/", table_url.path()));
+    }
+    
+    compare_scan_metadata_results(table_url).await
+        .expect("Scan metadata comparison should succeed");
+}
+
+/// Test: scan_metadata_stream_async produces same results as DefaultEngine for all_primitive_types table.
+///
+/// This test verifies scan metadata correctness for a table with various primitive types.
+#[tokio::test]
+async fn test_scan_metadata_stream_all_primitive_types() {
+    // Use the all_primitive_types table from DAT tests
+    let table_path = test_data_path("all_primitive_types/delta");
+    if !table_path.exists() {
+        println!("Skipping test: all_primitive_types not found");
+        return;
+    }
+    
+    // Table URL must end with "/" for join() to work correctly
+    let mut table_url = url::Url::from_file_path(table_path.canonicalize().unwrap()).unwrap();
+    if !table_url.path().ends_with('/') {
+        table_url.set_path(&format!("{}/", table_url.path()));
+    }
+    
+    compare_scan_metadata_results(table_url).await
+        .expect("Scan metadata comparison should succeed");
+}
+
+/// Test: scan_metadata_stream_async produces same results for with_checkpoint table.
+///
+/// This tests a table that has checkpoints, verifying correct handling of
+/// checkpoint-based snapshots.
+#[tokio::test]
+async fn test_scan_metadata_stream_with_checkpoint() {
+    let table_path = test_data_path("with_checkpoint/delta");
+    if !table_path.exists() {
+        println!("Skipping test: with_checkpoint not found");
+        return;
+    }
+    
+    // Table URL must end with "/" for join() to work correctly
+    let mut table_url = url::Url::from_file_path(table_path.canonicalize().unwrap()).unwrap();
+    if !table_url.path().ends_with('/') {
+        table_url.set_path(&format!("{}/", table_url.path()));
+    }
+    
+    compare_scan_metadata_results(table_url).await
+        .expect("Scan metadata comparison should succeed");
+}
+
+/// Test: scan_metadata_stream_async produces same results for basic_partitioned table.
+///
+/// This tests a partitioned table to verify correct handling of partition values
+/// and transforms.
+#[tokio::test]
+async fn test_scan_metadata_stream_basic_partitioned() {
+    let table_path = test_data_path("basic_partitioned/delta");
+    if !table_path.exists() {
+        println!("Skipping test: basic_partitioned not found");
+        return;
+    }
+    
+    // Table URL must end with "/" for join() to work correctly
+    let mut table_url = url::Url::from_file_path(table_path.canonicalize().unwrap()).unwrap();
+    if !table_url.path().ends_with('/') {
+        table_url.set_path(&format!("{}/", table_url.path()));
+    }
+    
+    compare_scan_metadata_results(table_url).await
+        .expect("Scan metadata comparison should succeed");
+}
+
+/// Test: scan_metadata_stream_async produces same results for multi_partitioned table.
+///
+/// This tests a table with multiple commits including add/remove reconciliation,
+/// verifying correct log replay behavior.
+#[tokio::test]
+async fn test_scan_metadata_stream_multi_partitioned() {
+    let table_path = test_data_path("multi_partitioned/delta");
+    if !table_path.exists() {
+        println!("Skipping test: multi_partitioned not found");
+        return;
+    }
+    
+    // Table URL must end with "/" for join() to work correctly
+    let mut table_url = url::Url::from_file_path(table_path.canonicalize().unwrap()).unwrap();
+    if !table_url.path().ends_with('/') {
+        table_url.set_path(&format!("{}/", table_url.path()));
+    }
+    
+    compare_scan_metadata_results(table_url).await
+        .expect("Scan metadata comparison should succeed");
+}
+
+/// Test: scan_metadata_stream_async produces same results for no_replay table.
+///
+/// This tests a table that has checkpoints and multiple commits, exercising
+/// the full log replay path.
+#[tokio::test]
+async fn test_scan_metadata_stream_no_replay() {
+    let table_path = test_data_path("no_replay/delta");
+    if !table_path.exists() {
+        println!("Skipping test: no_replay not found");
+        return;
+    }
+    
+    // Table URL must end with "/" for join() to work correctly
+    let mut table_url = url::Url::from_file_path(table_path.canonicalize().unwrap()).unwrap();
+    if !table_url.path().ends_with('/') {
+        table_url.set_path(&format!("{}/", table_url.path()));
+    }
+    
+    compare_scan_metadata_results(table_url).await
+        .expect("Scan metadata comparison should succeed");
+}
+
+// ============================================================================
+// DIAGNOSTIC TESTS - Schema Debugging
+// ============================================================================
+
+/// Diagnostic test: Compare output schemas from ScanStateMachine
+/// via DefaultEngine vs DataFusion (WITHOUT TransformComputer).
+///
+/// This isolates the schema mismatch issue by running the state machine
+/// directly and printing the output schema from each executor.
+#[tokio::test]
+async fn test_scan_state_machine_output_schema() {
+    use delta_kernel_datafusion::{results_stream, build_snapshot_async, DataFusionExecutor};
+    use futures::StreamExt;
+    
+    let table_path = test_data_path("basic_append/delta");
+    assert!(table_path.exists(), "Delta table should exist: {:?}", table_path);
+    
+    // Table URL must end with "/" for join() to work correctly
+    let mut table_url = url::Url::from_file_path(table_path.canonicalize().unwrap()).unwrap();
+    if !table_url.path().ends_with('/') {
+        table_url.set_path(&format!("{}/", table_url.path()));
+    }
+    
+    println!("\n=== Schema Diagnostic Test ===\n");
+    
+    // === 1. DefaultEngine path ===
+    println!("--- DefaultEngine ---");
+    let store = store_from_url(&table_url).expect("store_from_url should succeed");
+    let default_engine: Arc<DefaultEngine<TokioBackgroundExecutor>> = Arc::new(DefaultEngine::new(store));
+    let snapshot = Snapshot::builder_for(table_url.clone())
+        .build(default_engine.as_ref())
+        .expect("Snapshot should build");
+    let scan = snapshot.scan_builder().build().expect("Scan should build");
+    
+    // Get state machine via into_scan_state (public API)
+    let scan_state = scan.into_scan_state().expect("into_scan_state should succeed");
+    
+    // Execute via ResultsDriver (sync)
+    let driver = ResultsDriver::new(default_engine.as_ref(), scan_state.state_machine);
+    let mut default_schemas: Vec<String> = Vec::new();
+    let mut default_batch_count = 0;
+    for batch_result in driver {
+        let batch = batch_result.expect("Batch should succeed");
+        let arrow_data = batch.data()
+            .any_ref()
+            .downcast_ref::<ArrowEngineData>()
+            .expect("Should be ArrowEngineData");
+        let record_batch = arrow_data.record_batch();
+        default_batch_count += 1;
+        let schema_str = format!("{:?}", record_batch.schema());
+        println!("  Batch {}: {} rows, schema: {}", default_batch_count, record_batch.num_rows(), schema_str);
+        if !default_schemas.contains(&schema_str) {
+            default_schemas.push(schema_str);
+        }
+    }
+    println!("  Total: {} batches\n", default_batch_count);
+    
+    // === 2. DataFusion path ===
+    println!("--- DataFusion ---");
+    let executor = DataFusionExecutor::new().expect("DataFusionExecutor should create");
+    let df_snapshot = Arc::new(build_snapshot_async(&executor, table_url.clone()).await
+        .expect("Snapshot construction should succeed"));
+    let df_scan = df_snapshot.scan_builder().build().expect("Scan should build");
+    
+    // Get state machine (we need to extract it from ScanState)
+    let scan_state = df_scan.into_scan_state().expect("into_scan_state should succeed");
+    let df_sm = scan_state.state_machine;
+    
+    // Execute via results_stream (async) - WITHOUT TransformComputer
+    let stream = results_stream(df_sm, executor);
+    futures::pin_mut!(stream);
+    
+    let mut df_schemas: Vec<String> = Vec::new();
+    let mut df_batch_count = 0;
+    while let Some(batch_result) = stream.next().await {
+        match batch_result {
+            Ok(batch) => {
+                let arrow_data = batch.data()
+                    .any_ref()
+                    .downcast_ref::<ArrowEngineData>()
+                    .expect("Should be ArrowEngineData");
+                let record_batch = arrow_data.record_batch();
+                df_batch_count += 1;
+                let schema_str = format!("{:?}", record_batch.schema());
+                println!("  Batch {}: {} rows, schema: {}", df_batch_count, record_batch.num_rows(), schema_str);
+                if !df_schemas.contains(&schema_str) {
+                    df_schemas.push(schema_str);
+                }
+            }
+            Err(e) => {
+                println!("  ERROR: {}", e);
+                break;
+            }
+        }
+    }
+    println!("  Total: {} batches\n", df_batch_count);
+    
+    // === 3. Compare schemas ===
+    println!("--- Schema Comparison ---");
+    println!("DefaultEngine unique schemas: {}", default_schemas.len());
+    for (i, s) in default_schemas.iter().enumerate() {
+        println!("  [{}]: {}", i, s);
+    }
+    println!("\nDataFusion unique schemas: {}", df_schemas.len());
+    for (i, s) in df_schemas.iter().enumerate() {
+        println!("  [{}]: {}", i, s);
+    }
+    
+    // Assert they match
+    assert_eq!(
+        default_schemas, df_schemas,
+        "Schemas should match between DefaultEngine and DataFusion"
+    );
+    assert_eq!(
+        default_batch_count, df_batch_count,
+        "Batch counts should match"
+    );
 }

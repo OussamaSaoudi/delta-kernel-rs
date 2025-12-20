@@ -35,21 +35,75 @@ This crate implements a DataFusion-backed async executor for Delta Kernel's `Dec
 - Basic `DataFusionExecutor` with session state management
 - `execute_to_stream` API returning DataFusion `SendableRecordBatchStream`
 - Async `results_stream` function for state machine execution
-- Plan compiler skeleton with placeholder implementations
-- Custom exec node stubs (KDF filter/consumer, file listing, schema query)
-- Expression lowering skeleton
+- **Snapshot construction**: `build_snapshot_async`, `build_snapshot_at_version_async`
+- **Scan metadata streaming**: `scan_metadata_stream_async` with `ScanState` API
+- Plan compiler with native DataFusion lowering for most nodes
+- Custom exec nodes (KDF filter/consumer, file listing, schema query)
+- Expression lowering (partial - Struct expressions TODO)
 
 ### TODO 📋
-- Expression/predicate lowering (kernel → DataFusion `Expr`)
-- Native scan lowering (Parquet/JSON via DF datasources)
-- Native filter/projection lowering
-- Full KDF exec implementations with partitioning policies
-- File listing exec using DF object_store
-- Schema query exec for footer reads
-- ParseJson/FirstNonNull lowering
-- Async integration tests
+- Struct expression lowering
+- Full expression/predicate lowering coverage
+- Performance optimizations
+- Additional integration tests
 
-## Usage Example
+## Usage Examples
+
+### Building a Snapshot
+
+```rust
+use delta_kernel_datafusion::{DataFusionExecutor, build_snapshot_async};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let executor = Arc::new(DataFusionExecutor::new()?);
+    let table_url = url::Url::parse("file:///path/to/delta/table/")?;
+    
+    let snapshot = build_snapshot_async(&executor, table_url).await?;
+    println!("Table version: {}", snapshot.version());
+    
+    Ok(())
+}
+```
+
+### Streaming Scan Metadata
+
+The `scan_metadata_stream_async` API allows async iteration over scan metadata for custom read implementations:
+
+```rust
+use delta_kernel_datafusion::{DataFusionExecutor, build_snapshot_async, scan_metadata_stream_async};
+use futures::StreamExt;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let executor = Arc::new(DataFusionExecutor::new()?);
+    let table_url = url::Url::parse("file:///path/to/delta/table/")?;
+    
+    // Build snapshot and scan
+    let snapshot = Arc::new(build_snapshot_async(&executor, table_url).await?);
+    let scan = snapshot.scan_builder().build()?;
+    
+    // Get scan state (owns state machine + transform computer)
+    let scan_state = scan.into_scan_state()?;
+    
+    // Stream scan metadata asynchronously
+    let mut stream = std::pin::pin!(scan_metadata_stream_async(scan_state, executor));
+    
+    while let Some(result) = stream.next().await {
+        let scan_metadata = result?;
+        // scan_metadata.scan_files - FilteredEngineData with file info
+        // scan_metadata.scan_file_transforms - Transform expressions per file
+        
+        // Process files...
+    }
+    
+    Ok(())
+}
+```
+
+### Low-level State Machine Execution
 
 ```rust
 use delta_kernel_datafusion::{DataFusionExecutor, results_stream};
