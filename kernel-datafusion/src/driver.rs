@@ -15,16 +15,16 @@
 //!
 //! The drivers in this module automatically handle both sink types correctly.
 
+use futures::Stream;
+use futures::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use futures::Stream;
-use futures::StreamExt;
 
-use delta_kernel::plans::state_machines::{StateMachine, AdvanceResult, SnapshotStateMachine};
-use delta_kernel::plans::DeclarativePlanNode;
 use delta_kernel::engine_data::FilteredEngineData;
-use delta_kernel::scan::{ScanMetadata, ScanState, ScanStateMachine, TransformComputer};
+use delta_kernel::plans::state_machines::{AdvanceResult, SnapshotStateMachine, StateMachine};
+use delta_kernel::plans::DeclarativePlanNode;
+use delta_kernel::scan::{ScanMetadata, ScanState};
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::DeltaResult;
 
@@ -42,7 +42,8 @@ use crate::executor::DataFusionExecutor;
 pub struct ResultsStreamDriver<SM: StateMachine> {
     executor: DataFusionExecutor,
     sm: Option<SM>,
-    current_stream: Option<Pin<Box<dyn Stream<Item = Result<FilteredEngineData, delta_kernel::Error>> + Send>>>,
+    current_stream:
+        Option<Pin<Box<dyn Stream<Item = Result<FilteredEngineData, delta_kernel::Error>> + Send>>>,
     current_plan: Option<DeclarativePlanNode>,
     is_done: bool,
 }
@@ -57,7 +58,7 @@ impl<SM: StateMachine> ResultsStreamDriver<SM> {
             is_done: false,
         }
     }
-    
+
     /// Check if the driver has finished.
     pub fn is_done(&self) -> bool {
         self.is_done
@@ -66,12 +67,12 @@ impl<SM: StateMachine> ResultsStreamDriver<SM> {
 
 impl<SM: StateMachine + Unpin> Stream for ResultsStreamDriver<SM> {
     type Item = DeltaResult<FilteredEngineData>;
-    
+
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.is_done {
             return Poll::Ready(None);
         }
-        
+
         loop {
             // 1) If we have an active stream, poll it
             if let Some(stream) = self.current_stream.as_mut() {
@@ -88,7 +89,7 @@ impl<SM: StateMachine + Unpin> Stream for ResultsStreamDriver<SM> {
                         // Stream exhausted: advance the state machine
                         self.current_stream = None;
                         let plan = self.current_plan.take().expect("plan must exist");
-                        
+
                         let sm = self.sm.as_mut().expect("sm must exist");
                         match sm.advance(Ok(plan)) {
                             Ok(AdvanceResult::Continue) => continue,
@@ -104,7 +105,7 @@ impl<SM: StateMachine + Unpin> Stream for ResultsStreamDriver<SM> {
                     }
                 }
             }
-            
+
             // 2) No active stream: get next plan from state machine
             let sm = match self.sm.as_mut() {
                 Some(sm) => sm,
@@ -113,7 +114,7 @@ impl<SM: StateMachine + Unpin> Stream for ResultsStreamDriver<SM> {
                     return Poll::Ready(None);
                 }
             };
-            
+
             let plan = match sm.get_plan() {
                 Ok(p) => p,
                 Err(e) => {
@@ -121,11 +122,11 @@ impl<SM: StateMachine + Unpin> Stream for ResultsStreamDriver<SM> {
                     return Poll::Ready(Some(Err(e)));
                 }
             };
-            
+
             // TODO: For now, we need to execute synchronously. In a real impl, we'd spawn tasks.
             // This is a placeholder that will be filled with proper async execution.
             return Poll::Ready(Some(Err(delta_kernel::Error::generic(
-                "ResultsStreamDriver async execution not yet implemented - use helper function"
+                "ResultsStreamDriver async execution not yet implemented - use helper function",
             ))));
         }
     }
@@ -137,29 +138,29 @@ impl<SM: StateMachine + Unpin> Stream for ResultsStreamDriver<SM> {
 pub fn results_stream<SM: StateMachine + Send + 'static>(
     sm: SM,
     executor: DataFusionExecutor,
-) -> impl Stream<Item = DeltaResult<FilteredEngineData>> + Send 
+) -> impl Stream<Item = DeltaResult<FilteredEngineData>> + Send
 where
     SM::Result: Send,
 {
     async_stream::try_stream! {
         let mut sm = sm;
-        
+
         loop {
             let plan = sm.get_plan()?;
-            
+
             // Execute the plan via DataFusion
             let df_stream = executor.execute_to_stream(plan.clone()).await
                 .map_err(|e| delta_kernel::Error::generic(e.to_string()))?;
-            
+
             if plan.is_results_sink() {
                 // Results sink: yield batches
                 futures::pin_mut!(df_stream);
                 while let Some(batch_result) = df_stream.next().await {
                     let batch = batch_result
                         .map_err(|e| delta_kernel::Error::generic(e.to_string()))?;
-                    
+
                     // Convert RecordBatch to FilteredEngineData with all-true selection
-                    let engine_data: Box<dyn delta_kernel::EngineData> = 
+                    let engine_data: Box<dyn delta_kernel::EngineData> =
                         Box::new(delta_kernel::engine::arrow_data::ArrowEngineData::new(batch));
                     let len = engine_data.len();
                     yield delta_kernel::engine_data::FilteredEngineData::try_new(
@@ -175,7 +176,7 @@ where
                         .map_err(|e| delta_kernel::Error::generic(e.to_string()))?;
                 }
             }
-            
+
             // Advance the state machine
             match sm.advance(Ok(plan))? {
                 AdvanceResult::Continue => {}
@@ -266,7 +267,7 @@ async fn execute_plan_async(
 /// state machines can handle them gracefully.
 fn convert_datafusion_error(e: impl std::fmt::Display) -> delta_kernel::Error {
     let msg = e.to_string();
-    
+
     // Check for common "not found" patterns in the error message
     if msg.contains("not found") || msg.contains("No such file") || msg.contains("NotFound") {
         delta_kernel::Error::file_not_found(msg)
@@ -357,49 +358,52 @@ pub fn scan_metadata_stream_async(
     scan_state: ScanState,
     executor: Arc<DataFusionExecutor>,
 ) -> impl Stream<Item = DeltaResult<ScanMetadata>> + Send {
-    let ScanState { state_machine, transform_computer } = scan_state;
-    
+    let ScanState {
+        state_machine,
+        transform_computer,
+    } = scan_state;
+
     async_stream::try_stream! {
         let mut sm = state_machine;
         let computer = transform_computer;
-        
+
         loop {
             let plan = sm.get_plan()?;
-            
+
             // Execute the plan via DataFusion
             let df_stream = executor.execute_to_stream(plan.clone()).await
                 .map_err(|e| delta_kernel::Error::generic(e.to_string()))?;
-            
+
             if plan.is_results_sink() {
                 // Results sink: process batches and yield ScanMetadata
                 futures::pin_mut!(df_stream);
                 while let Some(batch_result) = df_stream.next().await {
                     let batch = batch_result
                         .map_err(|e| delta_kernel::Error::generic(e.to_string()))?;
-                    
+
                     // Convert RecordBatch to FilteredEngineData
-                    let engine_data: Box<dyn delta_kernel::EngineData> = 
+                    let engine_data: Box<dyn delta_kernel::EngineData> =
                         Box::new(delta_kernel::engine::arrow_data::ArrowEngineData::new(batch));
                     let len = engine_data.len();
                     let filtered = delta_kernel::engine_data::FilteredEngineData::try_new(
                         engine_data,
                         vec![true; len],
                     )?;
-                    
+
                     // Skip empty batches (all rows filtered)
                     if !filtered.selection_vector().contains(&true) {
                         continue;
                     }
-                    
+
                     // Compute transforms for this batch
                     let transforms = computer.compute_transforms(filtered.data())?;
-                    
+
                     // Create ScanMetadata combining batch + transforms
                     let scan_metadata = ScanMetadata::from_filtered_with_transforms(
                         filtered,
                         transforms,
                     )?;
-                    
+
                     yield scan_metadata;
                 }
             } else {
@@ -410,7 +414,7 @@ pub fn scan_metadata_stream_async(
                         .map_err(|e| delta_kernel::Error::generic(e.to_string()))?;
                 }
             }
-            
+
             // Advance the state machine
             match sm.advance(Ok(plan))? {
                 AdvanceResult::Continue => {}
@@ -419,4 +423,3 @@ pub fn scan_metadata_stream_async(
         }
     }
 }
-

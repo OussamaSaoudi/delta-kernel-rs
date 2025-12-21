@@ -928,7 +928,7 @@ async fn test_checkpoint_dedup_kdf_with_real_checkpoint_exact_paths() {
     };
     
     // Create FilterByKDF with CheckpointDedup (empty state = all add actions pass through)
-    let kdf_node = FilterByKDF::checkpoint_dedup();
+    let (kdf_node, _receiver) = FilterByKDF::checkpoint_dedup();
     
     let plan = DeclarativePlanNode::FilterByKDF {
         child: Box::new(DeclarativePlanNode::Scan(scan_node)),
@@ -967,8 +967,7 @@ async fn test_checkpoint_dedup_kdf_with_real_checkpoint_exact_paths() {
 #[tokio::test]
 async fn test_checkpoint_dedup_kdf_with_preseeded_state_filters_correctly() {
     use delta_kernel::plans::kdf_state::filter::CheckpointDedupState;
-    use delta_kernel::plans::kdf_state::FilterKdfState;
-    use std::sync::Mutex;
+    use delta_kernel::plans::kdf_state::{FilterKdfState, StateSender};
     
     // Use REAL CHECKPOINT FILE
     let checkpoint_file = PathBuf::from("../acceptance/tests/dat/out/reader_tests/generated/with_checkpoint/delta/_delta_log/00000000000000000002.checkpoint.parquet");
@@ -983,10 +982,8 @@ async fn test_checkpoint_dedup_kdf_with_preseeded_state_filters_correctly() {
     seen_keys.insert(FileActionKey::new(path_already_seen, None)); // No deletion vector
     let checkpoint_dedup_state = CheckpointDedupState::from_hashset(seen_keys);
     
-    // Create the KDF node with pre-seeded state
-    let kdf_node = FilterByKDF {
-        state: Arc::new(Mutex::new(FilterKdfState::CheckpointDedup(checkpoint_dedup_state))),
-    };
+    // Create the KDF node with pre-seeded state using StateSender::build()
+    let (kdf_node, _receiver) = StateSender::build(FilterKdfState::CheckpointDedup(checkpoint_dedup_state));
     
     // Use kernel's canonical schema - DataFusion's SchemaAdapter handles the rest
     let checkpoint_read_schema = checkpoint_add_schema();
@@ -1034,10 +1031,6 @@ async fn test_checkpoint_dedup_kdf_with_preseeded_state_filters_correctly() {
 /// Test 9: KDF with Filter on REAL checkpoint - Composite plan with native DF filter + custom KDF
 #[tokio::test]
 async fn test_kdf_with_filter_on_checkpoint_exact_results() {
-    use delta_kernel::plans::kdf_state::filter::CheckpointDedupState;
-    use delta_kernel::plans::kdf_state::FilterKdfState;
-    use std::sync::Mutex;
-    
     // Use REAL CHECKPOINT FILE (has add.path column that KDF expects)
     let checkpoint_file = PathBuf::from("../acceptance/tests/dat/out/reader_tests/generated/with_checkpoint/delta/_delta_log/00000000000000000002.checkpoint.parquet");
     assert!(checkpoint_file.exists(), "Real checkpoint file should exist");
@@ -1069,9 +1062,7 @@ async fn test_kdf_with_filter_on_checkpoint_exact_results() {
     };
     
     // CheckpointDedup with empty state (all add actions pass through)
-    let kdf_node = FilterByKDF {
-        state: Arc::new(Mutex::new(FilterKdfState::CheckpointDedup(CheckpointDedupState::new()))),
-    };
+    let (kdf_node, _receiver) = FilterByKDF::checkpoint_dedup();
     
     let plan = DeclarativePlanNode::FilterByKDF {
         child: Box::new(DeclarativePlanNode::FilterByExpression {

@@ -364,8 +364,9 @@ impl<'a> DeclarativePlanExecutor<'a> {
         child: DeclarativePlanNode,
         node: FilterByKDF,
     ) -> DeltaResult<FilteredDataIter> {
-        // State is shared (Arc<Mutex<...>>) - clone for use in the iterator closure
-        let state = node.state.clone();
+        // Create owned state from the sender - state is cloned from template
+        // and will be sent back to the receiver when dropped
+        let mut owned_state = node.create_owned();
 
         let child_iter = self.execute(child)?;
 
@@ -375,13 +376,8 @@ impl<'a> DeclarativePlanExecutor<'a> {
             // Convert selection vector to BooleanArray
             let selection_array = BooleanArray::from(selection_vector);
 
-            // Apply the Filter KDF - direct dispatch via enum, monomorphized execution
-            let new_selection = {
-                let mut state = state
-                    .lock()
-                    .expect("FilterByKDF state mutex poisoned");
-                state.apply(engine_data.as_ref(), selection_array)?
-            };
+            // Apply the Filter KDF - zero-lock access via OwnedState
+            let new_selection = owned_state.apply(engine_data.as_ref(), selection_array)?;
 
             // Convert back to Vec<bool>
             let new_selection_vec: Vec<bool> = (0..new_selection.len())

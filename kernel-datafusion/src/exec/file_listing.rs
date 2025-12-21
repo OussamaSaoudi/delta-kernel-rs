@@ -4,21 +4,26 @@
 //! conversion to Arrow RecordBatches.
 
 use std::any::Any;
-use std::sync::Arc;
 use std::fmt;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use datafusion::physical_plan::{ExecutionPlan, DisplayAs, DisplayFormatType, SendableRecordBatchStream, RecordBatchStream, PlanProperties};
-use datafusion::arrow::datatypes::{SchemaRef as ArrowSchemaRef, Schema as ArrowSchema, Field, DataType};
-use datafusion::arrow::array::{StringArray, Int64Array, RecordBatch};
-use datafusion_physical_plan::execution_plan::{EmissionType, Boundedness};
-use datafusion_physical_plan::Partitioning;
-use datafusion_physical_expr::EquivalenceProperties;
-use datafusion_common::{Result as DfResult, DataFusionError};
+use datafusion::arrow::array::{Int64Array, RecordBatch, StringArray};
+use datafusion::arrow::datatypes::{
+    DataType, Field, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef,
+};
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream,
+};
+use datafusion_common::{DataFusionError, Result as DfResult};
 use datafusion_execution::object_store::ObjectStoreUrl;
+use datafusion_physical_expr::EquivalenceProperties;
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion_physical_plan::Partitioning;
+use futures::{ready, stream, Stream, StreamExt};
 use object_store::ObjectMeta;
-use futures::{Stream, StreamExt, TryStreamExt, ready, stream};
 
 /// Batch size for streaming file listing results.
 /// Each RecordBatch will contain up to this many file entries.
@@ -47,17 +52,21 @@ impl FileListingExec {
             Field::new("size", DataType::Int64, false),
             Field::new("modificationTime", DataType::Int64, false),
         ]));
-        
+
         let properties = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1), // Single partition for listing
-            EmissionType::Incremental, // Emits batches incrementally as files are listed
-            Boundedness::Bounded, // File listing is bounded
+            EmissionType::Incremental,            // Emits batches incrementally as files are listed
+            Boundedness::Bounded,                 // File listing is bounded
         );
-        
-        Self { path, schema, properties }
+
+        Self {
+            path,
+            schema,
+            properties,
+        }
     }
-    
+
     /// Get the path being listed.
     pub fn path(&self) -> &url::Url {
         &self.path
@@ -82,30 +91,30 @@ impl ExecutionPlan for FileListingExec {
     fn name(&self) -> &str {
         "FileListingExec"
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn schema(&self) -> ArrowSchemaRef {
         self.schema.clone()
     }
-    
+
     fn properties(&self) -> &PlanProperties {
         &self.properties
     }
-    
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
-    
+
     fn with_new_children(
         self: Arc<Self>,
         _children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         Ok(self)
     }
-    
+
     fn execute(
         &self,
         _partition: usize,
@@ -118,25 +127,25 @@ impl ExecutionPlan for FileListingExec {
             self.path.host_str().unwrap_or("")
         );
         let object_store_url = ObjectStoreUrl::parse(&object_store_url_str)?;
-        
+
         // Get the ObjectStore from RuntimeEnv
         let object_store = context.runtime_env().object_store(&object_store_url)?;
-        
+
         // Build the prefix path for listing
         let prefix = object_store::path::Path::from(self.path.path());
-        
+
         // Create the async listing stream
         let list_stream = object_store.list(Some(&prefix));
-        
+
         // Local filesystem doesn't guarantee sorted listing order.
         // Cloud stores (S3, Azure, GCS) return lexicographically sorted results,
         // but local filesystem does not. We need sorted order for Delta log files.
         // See: delta-kernel-rs/kernel/src/engine/default/filesystem.rs
         let needs_sorting = self.path.scheme() == "file";
-        
+
         // Transform ObjectMeta stream -> RecordBatch stream using chunking
         let schema = self.schema.clone();
-        
+
         if needs_sorting {
             // For local filesystem: collect all, sort, then stream
             Ok(Box::pin(SortedFileListingStream::new(list_stream, schema)))
@@ -170,7 +179,7 @@ impl FileListingStream {
             schema,
         }
     }
-    
+
     /// Convert a chunk of ObjectMeta items into a RecordBatch.
     fn chunk_to_batch(
         chunk: Vec<Result<ObjectMeta, object_store::Error>>,
@@ -181,47 +190,43 @@ impl FileListingStream {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        
+
         if metas.is_empty() {
             // Return empty batch with correct schema
-            return RecordBatch::try_new(schema.clone(), vec![
-                Arc::new(StringArray::from(Vec::<String>::new())),
-                Arc::new(Int64Array::from(Vec::<i64>::new())),
-                Arc::new(Int64Array::from(Vec::<i64>::new())),
-            ]).map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
+            return RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(Vec::<String>::new())),
+                    Arc::new(Int64Array::from(Vec::<i64>::new())),
+                    Arc::new(Int64Array::from(Vec::<i64>::new())),
+                ],
+            )
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
         }
-        
+
         // Build Arrow arrays from ObjectMeta
         // Extract just the filename from the ObjectStore path to match what
         // LogSegmentBuilder expects (it joins filenames with log_root)
-        let paths = StringArray::from_iter_values(
-            metas.iter().map(|m| {
-                // m.location is an object_store::path::Path
-                // Get the filename (last path segment)
-                m.location.filename().unwrap_or(m.location.as_ref())
-            })
-        );
-        let sizes = Int64Array::from_iter_values(
-            metas.iter().map(|m| m.size as i64)
-        );
-        let mod_times = Int64Array::from_iter_values(
-            metas.iter().map(|m| m.last_modified.timestamp_millis())
-        );
-        
+        let paths = StringArray::from_iter_values(metas.iter().map(|m| {
+            // m.location is an object_store::path::Path
+            // Get the filename (last path segment)
+            m.location.filename().unwrap_or(m.location.as_ref())
+        }));
+        let sizes = Int64Array::from_iter_values(metas.iter().map(|m| m.size as i64));
+        let mod_times =
+            Int64Array::from_iter_values(metas.iter().map(|m| m.last_modified.timestamp_millis()));
+
         RecordBatch::try_new(
             schema.clone(),
-            vec![
-                Arc::new(paths),
-                Arc::new(sizes),
-                Arc::new(mod_times),
-            ],
-        ).map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+            vec![Arc::new(paths), Arc::new(sizes), Arc::new(mod_times)],
+        )
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
     }
 }
 
 impl Stream for FileListingStream {
     type Item = DfResult<RecordBatch>;
-    
+
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match ready!(self.inner.as_mut().poll_next(cx)) {
             Some(chunk) => {
@@ -278,44 +283,41 @@ impl SortedFileListingStream {
             schema,
         }
     }
-    
+
     /// Convert a chunk of ObjectMeta items into a RecordBatch (same as FileListingStream).
-    fn metas_to_batch(
-        metas: Vec<ObjectMeta>,
-        schema: &ArrowSchemaRef,
-    ) -> DfResult<RecordBatch> {
+    fn metas_to_batch(metas: Vec<ObjectMeta>, schema: &ArrowSchemaRef) -> DfResult<RecordBatch> {
         if metas.is_empty() {
-            return RecordBatch::try_new(schema.clone(), vec![
-                Arc::new(StringArray::from(Vec::<String>::new())),
-                Arc::new(Int64Array::from(Vec::<i64>::new())),
-                Arc::new(Int64Array::from(Vec::<i64>::new())),
-            ]).map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
+            return RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(Vec::<String>::new())),
+                    Arc::new(Int64Array::from(Vec::<i64>::new())),
+                    Arc::new(Int64Array::from(Vec::<i64>::new())),
+                ],
+            )
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
         }
-        
+
         let paths = StringArray::from_iter_values(
-            metas.iter().map(|m| m.location.filename().unwrap_or(m.location.as_ref()))
+            metas
+                .iter()
+                .map(|m| m.location.filename().unwrap_or(m.location.as_ref())),
         );
-        let sizes = Int64Array::from_iter_values(
-            metas.iter().map(|m| m.size as i64)
-        );
-        let mod_times = Int64Array::from_iter_values(
-            metas.iter().map(|m| m.last_modified.timestamp_millis())
-        );
-        
+        let sizes = Int64Array::from_iter_values(metas.iter().map(|m| m.size as i64));
+        let mod_times =
+            Int64Array::from_iter_values(metas.iter().map(|m| m.last_modified.timestamp_millis()));
+
         RecordBatch::try_new(
             schema.clone(),
-            vec![
-                Arc::new(paths),
-                Arc::new(sizes),
-                Arc::new(mod_times),
-            ],
-        ).map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+            vec![Arc::new(paths), Arc::new(sizes), Arc::new(mod_times)],
+        )
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
     }
 }
 
 impl Stream for SortedFileListingStream {
     type Item = DfResult<RecordBatch>;
-    
+
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             match &mut self.state {
@@ -333,13 +335,11 @@ impl Stream for SortedFileListingStream {
                             // Done collecting - sort by path and switch to emitting
                             let mut sorted = std::mem::take(collected);
                             sorted.sort_by(|a, b| a.location.cmp(&b.location));
-                            
+
                             // Create chunked stream from sorted items
-                            let chunks: Vec<Vec<ObjectMeta>> = sorted
-                                .chunks(BATCH_SIZE)
-                                .map(|c| c.to_vec())
-                                .collect();
-                            
+                            let chunks: Vec<Vec<ObjectMeta>> =
+                                sorted.chunks(BATCH_SIZE).map(|c| c.to_vec()).collect();
+
                             self.state = SortedStreamState::Emitting {
                                 inner: Box::pin(stream::iter(chunks)),
                             };
@@ -376,24 +376,24 @@ impl RecordBatchStream for SortedFileListingStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_file_listing_exec_schema() {
         let path = url::Url::parse("file:///tmp/test/").unwrap();
         let exec = FileListingExec::new(path);
-        
+
         let schema = exec.schema();
         assert_eq!(schema.fields().len(), 3);
         assert_eq!(schema.field(0).name(), "path");
         assert_eq!(schema.field(1).name(), "size");
         assert_eq!(schema.field(2).name(), "modificationTime");
     }
-    
+
     #[test]
     fn test_file_listing_exec_properties() {
         let path = url::Url::parse("file:///tmp/test/").unwrap();
         let exec = FileListingExec::new(path.clone());
-        
+
         assert_eq!(exec.name(), "FileListingExec");
         assert_eq!(exec.path(), &path);
         assert!(exec.children().is_empty());

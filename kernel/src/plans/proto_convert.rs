@@ -92,14 +92,9 @@ impl From<&FileListingNode> for proto::FileListingNode {
 impl From<&FilterByKDF> for proto::FilterByKdf {
     fn from(node: &FilterByKDF) -> Self {
         // Convert typed state to raw pointer for FFI
-        // Clone the state since we're taking ownership for the raw pointer
+        // Clone the template state from the sender since we need ownership for the raw pointer
         proto::FilterByKdf {
-            state_ptr: node
-                .state
-                .lock()
-                .expect("FilterByKDF state mutex poisoned")
-                .clone()
-                .into_raw(),
+            state_ptr: node.template().clone().into_raw(),
         }
     }
 }

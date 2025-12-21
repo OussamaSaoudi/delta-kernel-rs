@@ -2,25 +2,25 @@
 
 use std::any::Any;
 use std::fmt;
-use std::sync::Arc;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use arrow::record_batch::RecordBatch;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
-    RecordBatchStream, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream,
 };
-use datafusion_physical_plan::execution_plan::{EmissionType, Boundedness};
-use datafusion_common::{Result as DfResult, DataFusionError};
+use datafusion_common::{DataFusionError, Result as DfResult};
 use datafusion_physical_expr::EquivalenceProperties;
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
 use futures::{Stream, StreamExt};
 use tokio::sync::Mutex as TokioMutex;
 
-use delta_kernel::plans::ConsumeByKDF;
-use delta_kernel::plans::kdf_state::ConsumerKdfState;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
+use delta_kernel::plans::kdf_state::ConsumerKdfState;
+use delta_kernel::plans::ConsumeByKDF;
 
 /// ExecutionPlan that applies a ConsumeByKDF to its child stream.
 ///
@@ -44,7 +44,7 @@ impl ConsumeKdfExec {
             EmissionType::Incremental,
             Boundedness::Bounded,
         );
-        
+
         Self {
             child,
             kdf,
@@ -63,23 +63,23 @@ impl ExecutionPlan for ConsumeKdfExec {
     fn name(&self) -> &str {
         "ConsumeKdfExec"
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn schema(&self) -> ArrowSchemaRef {
         self.child.schema()
     }
-    
+
     fn properties(&self) -> &PlanProperties {
         &self.properties
     }
-    
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.child]
     }
-    
+
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
@@ -89,7 +89,7 @@ impl ExecutionPlan for ConsumeKdfExec {
             self.kdf.clone(),
         )))
     }
-    
+
     fn execute(
         &self,
         partition: usize,
@@ -98,7 +98,7 @@ impl ExecutionPlan for ConsumeKdfExec {
         let child_stream = self.child.execute(partition, context)?;
         let schema = child_stream.schema();
         let kdf_state = Arc::new(TokioMutex::new(self.kdf.state.clone()));
-        
+
         Ok(Box::pin(ConsumeKdfStream {
             schema,
             input: child_stream,
@@ -118,32 +118,32 @@ struct ConsumeKdfStream {
 
 impl Stream for ConsumeKdfStream {
     type Item = DfResult<RecordBatch>;
-    
+
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if !self.should_continue {
             return Poll::Ready(None);
         }
-        
+
         match self.input.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(batch))) => {
                 // Apply consumer KDF - wrap RecordBatch in ArrowEngineData
                 let engine_data = ArrowEngineData::new(batch.clone());
-                
+
                 // Try to acquire lock and apply KDF
                 let should_continue = match self.kdf_state.try_lock() {
-                    Ok(mut state) => {
-                        match state.apply(&engine_data) {
-                            Ok(cont) => cont,
-                            Err(e) => return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
+                    Ok(mut state) => match state.apply(&engine_data) {
+                        Ok(cont) => cont,
+                        Err(e) => {
+                            return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e)))))
                         }
-                    }
+                    },
                     Err(_) => {
                         // Lock contention - wake and try again
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
                     }
                 };
-                
+
                 // Update continuation flag
                 self.should_continue = should_continue;
                 Poll::Ready(Some(Ok(batch)))
@@ -160,4 +160,3 @@ impl RecordBatchStream for ConsumeKdfStream {
         Arc::clone(&self.schema)
     }
 }
-

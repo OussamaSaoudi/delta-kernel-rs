@@ -1,10 +1,15 @@
-//! KdfFilterExec - applies FilterByKDF to filter rows.
-///
-/// ORDERING REQUIREMENT: This exec requires input batches to be ordered by
-/// version in DESCENDING order (newest first). Violating this will cause
-/// incorrect deduplication results.
-///
-/// Enforcement: Single partition + runtime validation.
+//! KdfFilterExec - applies FilterByKDF to filter rows with zero-lock streaming.
+//!
+//! ORDERING REQUIREMENT: This exec requires input batches to be ordered by
+//! version in DESCENDING order (newest first). Violating this will cause
+//! incorrect deduplication results.
+//!
+//! Enforcement: Single partition + runtime validation.
+//!
+//! ARCHITECTURE: Uses `OwnedState<FilterKdfState>` for zero-lock access during
+//! batch processing. Each partition gets its own cloned state via `create_owned()`.
+//! When the stream completes (dropped), states are automatically sent back to the
+//! `StateReceiver` held by the state machine for collection and merging.
 
 use std::any::Any;
 use std::fmt;
@@ -27,7 +32,7 @@ use datafusion_physical_expr::EquivalenceProperties;
 use futures::{Stream, StreamExt};
 
 use delta_kernel::plans::FilterByKDF;
-use delta_kernel::plans::kdf_state::FilterKdfState;
+use delta_kernel::plans::kdf_state::{FilterKdfState, OwnedFilterState};
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 
 /// ExecutionPlan that applies a FilterByKDF to its child stream.
@@ -120,12 +125,15 @@ impl ExecutionPlan for KdfFilterExec {
         
         let child_stream = self.child.execute(partition, context)?;
         let schema = child_stream.schema();
-        let kdf_state = Arc::clone(&self.kdf.state);
+        
+        // Create owned state from the sender - zero-lock access during streaming
+        // State is cloned from template and will be sent back to receiver on drop
+        let state = self.kdf.create_owned();
         
         Ok(Box::pin(KdfFilterStream {
             schema,
             input: child_stream,
-            kdf_state,
+            state,
             selection_vector: None, // Allocated on first batch
             last_seen_version: None,
         }))
@@ -133,10 +141,15 @@ impl ExecutionPlan for KdfFilterExec {
 }
 
 /// Stream that applies FilterKDF to batches with ordering validation.
+///
+/// Uses `OwnedState<FilterKdfState>` for zero-lock access during batch processing.
+/// When the stream is dropped (on completion or error), the state is automatically
+/// sent back to the `StateReceiver` for collection.
 struct KdfFilterStream {
     schema: ArrowSchemaRef,
     input: SendableRecordBatchStream,
-    kdf_state: Arc<std::sync::Mutex<FilterKdfState>>,
+    /// Owned state - zero-lock access, sent back on drop
+    state: OwnedFilterState,
     /// Reusable selection vector to minimize allocations
     selection_vector: Option<BooleanArray>,
     /// Track last seen version for ordering validation
@@ -174,14 +187,11 @@ impl Stream for KdfFilterStream {
                 let batch_len = batch.num_rows();
                 let selection = BooleanArray::from(vec![true; batch_len]);
                 
-                // 3. APPLY KDF FILTER
+                // 3. APPLY KDF FILTER - ZERO LOCKS via OwnedState
                 let engine_data = ArrowEngineData::new(batch.clone());
-                let filtered_selection = {
-                    let mut state = self.kdf_state.lock().unwrap();
-                    match state.apply(&engine_data, selection) {
-                        Ok(sel) => sel,
-                        Err(e) => return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
-                    }
+                let filtered_selection = match self.state.apply(&engine_data, selection) {
+                    Ok(sel) => sel,
+                    Err(e) => return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
                 };
                 
                 // Store for potential reuse (future optimization)
@@ -208,8 +218,8 @@ impl RecordBatchStream for KdfFilterStream {
 
 /// Determine if a FilterKDF is parallel-safe.
 fn is_filter_kdf_parallel_safe(kdf: &FilterByKDF) -> bool {
-    let state = kdf.state.lock().unwrap();
-    match &*state {
+    // Access the template state from the sender to check the variant
+    match kdf.template() {
         FilterKdfState::AddRemoveDedup(_) => false, // Stateful, needs serialization
         FilterKdfState::CheckpointDedup(_) => true, // Stateless, can parallelize
         FilterKdfState::PartitionPrune(_) => true,  // Stateless, can parallelize

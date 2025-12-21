@@ -8,7 +8,7 @@
 //! - **Consumer KDFs**: (batch) -> bool - batch consumption (Continue/Break)
 //! - **Schema Reader KDFs**: () -> schema - schema extraction
 
-pub mod collector;
+pub mod state_channel;
 pub mod traits;
 pub mod macros;
 pub mod serialization;
@@ -16,8 +16,11 @@ pub mod filter;
 pub mod consumer;
 pub mod schema;
 
-// Re-export public API
-pub use collector::*;
+// Re-export state_channel types for state management
+pub use state_channel::{
+    ConsumerStateReceiver, ConsumerStateSender, FilterStateReceiver, FilterStateSender,
+    OwnedFilterState, OwnedState, StateReceiver, StateSender,
+};
 pub use filter::*;
 pub use consumer::*;
 pub use schema::*;

@@ -3,7 +3,7 @@
 //! These are the basic building blocks for constructing plans.
 //! Each node represents a single operation in a query plan.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::expressions::Expression;
 use crate::schema::SchemaRef;
@@ -11,7 +11,11 @@ use crate::FileMeta;
 
 use crate::Version;
 
-use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState, FilterKdfState, LogSegmentBuilderState, MetadataProtocolReaderState, SchemaReaderState, SchemaStoreState, SidecarCollectorState};
+use super::kdf_state::{
+    CheckpointHintReaderState, ConsumerKdfState, FilterKdfState, FilterStateSender,
+    LogSegmentBuilderState, MetadataProtocolReaderState, SchemaReaderState, SchemaStoreState,
+    SidecarCollectorState,
+};
 
 // =============================================================================
 // Kernel-Defined Function (KDF) Type System
@@ -21,7 +25,6 @@ use super::kdf_state::{AddRemoveDedupState, CheckpointDedupState, CheckpointHint
 // - Filters: Use typed state in FilterKdfState enum (see kdf_state.rs)
 // - Schema Readers: (state_ptr, schema) -> ()
 // - (Future: Sinks/Consumers: (state_ptr, engineData) -> ())
-
 
 /// Schema Reader KDFs: receive and store schema information.
 ///
@@ -88,38 +91,25 @@ pub struct FileListingNode {
 /// KDFs are filters implemented in kernel-rs that engines must use because they
 /// contain Delta-specific logic (e.g., deduplication, stats skipping).
 /// The function produces a selection vector; engines call the kernel FFI to apply it.
-#[derive(Debug, Clone)]
-pub struct FilterByKDF {
-    /// Typed state - the variant encodes which function to apply
-    pub state: Arc<Mutex<FilterKdfState>>,
-}
-
-impl FilterByKDF {
-    /// Create a new AddRemoveDedup filter.
-    pub fn add_remove_dedup() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(FilterKdfState::AddRemoveDedup(
-                AddRemoveDedupState::new(),
-            ))),
-        }
-    }
-
-    /// Create a new CheckpointDedup filter.
-    pub fn checkpoint_dedup() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(FilterKdfState::CheckpointDedup(
-                CheckpointDedupState::new(),
-            ))),
-        }
-    }
-
-    /// Create from existing state.
-    pub fn with_state(state: FilterKdfState) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(state)),
-        }
-    }
-}
+///
+/// `FilterByKDF` is a type alias for `StateSender<FilterKdfState>`. Plans hold the sender
+/// (which creates `OwnedState` for each partition), while phases hold the corresponding
+/// `StateReceiver` to collect results after execution.
+///
+/// # Creating FilterByKDF
+///
+/// Use `StateSender::build(template)` to create a sender/receiver pair:
+///
+/// ```ignore
+/// use delta_kernel::plans::kdf_state::{StateSender, FilterKdfState, AddRemoveDedupState};
+///
+/// let (sender, receiver) = StateSender::build(
+///     FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new())
+/// );
+/// // sender (FilterByKDF) goes into the plan
+/// // receiver (FilterStateReceiver) goes into the phase
+/// ```
+pub type FilterByKDF = FilterStateSender;
 
 /// Consume rows using a kernel-defined function (KDF).
 ///

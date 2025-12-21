@@ -15,8 +15,11 @@ use crate::transforms::{FieldTransformSpec, TransformSpec};
 use crate::{DeltaResult, Error, PredicateRef, StructField};
 
 /// All the state needed to process a scan.
+/// FIXME: this is public because TransformComputer tkaes this as a public param. In thefuture,
+/// TransformComputer should EXCLUSIVELY be constructed in Scan and handed to the user. StateInfo
+/// should not be exposed
 #[derive(Debug)]
-pub(crate) struct StateInfo {
+pub struct StateInfo {
     /// The logical schema for this scan
     pub(crate) logical_schema: SchemaRef,
     /// The physical schema to read from parquet files

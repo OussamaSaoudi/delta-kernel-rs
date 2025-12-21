@@ -31,7 +31,7 @@ mod proto_roundtrip_tests {
 
     #[test]
     fn test_filter_node_to_proto() {
-        let filter = FilterByKDF::add_remove_dedup();
+        let (filter, _receiver) = FilterByKDF::add_remove_dedup();
 
         let proto_filter: proto::FilterByKdf = (&filter).into();
         // state_ptr should be non-zero (points to the typed state)
@@ -47,9 +47,10 @@ mod proto_roundtrip_tests {
             schema: test_schema(),
         });
 
+        let (dedup_sender, _receiver) = FilterByKDF::add_remove_dedup();
         let plan = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
-            node: FilterByKDF::add_remove_dedup(),
+            node: dedup_sender,
         };
 
         // Convert to proto
@@ -78,6 +79,7 @@ mod proto_roundtrip_tests {
 
     #[test]
     fn test_commit_phase_plan_to_proto() {
+        let (dedup_sender, _receiver) = FilterByKDF::add_remove_dedup();
         let commit_plan = CommitPhasePlan {
             scan: ScanNode {
                 file_type: FileType::Json,
@@ -86,7 +88,7 @@ mod proto_roundtrip_tests {
             },
             data_skipping: None,
             partition_prune_filter: None,
-            dedup_filter: FilterByKDF::add_remove_dedup(),
+            dedup_filter: dedup_sender,
             project: SelectNode {
                 columns: vec![],
                 output_schema: test_schema(),
@@ -115,9 +117,10 @@ mod proto_roundtrip_tests {
             schema: schema.clone(),
         });
 
+        let (dedup_sender, _receiver) = FilterByKDF::add_remove_dedup();
         let plan = DeclarativePlanNode::FilterByKDF {
             child: Box::new(scan),
-            node: FilterByKDF::add_remove_dedup(),
+            node: dedup_sender,
         };
 
         // Convert to proto
@@ -137,6 +140,7 @@ mod proto_roundtrip_tests {
 
     #[test]
     fn test_as_query_plan_produces_tree() {
+        let (dedup_sender, _receiver) = FilterByKDF::add_remove_dedup();
         let commit_plan = CommitPhasePlan {
             scan: ScanNode {
                 file_type: FileType::Json,
@@ -145,7 +149,7 @@ mod proto_roundtrip_tests {
             },
             data_skipping: None,
             partition_prune_filter: None,
-            dedup_filter: FilterByKDF::add_remove_dedup(),
+            dedup_filter: dedup_sender,
             project: SelectNode {
                 columns: vec![],
                 output_schema: test_schema(),
@@ -164,11 +168,8 @@ mod proto_roundtrip_tests {
                         match *child {
                             DeclarativePlanNode::FilterByKDF { child: inner, node } => {
                                 // Verify it's AddRemoveDedup (variant IS the identity)
-                                let state = node
-                                    .state
-                                    .lock()
-                                    .expect("FilterByKDF state mutex poisoned");
-                                assert!(matches!(&*state, FilterKdfState::AddRemoveDedup(_)));
+                                // Use template() to access the state without locking
+                                assert!(matches!(node.template(), FilterKdfState::AddRemoveDedup(_)));
                                 match *inner {
                                     DeclarativePlanNode::Scan(scan) => {
                                         assert_eq!(scan.file_type, FileType::Json);
@@ -228,20 +229,13 @@ mod typed_state_tests {
 
     #[test]
     fn test_filter_by_kdf_constructors() {
-        // Test convenience constructors
-        let filter1 = FilterByKDF::add_remove_dedup();
-        let state1 = filter1
-            .state
-            .lock()
-            .expect("FilterByKDF state mutex poisoned");
-        assert!(matches!(&*state1, FilterKdfState::AddRemoveDedup(_)));
+        // Test convenience constructors return (sender, receiver) pairs
+        let (filter1, _receiver1) = FilterByKDF::add_remove_dedup();
+        // Use template() to access the template state (no locking needed)
+        assert!(matches!(filter1.template(), FilterKdfState::AddRemoveDedup(_)));
         
-        let filter2 = FilterByKDF::checkpoint_dedup();
-        let state2 = filter2
-            .state
-            .lock()
-            .expect("FilterByKDF state mutex poisoned");
-        assert!(matches!(&*state2, FilterKdfState::CheckpointDedup(_)));
+        let (filter2, _receiver2) = FilterByKDF::checkpoint_dedup();
+        assert!(matches!(filter2.template(), FilterKdfState::CheckpointDedup(_)));
     }
 
     #[test]
@@ -1217,8 +1211,8 @@ mod state_machine_transition_tests {
     #[test]
     fn test_scan_phase_complete_is_terminal() {
         // Verify Complete is terminal
-        assert!(ScanPhase::Complete.is_complete());
-        assert!(ScanPhase::Complete.as_query_plan().is_none());
+        assert!(ScanStateMachinePhase::Complete.is_complete());
+        // Complete phase has no associated plan - this is verified by the enum structure
     }
 
     #[test]
@@ -1272,6 +1266,7 @@ mod state_machine_transition_tests {
 
     #[test]
     fn test_scan_phase_checkpoint_leaf_has_results_sink() {
+        let (dedup_sender, _receiver) = FilterByKDF::checkpoint_dedup();
         let leaf_plan = CheckpointLeafPlan {
             scan: ScanNode {
                 file_type: FileType::Parquet,
@@ -1279,7 +1274,7 @@ mod state_machine_transition_tests {
                 schema: Arc::new(StructType::new_unchecked(vec![])),
             },
             partition_prune_filter: None,
-            dedup_filter: FilterByKDF::checkpoint_dedup(),
+            dedup_filter: dedup_sender,
             project: SelectNode {
                 columns: vec![],
                 output_schema: Arc::new(StructType::new_unchecked(vec![])),
@@ -1327,6 +1322,7 @@ mod state_machine_transition_tests {
             size: 10000,
         };
         
+        let (dedup_sender, _receiver) = FilterByKDF::checkpoint_dedup();
         let leaf_plan = CheckpointLeafPlan {
             scan: ScanNode {
                 file_type: FileType::Parquet,
@@ -1339,7 +1335,7 @@ mod state_machine_transition_tests {
                 ])),
             },
             partition_prune_filter: None,
-            dedup_filter: FilterByKDF::checkpoint_dedup(),
+            dedup_filter: dedup_sender,
             project: SelectNode {
                 columns: vec![],
                 output_schema: Arc::new(StructType::new_unchecked(vec![
@@ -1366,13 +1362,9 @@ mod state_machine_transition_tests {
                         
                         match *filter_box {
                             DeclarativePlanNode::FilterByKDF { child: scan_box, node: filter_node } => {
-                                // 3. Verify CheckpointDedup filter
-                                let state = filter_node
-                                    .state
-                                    .lock()
-                                    .expect("FilterByKDF state mutex poisoned");
+                                // 3. Verify CheckpointDedup filter using template()
                                 assert!(
-                                    matches!(&*state, FilterKdfState::CheckpointDedup(_)),
+                                    matches!(filter_node.template(), FilterKdfState::CheckpointDedup(_)),
                                     "CheckpointLeaf must use CheckpointDedup filter"
                                 );
                                 

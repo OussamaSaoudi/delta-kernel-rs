@@ -124,27 +124,27 @@ impl DeclarativePlanNode {
         })
     }
 
-    /// Add a kernel-defined function (KDF) filter with AddRemoveDedup state.
-    pub fn filter_by_add_remove_dedup(self) -> Self {
+    /// Add a kernel-defined function (KDF) filter with a pre-built sender.
+    ///
+    /// The sender should be created via `StateSender::build(template)`, which returns
+    /// a (sender, receiver) pair. The sender goes into the plan, and the receiver
+    /// should be stored in the corresponding phase for state collection after execution.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use delta_kernel::plans::kdf_state::{StateSender, FilterKdfState, AddRemoveDedupState};
+    ///
+    /// let (sender, receiver) = StateSender::build(
+    ///     FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new())
+    /// );
+    /// let plan = scan_node.filter_by_kdf(sender);
+    /// // Store receiver in the phase for later collection
+    /// ```
+    pub fn filter_by_kdf(self, kdf: FilterByKDF) -> Self {
         Self::FilterByKDF {
             child: Box::new(self),
-            node: FilterByKDF::add_remove_dedup(),
-        }
-    }
-
-    /// Add a kernel-defined function (KDF) filter with CheckpointDedup state.
-    pub fn filter_by_checkpoint_dedup(self) -> Self {
-        Self::FilterByKDF {
-            child: Box::new(self),
-            node: FilterByKDF::checkpoint_dedup(),
-        }
-    }
-
-    /// Add a kernel-defined function (KDF) filter with existing typed state.
-    pub fn filter_by_kdf_with_state(self, state: super::kdf_state::FilterKdfState) -> Self {
-        Self::FilterByKDF {
-            child: Box::new(self),
-            node: FilterByKDF::with_state(state),
+            node: kdf,
         }
     }
 

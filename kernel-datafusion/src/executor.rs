@@ -1,12 +1,14 @@
 //! DataFusion executor implementation.
 
-use std::sync::Arc;
-use datafusion::execution::{SessionState, SessionStateBuilder, TaskContext, runtime_env::RuntimeEnv};
+use datafusion::execution::{
+    runtime_env::RuntimeEnv, SessionState, SessionStateBuilder, TaskContext,
+};
 use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use datafusion_common::config::ConfigOptions;
+use std::sync::Arc;
 
-use crate::error::{DfResult, DfError};
 use crate::compile::compile_plan;
+use crate::error::DfResult;
 use delta_kernel::plans::DeclarativePlanNode;
 
 /// DataFusion-based executor for Delta Kernel plans.
@@ -26,20 +28,20 @@ impl DataFusionExecutor {
             .with_config(config.into())
             .with_runtime_env(runtime)
             .build();
-        
+
         Ok(Self { session_state })
     }
-    
+
     /// Create a new executor with custom session state.
     pub fn with_session_state(session_state: SessionState) -> Self {
         Self { session_state }
     }
-    
+
     /// Compile a declarative plan into a DataFusion physical plan.
     pub fn compile(&self, plan: &DeclarativePlanNode) -> DfResult<Arc<dyn ExecutionPlan>> {
         compile_plan(plan, &self.session_state)
     }
-    
+
     /// Execute a declarative plan and return a stream of RecordBatches.
     pub async fn execute_to_stream(
         &self,
@@ -47,12 +49,12 @@ impl DataFusionExecutor {
     ) -> DfResult<SendableRecordBatchStream> {
         let physical_plan = self.compile(&plan)?;
         let task_ctx = Arc::new(TaskContext::from(&self.session_state));
-        
+
         // Execute partition 0 (we'll handle partitioning at compile time)
         let stream = physical_plan.execute(0, task_ctx)?;
         Ok(stream)
     }
-    
+
     /// Get a reference to the session state.
     pub fn session_state(&self) -> &SessionState {
         &self.session_state
@@ -64,5 +66,3 @@ impl Default for DataFusionExecutor {
         Self::new().expect("Failed to create default DataFusion executor")
     }
 }
-
-
