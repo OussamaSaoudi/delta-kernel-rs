@@ -25,20 +25,18 @@ use crate::schema::DataType;
 use crate::{DeltaResult, Engine, EngineData, Error};
 
 use super::declarative::DeclarativePlanNode;
-use super::kdf_state::FilterKdfState;
+use super::kdf_state::{ConsumerKdfState, FilterKdfState, OwnedState};
 use super::nodes::*;
 
 /// Type alias for the result iterator.
 pub type FilteredDataIter = Box<dyn Iterator<Item = DeltaResult<FilteredEngineData>> + Send>;
 
-use super::kdf_state::ConsumerKdfState;
-
 /// Iterator for ConsumeByKDF that applies consumer state to each batch and passes through.
 ///
-/// Uses interior mutability in ConsumerKdfState to accumulate state during iteration.
+/// Uses `OwnedState<ConsumerKdfState>` - state is automatically sent to the receiver on drop.
 struct ConsumeByKdfIterator {
     child_iter: FilteredDataIter,
-    state: ConsumerKdfState,
+    state: OwnedState<ConsumerKdfState>,
     done: bool,
 }
 
@@ -52,12 +50,12 @@ impl Iterator for ConsumeByKdfIterator {
 
         match self.child_iter.next() {
             Some(Ok(batch)) => {
-                // Apply consumer to batch (mutates state via interior mutability)
-                match self.state.apply(batch.data()) {
+                // Apply consumer to batch - zero-lock access via OwnedState
+                match self.state.state_mut().apply(batch.data()) {
                     Ok(true) => Some(Ok(batch)), // Continue, pass through
                     Ok(false) => {
                         // Break signal - finalize and stop
-                        self.state.finalize();
+                        self.state.state_mut().finalize();
                         self.done = true;
                         // Still return this batch, but no more after
                         Some(Ok(batch))
@@ -74,7 +72,7 @@ impl Iterator for ConsumeByKdfIterator {
             }
             None => {
                 // Child exhausted - finalize consumer
-                self.state.finalize();
+                self.state.state_mut().finalize();
                 self.done = true;
                 None
             }
@@ -395,18 +393,20 @@ impl<'a> DeclarativePlanExecutor<'a> {
     /// - `true` (Continue): Keep feeding data
     /// - `false` (Break): Stop iteration
     ///
-    /// Consumer KDFs accumulate state across batches via interior mutability.
-    /// The state is cloned (Arc clone - cheap) and captured in the iterator closure.
-    /// After iteration, the original plan's state contains the accumulated results.
+    /// Consumer KDFs accumulate state using `OwnedState<ConsumerKdfState>`.
+    /// When the iterator is dropped, the state is automatically sent back
+    /// to the receiver via the sender/receiver channel pattern.
     ///
     /// Data is passed through to allow Sink to decide what happens with it.
     fn execute_consume_by_kdf(
         &self,
         child: DeclarativePlanNode,
-        node: ConsumeByKDF,
+        node: ConsumerByKDF,
     ) -> DeltaResult<FilteredDataIter> {
         let child_iter = self.execute(child)?;
-        let state = node.state.clone(); // Clone Arc, not the inner state
+        // Create owned state from the sender - state is cloned from template
+        // and will be sent back to the receiver when dropped
+        let state = node.create_owned();
 
         // Return iterator that applies consumer to each batch and passes through
         Ok(Box::new(ConsumeByKdfIterator {

@@ -321,7 +321,8 @@ impl LogSegmentBuilderState {
 
     // Single test helper instead of 9 separate accessor methods
     #[cfg(test)]
-    pub fn inner(&self) -> std::sync::MutexGuard<LogSegmentBuilderInner> {
+    #[allow(private_interfaces)]
+    pub(crate) fn inner(&self) -> std::sync::MutexGuard<'_, LogSegmentBuilderInner> {
         self.inner.lock().unwrap()
     }
 }
@@ -329,39 +330,39 @@ impl LogSegmentBuilderState {
 // Make inner public for testing
 #[cfg(test)]
 impl LogSegmentBuilderInner {
-    pub fn log_root(&self) -> &Url {
+    pub(crate) fn log_root(&self) -> &Url {
         &self.log_root
     }
-    
-    pub fn end_version(&self) -> Option<Version> {
+
+    pub(crate) fn end_version(&self) -> Option<Version> {
         self.end_version
     }
-    
-    pub fn ascending_commit_files(&self) -> &[ParsedLogPath] {
+
+    pub(crate) fn ascending_commit_files(&self) -> &[ParsedLogPath] {
         &self.ascending_commit_files
     }
-    
-    pub fn checkpoint_parts(&self) -> &[ParsedLogPath] {
+
+    pub(crate) fn checkpoint_parts(&self) -> &[ParsedLogPath] {
         &self.checkpoint_parts
     }
-    
-    pub fn latest_commit_file(&self) -> Option<&ParsedLogPath> {
+
+    pub(crate) fn latest_commit_file(&self) -> Option<&ParsedLogPath> {
         self.latest_commit_file.as_ref()
     }
-    
-    pub fn error(&self) -> Option<&String> {
+
+    pub(crate) fn error(&self) -> Option<&String> {
         self.error.as_ref()
     }
-    
-    pub fn latest_crc_file(&self) -> Option<&ParsedLogPath> {
+
+    pub(crate) fn latest_crc_file(&self) -> Option<&ParsedLogPath> {
         self.latest_crc_file.as_ref()
     }
-    
-    pub fn ascending_compaction_files(&self) -> &[ParsedLogPath] {
+
+    pub(crate) fn ascending_compaction_files(&self) -> &[ParsedLogPath] {
         &self.ascending_compaction_files
     }
-    
-    pub fn set_error(&mut self, error: String) {
+
+    pub(crate) fn set_error(&mut self, error: String) {
         self.error = Some(error);
     }
 }

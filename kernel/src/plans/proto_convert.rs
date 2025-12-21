@@ -99,12 +99,12 @@ impl From<&FilterByKDF> for proto::FilterByKdf {
     }
 }
 
-impl From<&ConsumeByKDF> for proto::ConsumeByKdf {
-    fn from(node: &ConsumeByKDF) -> Self {
+impl From<&ConsumerByKDF> for proto::ConsumeByKdf {
+    fn from(node: &ConsumerByKDF) -> Self {
         // Convert typed state to raw pointer for FFI
-        // Clone the state since we're taking ownership for the raw pointer
+        // Clone the template state from the sender since we need ownership for the raw pointer
         proto::ConsumeByKdf {
-            state_ptr: node.state.clone().into_raw(),
+            state_ptr: node.template().clone().into_raw(),
         }
     }
 }
@@ -342,18 +342,20 @@ impl From<&SnapshotPhase> for proto::SnapshotBuildPhase {
     fn from(phase: &SnapshotPhase) -> Self {
         use proto::snapshot_build_phase::Phase;
 
+        // Note: Plans are stored separately in SnapshotStateMachine::current_plan
+        // The proto conversion for the plan should happen at the state machine level
         let phase_variant = match phase {
-            SnapshotPhase::CheckpointHint(p) => Phase::CheckpointHint(proto::CheckpointHintData {
-                plan: Some(p.into()),
-                query_plan: Some((&p.as_query_plan()).into()),
+            SnapshotPhase::CheckpointHint { .. } => Phase::CheckpointHint(proto::CheckpointHintData {
+                plan: None, // Plan is stored separately
+                query_plan: None,
             }),
-            SnapshotPhase::ListFiles(p) => Phase::ListFiles(proto::FileListingPhaseData {
-                plan: Some(p.into()),
-                query_plan: Some((&p.as_query_plan()).into()),
+            SnapshotPhase::ListFiles { .. } => Phase::ListFiles(proto::FileListingPhaseData {
+                plan: None, // Plan is stored separately
+                query_plan: None,
             }),
-            SnapshotPhase::LoadMetadata(p) => Phase::LoadMetadata(proto::MetadataLoadData {
-                plan: Some(p.into()),
-                query_plan: Some((&p.as_query_plan()).into()),
+            SnapshotPhase::LoadMetadata { .. } => Phase::LoadMetadata(proto::MetadataLoadData {
+                plan: None, // Plan is stored separately
+                query_plan: None,
             }),
             SnapshotPhase::Complete => Phase::Ready(proto::SnapshotReady {
                 version: 0, // TODO: populate from actual snapshot data

@@ -27,13 +27,13 @@ use tracing::debug;
 /// The subset of file action fields that uniquely identifies it in the log, used for deduplication
 /// of adds and removes during log replay.
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
-pub struct FileActionKey {
+pub(crate) struct FileActionKey {
     pub(crate) path: String,
     pub(crate) dv_unique_id: Option<String>,
 }
 
 impl FileActionKey {
-    pub fn new(path: impl Into<String>, dv_unique_id: Option<String>) -> Self {
+    pub(crate) fn new(path: impl Into<String>, dv_unique_id: Option<String>) -> Self {
         let path = path.into();
         Self { path, dv_unique_id }
     }

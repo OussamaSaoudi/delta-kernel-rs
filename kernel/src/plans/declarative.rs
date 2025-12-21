@@ -56,9 +56,11 @@ pub enum DeclarativePlanNode {
     /// processes batches and returns a single boolean for control flow:
     /// - `true` = Continue (keep feeding data)
     /// - `false` = Break (stop iteration)
+    ///
+    /// Uses `ConsumerByKDF` (sender) - the corresponding receiver is stored in the phase.
     ConsumeByKDF {
         child: Box<DeclarativePlanNode>,
-        node: ConsumeByKDF,
+        node: ConsumerByKDF,
     },
     
     /// Filter using predicate expression
@@ -148,41 +150,27 @@ impl DeclarativePlanNode {
         }
     }
 
-    /// Add a consumer KDF with LogSegmentBuilder state.
+    /// Add a consumer KDF with a pre-built sender.
     ///
-    /// The consumer will accumulate file listing results into a LogSegment.
+    /// The sender should be created via `StateSender::build(template)`, which returns
+    /// a (sender, receiver) pair. The sender goes into the plan, and the receiver
+    /// should be stored in the corresponding phase for state collection after execution.
     ///
-    /// # Arguments
-    /// * `log_root` - The log directory root URL
-    /// * `end_version` - Optional end version to stop at
-    /// * `checkpoint_hint_version` - Optional checkpoint hint version from `_last_checkpoint`
-    pub fn consume_by_log_segment_builder(
-        self,
-        log_root: url::Url,
-        end_version: Option<crate::Version>,
-        checkpoint_hint_version: Option<crate::Version>,
-    ) -> Self {
+    /// # Example
+    ///
+    /// ```ignore
+    /// use delta_kernel::plans::kdf_state::{StateSender, ConsumerKdfState, LogSegmentBuilderState};
+    ///
+    /// let (sender, receiver) = StateSender::build(
+    ///     ConsumerKdfState::LogSegmentBuilder(LogSegmentBuilderState::new(log_root, None, None))
+    /// );
+    /// let plan = listing_node.consume_by_kdf(sender);
+    /// // Store receiver in the phase for later collection
+    /// ```
+    pub fn consume_by_kdf(self, kdf: ConsumerByKDF) -> Self {
         Self::ConsumeByKDF {
             child: Box::new(self),
-            node: ConsumeByKDF::log_segment_builder(log_root, end_version, checkpoint_hint_version),
-        }
-    }
-
-    /// Add a consumer KDF with CheckpointHintReader state.
-    ///
-    /// The consumer will extract checkpoint hint information from scan results.
-    pub fn consume_by_checkpoint_hint_reader(self) -> Self {
-        Self::ConsumeByKDF {
-            child: Box::new(self),
-            node: ConsumeByKDF::checkpoint_hint_reader(),
-        }
-    }
-
-    /// Add a consumer KDF with existing typed state.
-    pub fn consume_by_kdf_with_state(self, state: super::kdf_state::ConsumerKdfState) -> Self {
-        Self::ConsumeByKDF {
-            child: Box::new(self),
-            node: ConsumeByKDF::with_state(state),
+            node: kdf,
         }
     }
 

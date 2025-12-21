@@ -37,7 +37,7 @@ impl CheckpointDedupState {
     ///
     /// This is the primary constructor for checkpoint dedup, typically called
     /// after deserializing keys that were accumulated during the commit phase.
-    pub fn from_hashset(seen_keys: HashSet<FileActionKey>) -> Self {
+    pub(crate) fn from_hashset(seen_keys: HashSet<FileActionKey>) -> Self {
         Self { seen_keys }
     }
 
@@ -139,7 +139,7 @@ impl CheckpointDedupState {
     }
 
     /// Check if a key has been seen (read-only probe).
-    pub fn contains(&self, key: &FileActionKey) -> bool {
+    pub(crate) fn contains(&self, key: &FileActionKey) -> bool {
         self.seen_keys.contains(key)
     }
 

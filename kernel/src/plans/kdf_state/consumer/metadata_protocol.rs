@@ -143,7 +143,8 @@ impl MetadataProtocolReaderState {
 
     // Single test helper instead of 3 separate accessor methods
     #[cfg(test)]
-    pub fn inner(&self) -> std::sync::MutexGuard<MetadataProtocolReaderInner> {
+    #[allow(private_interfaces)]
+    pub(crate) fn inner(&self) -> std::sync::MutexGuard<'_, MetadataProtocolReaderInner> {
         self.inner.lock().unwrap()
     }
 }
@@ -151,15 +152,15 @@ impl MetadataProtocolReaderState {
 // Make inner public for testing
 #[cfg(test)]
 impl MetadataProtocolReaderInner {
-    pub fn protocol(&self) -> Option<&Protocol> {
+    pub(crate) fn protocol(&self) -> Option<&Protocol> {
         self.protocol.as_ref()
     }
-    
-    pub fn metadata(&self) -> Option<&Metadata> {
+
+    pub(crate) fn metadata(&self) -> Option<&Metadata> {
         self.metadata.as_ref()
     }
-    
-    pub fn error(&self) -> Option<&String> {
+
+    pub(crate) fn error(&self) -> Option<&String> {
         self.error.as_ref()
     }
 }

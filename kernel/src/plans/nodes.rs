@@ -12,9 +12,9 @@ use crate::FileMeta;
 use crate::Version;
 
 use super::kdf_state::{
-    CheckpointHintReaderState, ConsumerKdfState, FilterKdfState, FilterStateSender,
-    LogSegmentBuilderState, MetadataProtocolReaderState, SchemaReaderState, SchemaStoreState,
-    SidecarCollectorState,
+    CheckpointHintReaderState, ConsumerKdfState, ConsumerStateSender, FilterKdfState,
+    FilterStateSender, LogSegmentBuilderState, MetadataProtocolReaderState, SchemaReaderState,
+    SchemaStoreState, SidecarCollectorState,
 };
 
 // =============================================================================
@@ -110,6 +110,27 @@ pub struct FileListingNode {
 /// // receiver (FilterStateReceiver) goes into the phase
 /// ```
 pub type FilterByKDF = FilterStateSender;
+
+/// Type alias for consumer KDF sender.
+///
+/// `ConsumerByKDF` is a type alias for `StateSender<ConsumerKdfState>`. Plans hold the sender
+/// (which creates `OwnedState` for each partition), while phases hold the corresponding
+/// `StateReceiver` to collect results after execution.
+///
+/// # Creating ConsumerByKDF
+///
+/// Use `StateSender::build(template)` to create a sender/receiver pair:
+///
+/// ```ignore
+/// use delta_kernel::plans::kdf_state::{StateSender, ConsumerKdfState, CheckpointHintReaderState};
+///
+/// let (sender, receiver) = StateSender::build(
+///     ConsumerKdfState::CheckpointHintReader(CheckpointHintReaderState::new())
+/// );
+/// // sender (ConsumerByKDF) goes into the plan
+/// // receiver (ConsumerStateReceiver) goes into the phase
+/// ```
+pub type ConsumerByKDF = ConsumerStateSender;
 
 /// Consume rows using a kernel-defined function (KDF).
 ///

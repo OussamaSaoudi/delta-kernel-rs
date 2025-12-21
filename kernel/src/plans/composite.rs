@@ -4,6 +4,7 @@
 //! Engines that want compile-time knowledge of plan structure can use these directly.
 
 use super::nodes::*;
+use super::kdf_state::ConsumerKdfState;
 use super::{AsQueryPlan, DeclarativePlanNode};
 
 // =============================================================================
@@ -53,14 +54,16 @@ pub struct CommitPhasePlan {
 /// 2. Project the sidecar.path column
 /// 3. Collect the sidecar file paths via ConsumeByKDF
 /// 4. These paths are then used in the CheckpointLeaf phase
+///
+/// Uses `ConsumerByKDF` (sender) - the corresponding receiver is stored in the phase.
 #[derive(Debug, Clone)]
 pub struct CheckpointManifestPlan {
     /// Scan manifest parquet file
     pub scan: ScanNode,
     /// Project sidecar file paths
     pub project: SelectNode,
-    /// Consumer KDF to collect sidecar file paths
-    pub sidecar_collector: ConsumeByKDF,
+    /// Consumer KDF sender to collect sidecar file paths
+    pub sidecar_collector: ConsumerByKDF,
     /// Terminal sink (default: Drop)
     pub sink: SinkNode,
 }
@@ -87,12 +90,13 @@ pub struct CheckpointLeafPlan {
 /// Structure: FileListing → ConsumeByKDF (LogSegmentBuilder) → Sink
 ///
 /// The consumer KDF processes file listing results to build a LogSegment.
+/// Uses `ConsumerByKDF` (sender) - the corresponding receiver is stored in the phase.
 #[derive(Debug, Clone)]
 pub struct FileListingPhasePlan {
     /// List files from _delta_log
     pub listing: FileListingNode,
-    /// Consumer KDF to build LogSegment from listing results
-    pub log_segment_builder: ConsumeByKDF,
+    /// Consumer KDF sender to build LogSegment from listing results
+    pub log_segment_builder: ConsumerByKDF,
     /// Terminal sink (default: Drop)
     pub sink: SinkNode,
 }
@@ -103,12 +107,13 @@ pub struct FileListingPhasePlan {
 ///
 /// The consumer KDF processes scan results to extract the first non-null
 /// protocol and metadata actions needed for snapshot construction.
+/// Uses `ConsumerByKDF` (sender) - the corresponding receiver is stored in the phase.
 #[derive(Debug, Clone)]
 pub struct MetadataLoadPlan {
     /// Scan protocol/metadata files (JSON commits or Parquet checkpoints)
     pub scan: ScanNode,
-    /// Consumer KDF to extract protocol and metadata from scan results
-    pub metadata_reader: ConsumeByKDF,
+    /// Consumer KDF sender to extract protocol and metadata from scan results
+    pub metadata_reader: ConsumerByKDF,
     /// Terminal sink (default: Drop)
     pub sink: SinkNode,
 }
@@ -118,12 +123,13 @@ pub struct MetadataLoadPlan {
 /// Structure: Scan (JSON) → ConsumeByKDF (CheckpointHintReader) → Sink
 ///
 /// The consumer KDF processes scan results to extract the checkpoint hint.
+/// Uses `ConsumerByKDF` (sender) - the corresponding receiver is stored in the phase.
 #[derive(Debug, Clone)]
 pub struct CheckpointHintPlan {
     /// Scan the _last_checkpoint JSON file
     pub scan: ScanNode,
-    /// Consumer KDF to extract checkpoint hint from scan results
-    pub hint_reader: ConsumeByKDF,
+    /// Consumer KDF sender to extract checkpoint hint from scan results
+    pub hint_reader: ConsumerByKDF,
     /// Terminal sink (default: Drop)
     pub sink: SinkNode,
 }
@@ -153,12 +159,14 @@ pub struct SchemaQueryPhasePlan {
 /// After execution:
 /// - If sidecars were collected: transition to CheckpointLeaf to read sidecar files
 /// - If no sidecars: all add actions were in the checkpoint, done
+///
+/// Uses `ConsumerByKDF` (sender) - the corresponding receiver is stored in the phase.
 #[derive(Debug, Clone)]
 pub struct JsonCheckpointPhasePlan {
     /// Scan JSON checkpoint file
     pub scan: ScanNode,
-    /// Consumer KDF to collect sidecar file paths (sees all rows before filtering)
-    pub sidecar_collector: ConsumeByKDF,
+    /// Consumer KDF sender to collect sidecar file paths (sees all rows before filtering)
+    pub sidecar_collector: ConsumerByKDF,
     /// Optional partition pruning filter (partitionValues-only pruning)
     pub partition_prune_filter: Option<FilterByKDF>,
     /// Deduplication filter for add/remove actions

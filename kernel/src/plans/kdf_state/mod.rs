@@ -25,7 +25,7 @@ pub use filter::*;
 pub use consumer::*;
 pub use schema::*;
 pub use traits::*;
-pub use serialization::*;
+pub(crate) use serialization::*;
 
 // Re-export macros at crate root for easier access
 pub use macros::*;

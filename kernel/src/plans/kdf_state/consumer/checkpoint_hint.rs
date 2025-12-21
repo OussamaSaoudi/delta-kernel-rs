@@ -136,7 +136,8 @@ impl CheckpointHintReaderState {
 
     // Single test helper instead of 6 separate accessor methods
     #[cfg(test)]
-    pub fn inner(&self) -> std::sync::MutexGuard<CheckpointHintReaderInner> {
+    #[allow(private_interfaces)]
+    pub(crate) fn inner(&self) -> std::sync::MutexGuard<'_, CheckpointHintReaderInner> {
         self.inner.lock().unwrap()
     }
 }
@@ -144,27 +145,27 @@ impl CheckpointHintReaderState {
 // Make inner public for testing
 #[cfg(test)]
 impl CheckpointHintReaderInner {
-    pub fn version(&self) -> Option<Version> {
+    pub(crate) fn version(&self) -> Option<Version> {
         self.version
     }
-    
-    pub fn parts(&self) -> Option<i32> {
+
+    pub(crate) fn parts(&self) -> Option<i32> {
         self.parts
     }
-    
-    pub fn size(&self) -> Option<i64> {
+
+    pub(crate) fn size(&self) -> Option<i64> {
         self.size
     }
-    
-    pub fn error(&self) -> Option<&String> {
+
+    pub(crate) fn error(&self) -> Option<&String> {
         self.error.as_ref()
     }
-    
-    pub fn size_in_bytes(&self) -> Option<i64> {
+
+    pub(crate) fn size_in_bytes(&self) -> Option<i64> {
         self.size_in_bytes
     }
-    
-    pub fn num_of_add_files(&self) -> Option<i64> {
+
+    pub(crate) fn num_of_add_files(&self) -> Option<i64> {
         self.num_of_add_files
     }
 }

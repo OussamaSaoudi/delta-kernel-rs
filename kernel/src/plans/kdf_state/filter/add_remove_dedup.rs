@@ -133,12 +133,12 @@ impl AddRemoveDedupState {
     }
 
     /// Check if a key has been seen.
-    pub fn contains(&self, key: &FileActionKey) -> bool {
+    pub(crate) fn contains(&self, key: &FileActionKey) -> bool {
         self.seen_keys.contains(key)
     }
 
     /// Insert a key into the seen set.
-    pub fn insert(&mut self, key: FileActionKey) -> bool {
+    pub(crate) fn insert(&mut self, key: FileActionKey) -> bool {
         self.seen_keys.insert(key)
     }
 
@@ -154,7 +154,7 @@ impl AddRemoveDedupState {
 
     /// Get a clone of the seen keys.
     /// Used to transfer state to CheckpointDedupState for checkpoint phase.
-    pub fn seen_keys(&self) -> HashSet<FileActionKey> {
+    pub(crate) fn seen_keys(&self) -> HashSet<FileActionKey> {
         self.seen_keys.clone()
     }
 

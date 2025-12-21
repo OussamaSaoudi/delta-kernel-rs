@@ -622,20 +622,19 @@ mod declarative_phase_tests {
     fn test_declarative_phase_proto_roundtrip() {
         use prost::Message;
         use crate::proto_generated as proto;
+        use crate::plans::kdf_state::{StateSender, ConsumerKdfState, LogSegmentBuilderState};
         
-        // Create a DeclarativePhase for snapshot build operation
-        let list_files_plan = FileListingPhasePlan {
-            listing: FileListingNode {
-                path: url::Url::parse("file:///test/_delta_log/").unwrap(),
-            },
-            log_segment_builder: ConsumeByKDF::log_segment_builder(
+        // Create a sender/receiver pair for the log segment builder
+        let (_sender, receiver) = StateSender::build(ConsumerKdfState::LogSegmentBuilder(
+            LogSegmentBuilderState::new(
                 url::Url::parse("file:///test/_delta_log/").unwrap(),
                 None, // end_version
                 None, // checkpoint_hint_version
             ),
-            sink: SinkNode::drop(), // Drop sink for snapshot operations
-        };
-        let phase = SnapshotPhase::ListFiles(list_files_plan);
+        ));
+        
+        // Create a SnapshotPhase with the receiver
+        let phase = SnapshotPhase::ListFiles { consumer_receiver: receiver };
         let declarative = phase.as_declarative_phase();
         
         // Convert to proto
@@ -652,7 +651,8 @@ mod declarative_phase_tests {
         // Verify
         assert_eq!(decoded.operation, proto::OperationType::SnapshotBuild as i32);
         assert_eq!(decoded.phase_type, proto::PhaseType::ListFiles as i32);
-        assert!(decoded.query_plan.is_some());
+        // Note: query_plan is now None because plans are stored separately from phases
+        assert!(decoded.query_plan.is_none());
         assert!(decoded.terminal_data.is_none());
     }
 }
@@ -854,12 +854,16 @@ mod schema_query_tests {
     }
 
     #[test]
-    fn test_sidecar_collector_state_from_consumer_kdf() {
+    fn test_sidecar_collector_state_from_consumer_sender() {
+        use crate::plans::kdf_state::{StateSender, ConsumerKdfState, SidecarCollectorState};
+        
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
-        let consumer = ConsumeByKDF::sidecar_collector(log_root);
+        let (sender, _receiver) = StateSender::build(ConsumerKdfState::SidecarCollector(
+            SidecarCollectorState::new(log_root),
+        ));
 
-        // Verify it's the right variant
-        assert!(matches!(&consumer.state, ConsumerKdfState::SidecarCollector(_)));
+        // Verify template is the right variant
+        assert!(matches!(sender.template(), ConsumerKdfState::SidecarCollector(_)));
     }
 }
 
@@ -1235,7 +1239,12 @@ mod state_machine_transition_tests {
 
     #[test]
     fn test_scan_phase_checkpoint_manifest_has_drop_sink() {
+        use crate::plans::kdf_state::{StateSender, ConsumerKdfState, SidecarCollectorState};
+        
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
+        let (sender, _receiver) = StateSender::build(ConsumerKdfState::SidecarCollector(
+            SidecarCollectorState::new(log_root),
+        ));
         let manifest_plan = CheckpointManifestPlan {
             scan: ScanNode {
                 file_type: FileType::Parquet,
@@ -1246,7 +1255,7 @@ mod state_machine_transition_tests {
                 columns: vec![],
                 output_schema: Arc::new(StructType::new_unchecked(vec![])),
             },
-            sidecar_collector: ConsumeByKDF::sidecar_collector(log_root),
+            sidecar_collector: sender,
             sink: SinkNode::drop(),
         };
         
@@ -1398,7 +1407,12 @@ mod state_machine_transition_tests {
 
     #[test]
     fn test_checkpoint_manifest_phase_plan_contents() {
+        use crate::plans::kdf_state::{StateSender, ConsumerKdfState, SidecarCollectorState};
+        
         let log_root = url::Url::parse("file:///test/_delta_log/").unwrap();
+        let (sender, _receiver) = StateSender::build(ConsumerKdfState::SidecarCollector(
+            SidecarCollectorState::new(log_root),
+        ));
         let manifest_plan = CheckpointManifestPlan {
             scan: ScanNode {
                 file_type: FileType::Parquet,
@@ -1417,7 +1431,7 @@ mod state_machine_transition_tests {
                     StructField::not_null("sizeInBytes", DataType::LONG),
                 ])),
             },
-            sidecar_collector: ConsumeByKDF::sidecar_collector(log_root),
+            sidecar_collector: sender,
             sink: SinkNode::drop(),
         };
         

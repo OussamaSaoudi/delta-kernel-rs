@@ -438,6 +438,7 @@ impl Scan {
     /// This is used by [`TransformComputer`] to compute row-level transforms.
     ///
     /// [`TransformComputer`]: crate::scan::transform::TransformComputer
+    #[allow(dead_code)] // Reserved for future use by TransformComputer
     pub(crate) fn state_info(&self) -> Arc<StateInfo> {
         self.state_info.clone()
     }
@@ -707,6 +708,8 @@ impl Scan {
     }
 
     // Factored out to facilitate testing
+    // Used in non-arrow builds and in tests
+    #[allow(dead_code)]
     fn replay_for_scan_metadata(
         &self,
         engine: &dyn Engine,

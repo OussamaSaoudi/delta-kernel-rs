@@ -58,11 +58,11 @@ use super::composite::*;
 use super::declarative::DeclarativePlanNode;
 use super::kdf_state::{
     AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState,
-    FilterKdfState, FilterStateReceiver, LogSegmentBuilderState, MetadataProtocolReaderState,
-    StateSender,
+    ConsumerStateReceiver, FilterKdfState, FilterStateReceiver, LogSegmentBuilderState,
+    MetadataProtocolReaderState, StateSender,
 };
 use super::nodes::{
-    ConsumeByKDF, FileListingNode, FileType, FilterByExpressionNode, FilterByKDF, FirstNonNullNode,
+    ConsumerByKDF, FileListingNode, FileType, FilterByExpressionNode, FilterByKDF, FirstNonNullNode,
     ParseJsonNode, ScanNode, SchemaQueryNode, SelectNode, SinkNode,
 };
 use super::AsQueryPlan;
@@ -266,33 +266,24 @@ pub enum CheckpointType {
 // Snapshot State Machine
 // =============================================================================
 
-/// Phase of the snapshot state machine with embedded typed plans.
+/// Phase of the snapshot state machine - holds receivers for state collection.
 ///
-/// Each variant contains the compile-time typed plan struct for that phase.
-/// Use `as_query_plan()` to convert to runtime `DeclarativePlanNode`.
-#[derive(Debug, Clone)]
+/// Phases hold `ConsumerStateReceiver` to collect consumer states after execution completes.
+/// The corresponding plan (which holds the sender) is stored separately in
+/// `SnapshotStateMachine::current_plan`.
+#[derive(Debug)]
 pub enum SnapshotPhase {
-    /// Read _last_checkpoint hint file
-    CheckpointHint(CheckpointHintPlan),
-    /// List files in _delta_log directory
-    ListFiles(FileListingPhasePlan),
-    /// Read protocol and metadata from log files
-    LoadMetadata(MetadataLoadPlan),
+    /// Read _last_checkpoint hint file - holds receiver for CheckpointHintReader state
+    CheckpointHint { consumer_receiver: ConsumerStateReceiver },
+    /// List files in _delta_log directory - holds receiver for LogSegmentBuilder state
+    ListFiles { consumer_receiver: ConsumerStateReceiver },
+    /// Read protocol and metadata from log files - holds receiver for MetadataProtocolReader state
+    LoadMetadata { consumer_receiver: ConsumerStateReceiver },
     /// Snapshot is ready
     Complete,
 }
 
 impl SnapshotPhase {
-    /// Get the query plan for the current phase (if not complete).
-    pub fn as_query_plan(&self) -> Option<DeclarativePlanNode> {
-        match self {
-            Self::CheckpointHint(p) => Some(p.as_query_plan()),
-            Self::ListFiles(p) => Some(p.as_query_plan()),
-            Self::LoadMetadata(p) => Some(p.as_query_plan()),
-            Self::Complete => None,
-        }
-    }
-
     /// Check if this is a terminal state.
     pub fn is_complete(&self) -> bool {
         matches!(self, Self::Complete)
@@ -301,10 +292,36 @@ impl SnapshotPhase {
     /// Get the phase name for debugging/logging.
     pub fn phase_name(&self) -> &'static str {
         match self {
-            Self::CheckpointHint(_) => "CheckpointHint",
-            Self::ListFiles(_) => "ListFiles",
-            Self::LoadMetadata(_) => "LoadMetadata",
+            Self::CheckpointHint { .. } => "CheckpointHint",
+            Self::ListFiles { .. } => "ListFiles",
+            Self::LoadMetadata { .. } => "LoadMetadata",
             Self::Complete => "Complete",
+        }
+    }
+}
+
+/// Plan enum for snapshot state machine - holds plan structs with senders.
+///
+/// Plans contain `ConsumerByKDF` (which is `StateSender<ConsumerKdfState>`) that
+/// creates `OwnedState` for each partition during execution. The sender
+/// is cloned into each partition's stream.
+#[derive(Debug, Clone)]
+pub enum SnapshotPlan {
+    /// Read _last_checkpoint hint file
+    CheckpointHint(CheckpointHintPlan),
+    /// List files in _delta_log directory
+    ListFiles(FileListingPhasePlan),
+    /// Read protocol and metadata from log files
+    LoadMetadata(MetadataLoadPlan),
+}
+
+impl SnapshotPlan {
+    /// Get the query plan for this plan variant.
+    pub fn as_query_plan(&self) -> DeclarativePlanNode {
+        match self {
+            Self::CheckpointHint(p) => p.as_query_plan(),
+            Self::ListFiles(p) => p.as_query_plan(),
+            Self::LoadMetadata(p) => p.as_query_plan(),
         }
     }
 }
@@ -312,22 +329,22 @@ impl SnapshotPhase {
 impl AsDeclarativePhase for SnapshotPhase {
     fn as_declarative_phase(&self) -> DeclarativePhase {
         match self {
-            Self::CheckpointHint(plan) => DeclarativePhase {
+            Self::CheckpointHint { .. } => DeclarativePhase {
                 operation: OperationType::SnapshotBuild,
                 phase_type: PhaseType::CheckpointHint,
-                query_plan: Some(plan.as_query_plan()),
+                query_plan: None, // Plan is stored separately
                 terminal_data: None,
             },
-            Self::ListFiles(plan) => DeclarativePhase {
+            Self::ListFiles { .. } => DeclarativePhase {
                 operation: OperationType::SnapshotBuild,
                 phase_type: PhaseType::ListFiles,
-                query_plan: Some(plan.as_query_plan()),
+                query_plan: None, // Plan is stored separately
                 terminal_data: None,
             },
-            Self::LoadMetadata(plan) => DeclarativePhase {
+            Self::LoadMetadata { .. } => DeclarativePhase {
                 operation: OperationType::SnapshotBuild,
                 phase_type: PhaseType::LoadMetadata,
-                query_plan: Some(plan.as_query_plan()),
+                query_plan: None, // Plan is stored separately
                 terminal_data: None,
             },
             Self::Complete => DeclarativePhase {
@@ -386,18 +403,37 @@ impl SnapshotBuildState {
 /// 3. `LoadMetadata` - Read protocol and metadata from log files
 /// 4. `Complete` - Snapshot is ready
 ///
+/// # Architecture
+///
+/// The state machine separates **phases** from **plans**:
+/// - **Phases** (`phase`) hold receivers for state collection
+/// - **Plans** (`current_plan`) hold senders that go to the executor
+///
+/// When creating a phase, `StateSender::build()` creates a sender/receiver pair.
+/// The sender goes into the plan, the receiver goes into the phase. After execution,
+/// states are collected via the receiver and processed.
+///
 /// # Example
 ///
 /// ```ignore
 /// let sm = SnapshotStateMachine::new(table_root)?;
-/// let snapshot = executor.execute_state_machine(sm)?;
-/// // snapshot is a full Snapshot with LogSegment and TableConfiguration
+///
+/// loop {
+///     let plan = sm.take_plan()?;
+///     let result = executor.execute_plan(plan)?;
+///     match sm.advance(result)? {
+///         AdvanceResult::Continue => continue,
+///         AdvanceResult::Done(snapshot) => return Ok(snapshot),
+///     }
+/// }
 /// ```
 #[derive(Debug)]
 pub struct SnapshotStateMachine {
-    /// Current phase
+    /// Current phase - holds receivers for state collection
     phase: SnapshotPhase,
-    /// Accumulated state
+    /// Current plan - holds senders, taken once per phase
+    current_plan: Option<SnapshotPlan>,
+    /// Accumulated state across phases
     state: SnapshotBuildState,
 }
 
@@ -405,9 +441,10 @@ impl SnapshotStateMachine {
     /// Create a new snapshot state machine for a table.
     pub fn new(table_root: Url) -> DeltaResult<Self> {
         let state = SnapshotBuildState::new(table_root)?;
-        let initial_plan = Self::create_checkpoint_hint_plan(&state)?;
+        let (phase, plan) = Self::create_checkpoint_hint_phase_and_plan(&state)?;
         Ok(Self {
-            phase: SnapshotPhase::CheckpointHint(initial_plan),
+            phase,
+            current_plan: Some(plan),
             state,
         })
     }
@@ -419,21 +456,38 @@ impl SnapshotStateMachine {
         Ok(sm)
     }
 
-    /// Get the current phase.
+    /// Get the current phase (for testing/debugging).
     pub fn phase(&self) -> &SnapshotPhase {
         &self.phase
     }
 
     /// Check if terminal.
     pub fn is_terminal(&self) -> bool {
-        matches!(self.phase, SnapshotPhase::Complete)
+        self.phase.is_complete()
     }
 
-    /// Get the plan for the current phase.
+    /// Take the current plan for execution.
+    ///
+    /// This method takes ownership of the plan, which should only be called once per phase.
+    /// After execution, call `advance()` to transition to the next phase.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if called when no plan is available (already taken or complete state).
+    pub fn take_plan(&mut self) -> DeltaResult<SnapshotPlan> {
+        self.current_plan
+            .take()
+            .ok_or_else(|| Error::generic("Plan already taken or state machine is complete"))
+    }
+
+    /// Get the plan for the current phase (without taking ownership).
+    ///
+    /// This returns the `DeclarativePlanNode` representation suitable for execution.
     pub fn get_plan(&self) -> DeltaResult<DeclarativePlanNode> {
-        self.phase
-            .as_query_plan()
-            .ok_or_else(|| Error::generic("Cannot get plan from Complete state"))
+        self.current_plan
+            .as_ref()
+            .map(|p| p.as_query_plan())
+            .ok_or_else(|| Error::generic("No plan available - already taken or complete state"))
     }
 
     /// Get the declarative phase (for runtime inspection).
@@ -442,17 +496,28 @@ impl SnapshotStateMachine {
     }
 
     /// Advance the state machine with the result of plan execution.
+    ///
+    /// This method:
+    /// 1. Takes ownership of the current phase (which contains the receiver)
+    /// 2. Collects states from the receiver
+    /// 3. Processes states and updates accumulated state
+    /// 4. Creates the next phase/plan pair
+    /// 5. Transitions to the next phase
     pub fn advance(
         &mut self,
         result: DeltaResult<DeclarativePlanNode>,
     ) -> DeltaResult<AdvanceResult<Snapshot>> {
-        match &self.phase {
-            SnapshotPhase::CheckpointHint(_) => {
+        // Take ownership of the current phase to extract the receiver
+        let phase = std::mem::replace(&mut self.phase, SnapshotPhase::Complete);
+
+        match phase {
+            SnapshotPhase::CheckpointHint { consumer_receiver } => {
                 // For CheckpointHint phase, FileNotFound is OK - the file is optional
                 match result {
-                    Ok(executed_plan) => {
-                        // Extract checkpoint hint state from the executed plan
-                        self.extract_consumer_kdf_state(executed_plan)?;
+                    Ok(_) => {
+                        // Collect states from receiver
+                        let states = consumer_receiver.take_all()?;
+                        self.extract_checkpoint_hint_from_states(states)?;
                     }
                     Err(Error::FileNotFound(_)) => {
                         // _last_checkpoint file not found is OK - continue without hint
@@ -470,29 +535,33 @@ impl SnapshotStateMachine {
                     }
                 }
 
-                // Move to ListFiles phase with its plan
-                let list_files_plan = Self::create_list_files_plan(&self.state)?;
-                self.phase = SnapshotPhase::ListFiles(list_files_plan);
+                // Create next phase/plan
+                let (phase, plan) = self.create_list_files_phase_and_plan()?;
+                self.phase = phase;
+                self.current_plan = Some(plan);
                 Ok(AdvanceResult::Continue)
             }
-            SnapshotPhase::ListFiles(_) => {
+            SnapshotPhase::ListFiles { consumer_receiver } => {
                 // Propagate execution errors for this phase
-                let executed_plan = result?;
+                result?;
 
-                // Extract consumer KDF state from the executed plan (builds LogSegment)
-                self.extract_consumer_kdf_state(executed_plan)?;
+                // Collect states from receiver
+                let states = consumer_receiver.take_all()?;
+                self.extract_log_segment_from_states(states)?;
 
-                // Move to LoadMetadata phase with its plan
-                let load_metadata_plan = Self::create_load_metadata_plan(&self.state)?;
-                self.phase = SnapshotPhase::LoadMetadata(load_metadata_plan);
+                // Create next phase/plan
+                let (phase, plan) = self.create_load_metadata_phase_and_plan()?;
+                self.phase = phase;
+                self.current_plan = Some(plan);
                 Ok(AdvanceResult::Continue)
             }
-            SnapshotPhase::LoadMetadata(_) => {
+            SnapshotPhase::LoadMetadata { consumer_receiver } => {
                 // Propagate execution errors for this phase
-                let executed_plan = result?;
+                result?;
 
-                // Extract protocol and metadata from the executed plan's consumer KDF state
-                self.extract_consumer_kdf_state(executed_plan)?;
+                // Collect states from receiver
+                let states = consumer_receiver.take_all()?;
+                self.extract_protocol_metadata_from_states(states)?;
 
                 // Fail if protocol or metadata were not found - this is required for snapshot construction
                 let protocol = self
@@ -508,6 +577,7 @@ impl SnapshotStateMachine {
 
                 // Complete - build the full Snapshot
                 self.phase = SnapshotPhase::Complete;
+                self.current_plan = None;
 
                 // Get the LogSegment built during ListFiles phase
                 let log_segment =
@@ -532,10 +602,12 @@ impl SnapshotStateMachine {
     }
 
     // =========================================================================
-    // Plan Creation Helpers
+    // Phase/Plan Creation Helpers
     // =========================================================================
 
-    fn create_checkpoint_hint_plan(state: &SnapshotBuildState) -> DeltaResult<CheckpointHintPlan> {
+    fn create_checkpoint_hint_phase_and_plan(
+        state: &SnapshotBuildState,
+    ) -> DeltaResult<(SnapshotPhase, SnapshotPlan)> {
         use crate::schema::{DataType, StructField, StructType};
 
         let checkpoint_path = state.log_root.join("_last_checkpoint")?;
@@ -554,39 +626,62 @@ impl SnapshotStateMachine {
             StructField::nullable("numOfAddFiles", DataType::LONG),
         ]));
 
-        Ok(CheckpointHintPlan {
+        // Build sender/receiver pair for checkpoint hint reader
+        let (sender, receiver) = StateSender::build(ConsumerKdfState::CheckpointHintReader(
+            CheckpointHintReaderState::new(),
+        ));
+
+        let plan = CheckpointHintPlan {
             scan: ScanNode {
                 file_type: FileType::Json,
                 files: vec![file_meta],
                 schema: checkpoint_schema,
             },
-            hint_reader: ConsumeByKDF::checkpoint_hint_reader(),
-            sink: SinkNode::drop(), // Drop sink - no results, just side effects
-        })
-    }
+            hint_reader: sender,
+            sink: SinkNode::drop(),
+        };
 
-    fn create_list_files_plan(state: &SnapshotBuildState) -> DeltaResult<FileListingPhasePlan> {
-        // List files in the _delta_log directory with LogSegmentBuilder consumer
-        // Pass the checkpoint hint version from the previous phase to optimize file listing
-        Ok(FileListingPhasePlan {
-            listing: FileListingNode {
-                path: state.log_root.clone(),
+        Ok((
+            SnapshotPhase::CheckpointHint {
+                consumer_receiver: receiver,
             },
-            log_segment_builder: ConsumeByKDF::log_segment_builder(
-                state.log_root.clone(),
-                state.version.map(|v| v as u64),
-                state.checkpoint_hint_version.map(|v| v as u64),
-            ),
-            sink: SinkNode::drop(), // Drop sink - no results, just side effects
-        })
+            SnapshotPlan::CheckpointHint(plan),
+        ))
     }
 
-    fn create_load_metadata_plan(state: &SnapshotBuildState) -> DeltaResult<MetadataLoadPlan> {
+    fn create_list_files_phase_and_plan(&self) -> DeltaResult<(SnapshotPhase, SnapshotPlan)> {
+        // Build sender/receiver pair for log segment builder
+        let (sender, receiver) = StateSender::build(ConsumerKdfState::LogSegmentBuilder(
+            LogSegmentBuilderState::new(
+                self.state.log_root.clone(),
+                self.state.version.map(|v| v as u64),
+                self.state.checkpoint_hint_version.map(|v| v as u64),
+            ),
+        ));
+
+        let plan = FileListingPhasePlan {
+            listing: FileListingNode {
+                path: self.state.log_root.clone(),
+            },
+            log_segment_builder: sender,
+            sink: SinkNode::drop(),
+        };
+
+        Ok((
+            SnapshotPhase::ListFiles {
+                consumer_receiver: receiver,
+            },
+            SnapshotPlan::ListFiles(plan),
+        ))
+    }
+
+    fn create_load_metadata_phase_and_plan(&self) -> DeltaResult<(SnapshotPhase, SnapshotPlan)> {
         use crate::actions::{METADATA_NAME, PROTOCOL_NAME};
         use crate::schema::{StructField, StructType, ToSchema};
 
         // Get the log segment built during ListFiles phase
-        let log_segment = state
+        let log_segment = self
+            .state
             .log_segment
             .as_ref()
             .ok_or_else(|| Error::generic("LogSegment not available for LoadMetadata phase"))?;
@@ -603,13 +698,11 @@ impl SnapshotStateMachine {
 
         // Add checkpoint files first (they contain complete P&M)
         for checkpoint in &log_segment.checkpoint_parts {
-            // ParsedLogPath<FileMeta>.location is already a FileMeta
             files.push(checkpoint.location.clone());
         }
 
         // Add commit files (in reverse order - newest first to find P&M faster)
         for commit in log_segment.ascending_commit_files.iter().rev() {
-            // ParsedLogPath<FileMeta>.location is already a FileMeta
             files.push(commit.location.clone());
         }
 
@@ -620,75 +713,95 @@ impl SnapshotStateMachine {
             FileType::Json
         };
 
-        Ok(MetadataLoadPlan {
+        // Build sender/receiver pair for metadata protocol reader
+        let (sender, receiver) = StateSender::build(ConsumerKdfState::MetadataProtocolReader(
+            MetadataProtocolReaderState::new(),
+        ));
+
+        let plan = MetadataLoadPlan {
             scan: ScanNode {
                 file_type,
                 files,
                 schema,
             },
-            metadata_reader: ConsumeByKDF::metadata_protocol_reader(),
-            sink: SinkNode::drop(), // Drop sink - no results, just side effects
-        })
+            metadata_reader: sender,
+            sink: SinkNode::drop(),
+        };
+
+        Ok((
+            SnapshotPhase::LoadMetadata {
+                consumer_receiver: receiver,
+            },
+            SnapshotPlan::LoadMetadata(plan),
+        ))
     }
 
-    /// Extract consumer KDF state from the executed plan and update snapshot build state.
-    ///
-    /// Walks the plan tree to find ConsumeByKDF nodes and extracts the results.
-    fn extract_consumer_kdf_state(&mut self, plan: DeclarativePlanNode) -> DeltaResult<()> {
-        match plan {
-            DeclarativePlanNode::ConsumeByKDF { child: _, node } => {
-                // Extract state based on consumer type
-                match node.state {
-                    ConsumerKdfState::LogSegmentBuilder(builder_state) => {
-                        // Build LogSegment directly from the builder state
-                        self.state.log_segment = Some(builder_state.into_log_segment()?);
-                    }
-                    ConsumerKdfState::CheckpointHintReader(hint_state) => {
-                        // Check for errors first
-                        if let Some(error) = hint_state.take_error() {
-                            return Err(Error::generic(error));
-                        }
+    // =========================================================================
+    // State Extraction Helpers
+    // =========================================================================
 
-                        // Extract checkpoint hint version if present
-                        if let Some(version) = hint_state.get_version() {
-                            self.state.checkpoint_hint_version = Some(version as i64);
-                        }
-                    }
-                    ConsumerKdfState::MetadataProtocolReader(mp_state) => {
-                        // Check for errors first
-                        if let Some(error) = mp_state.take_error() {
-                            return Err(Error::generic(error));
-                        }
-
-                        // Extract protocol if present (already a complete Protocol or None)
-                        if let Some(protocol) = mp_state.take_protocol() {
-                            self.state.protocol = Some(protocol);
-                        }
-
-                        // Extract metadata if present (already a complete Metadata or None)
-                        if let Some(metadata) = mp_state.take_metadata() {
-                            self.state.metadata = Some(metadata);
-                        }
-                    }
-                    ConsumerKdfState::SidecarCollector(_) => {
-                        // SidecarCollector is not used in snapshot building
-                    }
+    /// Extract checkpoint hint from collected consumer states.
+    fn extract_checkpoint_hint_from_states(
+        &mut self,
+        states: Vec<ConsumerKdfState>,
+    ) -> DeltaResult<()> {
+        for state in states {
+            if let ConsumerKdfState::CheckpointHintReader(hint_state) = state {
+                // Check for errors first
+                if let Some(error) = hint_state.take_error() {
+                    return Err(Error::generic(error));
                 }
-                Ok(())
+
+                // Extract checkpoint hint version if present
+                if let Some(version) = hint_state.get_version() {
+                    self.state.checkpoint_hint_version = Some(version as i64);
+                }
             }
-            // Recursively check children
-            DeclarativePlanNode::FilterByKDF { child, .. }
-            | DeclarativePlanNode::FilterByExpression { child, .. }
-            | DeclarativePlanNode::Select { child, .. }
-            | DeclarativePlanNode::ParseJson { child, .. }
-            | DeclarativePlanNode::FirstNonNull { child, .. }
-            | DeclarativePlanNode::Sink { child, .. } => self.extract_consumer_kdf_state(*child),
-            // Leaf nodes have no consumer state
-            DeclarativePlanNode::Scan(_)
-            | DeclarativePlanNode::FileListing(_)
-            | DeclarativePlanNode::SchemaQuery(_) => Ok(()),
         }
+        Ok(())
     }
+
+    /// Extract log segment from collected consumer states.
+    fn extract_log_segment_from_states(
+        &mut self,
+        states: Vec<ConsumerKdfState>,
+    ) -> DeltaResult<()> {
+        for state in states {
+            if let ConsumerKdfState::LogSegmentBuilder(builder_state) = state {
+                // Build LogSegment directly from the builder state
+                self.state.log_segment = Some(builder_state.into_log_segment()?);
+                return Ok(());
+            }
+        }
+        Err(Error::generic("No LogSegmentBuilder state found"))
+    }
+
+    /// Extract protocol and metadata from collected consumer states.
+    fn extract_protocol_metadata_from_states(
+        &mut self,
+        states: Vec<ConsumerKdfState>,
+    ) -> DeltaResult<()> {
+        for state in states {
+            if let ConsumerKdfState::MetadataProtocolReader(mp_state) = state {
+                // Check for errors first
+                if let Some(error) = mp_state.take_error() {
+                    return Err(Error::generic(error));
+                }
+
+                // Extract protocol if present
+                if let Some(protocol) = mp_state.take_protocol() {
+                    self.state.protocol = Some(protocol);
+                }
+
+                // Extract metadata if present
+                if let Some(metadata) = mp_state.take_metadata() {
+                    self.state.metadata = Some(metadata);
+                }
+            }
+        }
+        Ok(())
+    }
+
 }
 
 impl StateMachine for SnapshotStateMachine {
@@ -737,12 +850,15 @@ pub enum ScanStateMachinePhase {
     },
     /// Query checkpoint schema to detect V2 checkpoints - no state needed
     SchemaQuery,
-    /// Read JSON checkpoint - holds receiver for dedup state
+    /// Read JSON checkpoint - holds receivers for dedup state and sidecar collector
     JsonCheckpoint {
         filter_receiver: FilterStateReceiver,
+        consumer_receiver: ConsumerStateReceiver,
     },
-    /// Read checkpoint manifest (v2 checkpoints) - no filter state needed
-    CheckpointManifest,
+    /// Read checkpoint manifest (v2 checkpoints) - holds receiver for sidecar collector
+    CheckpointManifest {
+        consumer_receiver: ConsumerStateReceiver,
+    },
     /// Read checkpoint leaf/sidecar files - holds receiver for CheckpointDedup state
     CheckpointLeaf {
         filter_receiver: FilterStateReceiver,
@@ -758,7 +874,7 @@ impl ScanStateMachinePhase {
             Self::CommitPhase { .. } => "Commit",
             Self::SchemaQuery => "SchemaQuery",
             Self::JsonCheckpoint { .. } => "JsonCheckpoint",
-            Self::CheckpointManifest => "CheckpointManifest",
+            Self::CheckpointManifest { .. } => "CheckpointManifest",
             Self::CheckpointLeaf { .. } => "CheckpointLeaf",
             Self::Complete => "Complete",
         }
@@ -1102,9 +1218,9 @@ impl ScanStateMachine {
                 match self.state.checkpoint_type {
                     Some(CheckpointType::V2) => {
                         // V2 checkpoint (already known) - read manifest first
-                        let plan = self.create_checkpoint_manifest_plan()?;
-                        self.current_phase = ScanStateMachinePhase::CheckpointManifest;
-                        self.current_plan = Some(ScanStateMachinePlan::CheckpointManifest(plan));
+                        let (phase, plan) = self.create_checkpoint_manifest_phase_and_plan()?;
+                        self.current_phase = phase;
+                        self.current_plan = Some(plan);
                     }
                     Some(CheckpointType::MultiPart) => {
                         // Multi-part checkpoint - go directly to leaf phase
@@ -1142,9 +1258,9 @@ impl ScanStateMachine {
                 if has_sidecar {
                     // V2 checkpoint with sidecars - read manifest first
                     self.state.checkpoint_type = Some(CheckpointType::V2);
-                    let plan = self.create_checkpoint_manifest_plan()?;
-                    self.current_phase = ScanStateMachinePhase::CheckpointManifest;
-                    self.current_plan = Some(ScanStateMachinePlan::CheckpointManifest(plan));
+                    let (phase, plan) = self.create_checkpoint_manifest_phase_and_plan()?;
+                    self.current_phase = phase;
+                    self.current_plan = Some(plan);
                 } else {
                     // Classic single-part checkpoint - read directly
                     self.state.checkpoint_type = Some(CheckpointType::Classic);
@@ -1154,12 +1270,16 @@ impl ScanStateMachine {
                 }
                 Ok(AdvanceResult::Continue)
             }
-            ScanStateMachinePhase::JsonCheckpoint { filter_receiver } => {
+            ScanStateMachinePhase::JsonCheckpoint {
+                filter_receiver,
+                consumer_receiver,
+            } => {
                 // Collect filter states (for future use if needed)
-                let _states = filter_receiver.take_all()?;
+                let _filter_states = filter_receiver.take_all()?;
 
-                // After JSON checkpoint phase, check if any sidecars were collected.
-                self.extract_sidecar_files(&executed_plan)?;
+                // Collect sidecar files from consumer receiver
+                let consumer_states = consumer_receiver.take_all()?;
+                self.extract_sidecar_files_from_states(consumer_states)?;
 
                 if self.state.sidecar_files.is_empty() {
                     // No sidecars - all add actions were in the checkpoint, we're done
@@ -1175,9 +1295,11 @@ impl ScanStateMachine {
                     Ok(AdvanceResult::Continue)
                 }
             }
-            ScanStateMachinePhase::CheckpointManifest => {
-                // After manifest, extract sidecar files and read the checkpoint + sidecars
-                self.extract_sidecar_files(&executed_plan)?;
+            ScanStateMachinePhase::CheckpointManifest { consumer_receiver } => {
+                // Collect sidecar files from consumer receiver
+                let consumer_states = consumer_receiver.take_all()?;
+                self.extract_sidecar_files_from_states(consumer_states)?;
+
                 let (phase, plan) = self.create_checkpoint_leaf_phase_and_plan()?;
                 self.current_phase = phase;
                 self.current_plan = Some(plan);
@@ -1289,7 +1411,11 @@ impl ScanStateMachine {
         ))
     }
 
-    fn create_checkpoint_manifest_plan(&self) -> DeltaResult<CheckpointManifestPlan> {
+    /// Create checkpoint manifest phase and plan using sender/receiver pattern.
+    fn create_checkpoint_manifest_phase_and_plan(
+        &self,
+    ) -> DeltaResult<(ScanStateMachinePhase, ScanStateMachinePlan)> {
+        use super::kdf_state::SidecarCollectorState;
         use crate::schema::{DataType, StructField, StructType};
         use crate::Expression;
 
@@ -1316,19 +1442,31 @@ impl ScanStateMachine {
         let output_schema = schema.clone();
         let columns = vec![Expression::column(["sidecar"]).into()];
 
-        Ok(CheckpointManifestPlan {
+        // Create sender/receiver pair for sidecar collector
+        let (sender, receiver) = StateSender::build(ConsumerKdfState::SidecarCollector(
+            SidecarCollectorState::new(self.state.log_root().clone()),
+        ));
+
+        let plan = CheckpointManifestPlan {
             scan: ScanNode {
                 file_type: FileType::Parquet,
-                files: self.state.checkpoint_files.clone(), // Use the checkpoint files
+                files: self.state.checkpoint_files.clone(),
                 schema,
             },
             project: SelectNode {
                 columns,
                 output_schema,
             },
-            sidecar_collector: ConsumeByKDF::sidecar_collector(self.state.log_root().clone()),
+            sidecar_collector: sender,
             sink: SinkNode::drop(), // Drop sink - side effect only (collects sidecar paths)
-        })
+        };
+
+        Ok((
+            ScanStateMachinePhase::CheckpointManifest {
+                consumer_receiver: receiver,
+            },
+            ScanStateMachinePlan::CheckpointManifest(plan),
+        ))
     }
 
     /// Create checkpoint leaf phase and plan using sender/receiver pattern.
@@ -1427,6 +1565,7 @@ impl ScanStateMachine {
     fn create_json_checkpoint_phase_and_plan(
         &self,
     ) -> DeltaResult<(ScanStateMachinePhase, ScanStateMachinePlan)> {
+        use super::kdf_state::SidecarCollectorState;
         use crate::actions::get_all_actions_schema;
         use crate::scan::log_replay::{get_add_transform_expr, SCAN_ROW_SCHEMA};
 
@@ -1441,13 +1580,20 @@ impl ScanStateMachine {
         // Create sender/receiver pair for the dedup filter
         let (dedup_sender, dedup_receiver) = StateSender::build(dedup_state);
 
+        // Create sender/receiver pair for sidecar collector
+        let (sidecar_sender, sidecar_receiver) = StateSender::build(
+            ConsumerKdfState::SidecarCollector(SidecarCollectorState::new(
+                self.state.log_root().clone(),
+            )),
+        );
+
         let plan = JsonCheckpointPhasePlan {
             scan: ScanNode {
                 file_type: FileType::Json,
                 files: self.state.checkpoint_files.clone(),
                 schema: schema.clone(),
             },
-            sidecar_collector: ConsumeByKDF::sidecar_collector(self.state.log_root().clone()),
+            sidecar_collector: sidecar_sender,
             partition_prune_filter: self.state.create_partition_prune_filter(),
             dedup_filter: dedup_sender,
             project: SelectNode {
@@ -1460,6 +1606,7 @@ impl ScanStateMachine {
         Ok((
             ScanStateMachinePhase::JsonCheckpoint {
                 filter_receiver: dedup_receiver,
+                consumer_receiver: sidecar_receiver,
             },
             ScanStateMachinePlan::JsonCheckpoint(plan),
         ))
@@ -1490,27 +1637,18 @@ impl ScanStateMachine {
         }
     }
 
-    /// Extract sidecar files from the manifest phase's consumer KDF state.
-    fn extract_sidecar_files(&mut self, plan: &DeclarativePlanNode) -> DeltaResult<()> {
-        match plan {
-            DeclarativePlanNode::ConsumeByKDF { node, .. } => {
-                if let ConsumerKdfState::SidecarCollector(collector) = &node.state {
-                    self.state.sidecar_files = collector.get_sidecar_files().to_vec();
-                }
-                Ok(())
+    /// Extract sidecar files from collected consumer states.
+    fn extract_sidecar_files_from_states(
+        &mut self,
+        states: Vec<ConsumerKdfState>,
+    ) -> DeltaResult<()> {
+        for state in states {
+            if let ConsumerKdfState::SidecarCollector(collector) = state {
+                // Collect sidecar files from this state
+                self.state.sidecar_files.extend(collector.get_sidecar_files().to_vec());
             }
-            // Recurse into children
-            DeclarativePlanNode::FilterByKDF { child, .. }
-            | DeclarativePlanNode::FilterByExpression { child, .. }
-            | DeclarativePlanNode::Select { child, .. }
-            | DeclarativePlanNode::ParseJson { child, .. }
-            | DeclarativePlanNode::FirstNonNull { child, .. }
-            | DeclarativePlanNode::Sink { child, .. } => self.extract_sidecar_files(child),
-            // Leaf nodes
-            DeclarativePlanNode::Scan(_)
-            | DeclarativePlanNode::FileListing(_)
-            | DeclarativePlanNode::SchemaQuery(_) => Ok(()),
         }
+        Ok(())
     }
 }
 
