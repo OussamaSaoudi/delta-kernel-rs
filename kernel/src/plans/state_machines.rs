@@ -52,18 +52,18 @@ use crate::proto_generated as proto;
 use crate::schema::SchemaRef;
 use crate::snapshot::Snapshot;
 use crate::table_configuration::TableConfiguration;
-use crate::{DeltaResult, Error, FileMeta, SnapshotRef};
+use crate::{DeltaResult, Error, Expression, FileMeta, SnapshotRef};
 
 use super::composite::*;
 use super::declarative::DeclarativePlanNode;
 use super::kdf_state::{
     AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState,
     ConsumerStateReceiver, FilterKdfState, FilterStateReceiver, LogSegmentBuilderState,
-    MetadataProtocolReaderState, StateSender,
+    MetadataProtocolReaderState, SidecarCollectorState, StateSender,
 };
 use super::nodes::{
-    ConsumerByKDF, FileListingNode, FileType, FilterByExpressionNode, FilterByKDF, FirstNonNullNode,
-    ParseJsonNode, ScanNode, SchemaQueryNode, SelectNode, SinkNode,
+    FileListingNode, FileType, FilterByExpressionNode, FilterByKDF, ParseJsonNode,
+    ScanNode, SchemaQueryNode, SelectNode, SinkNode,
 };
 use super::AsQueryPlan;
 
@@ -626,8 +626,8 @@ impl SnapshotStateMachine {
             StructField::nullable("numOfAddFiles", DataType::LONG),
         ]));
 
-        // Build sender/receiver pair for checkpoint hint reader
-        let (sender, receiver) = StateSender::build(ConsumerKdfState::CheckpointHintReader(
+        // Build consumer with sender/receiver pair for checkpoint hint reader
+        let (hint_reader, receiver) = StateSender::build(ConsumerKdfState::CheckpointHintReader(
             CheckpointHintReaderState::new(),
         ));
 
@@ -637,7 +637,7 @@ impl SnapshotStateMachine {
                 files: vec![file_meta],
                 schema: checkpoint_schema,
             },
-            hint_reader: sender,
+            hint_reader,
             sink: SinkNode::drop(),
         };
 
@@ -650,8 +650,8 @@ impl SnapshotStateMachine {
     }
 
     fn create_list_files_phase_and_plan(&self) -> DeltaResult<(SnapshotPhase, SnapshotPlan)> {
-        // Build sender/receiver pair for log segment builder
-        let (sender, receiver) = StateSender::build(ConsumerKdfState::LogSegmentBuilder(
+        // Build consumer with sender/receiver pair for log segment builder
+        let (log_segment_builder, receiver) = StateSender::build(ConsumerKdfState::LogSegmentBuilder(
             LogSegmentBuilderState::new(
                 self.state.log_root.clone(),
                 self.state.version.map(|v| v as u64),
@@ -663,7 +663,7 @@ impl SnapshotStateMachine {
             listing: FileListingNode {
                 path: self.state.log_root.clone(),
             },
-            log_segment_builder: sender,
+            log_segment_builder,
             sink: SinkNode::drop(),
         };
 
@@ -677,7 +677,8 @@ impl SnapshotStateMachine {
 
     fn create_load_metadata_phase_and_plan(&self) -> DeltaResult<(SnapshotPhase, SnapshotPlan)> {
         use crate::actions::{METADATA_NAME, PROTOCOL_NAME};
-        use crate::schema::{StructField, StructType, ToSchema};
+        use crate::expressions::Transform;
+        use crate::schema::{DataType, StructField, StructType, ToSchema};
 
         // Get the log segment built during ListFiles phase
         let log_segment = self
@@ -686,45 +687,93 @@ impl SnapshotStateMachine {
             .as_ref()
             .ok_or_else(|| Error::generic("LogSegment not available for LoadMetadata phase"))?;
 
-        // Use the canonical schemas from Protocol and Metadata types
-        // This ensures field order matches what the visitors expect
-        let schema = Arc::new(StructType::new_unchecked(vec![
+        // Base schema for scanning files (without version - version is added via Transform)
+        let base_schema = Arc::new(StructType::new_unchecked(vec![
             StructField::nullable(PROTOCOL_NAME, crate::actions::Protocol::to_schema()),
             StructField::nullable(METADATA_NAME, crate::actions::Metadata::to_schema()),
         ]));
 
-        // Build list of files to scan from checkpoint_parts and commit_files
-        let mut files = Vec::new();
+        // Output schema includes version column for ordering (version DESC ensures first P&M = latest)
+        let schema_with_version: SchemaRef = Arc::new(StructType::new_unchecked(vec![
+            StructField::not_null("version", DataType::LONG),
+            StructField::nullable(PROTOCOL_NAME, crate::actions::Protocol::to_schema()),
+            StructField::nullable(METADATA_NAME, crate::actions::Metadata::to_schema()),
+        ]));
 
-        // Add checkpoint files first (they contain complete P&M)
-        for checkpoint in &log_segment.checkpoint_parts {
-            files.push(checkpoint.location.clone());
+        // Build per-file scans with version literals
+        let mut scans: Vec<ScanWithVersion> = Vec::new();
+
+        // Add checkpoint files (they contain complete P&M)
+        // All checkpoint parts share the same version
+        if let Some(checkpoint_version) = log_segment.checkpoint_version {
+            let checkpoint_files: Vec<FileMeta> = log_segment
+                .checkpoint_parts
+                .iter()
+                .map(|cp| cp.location.clone())
+                .collect();
+
+            if !checkpoint_files.is_empty() {
+                let file_type = if log_segment
+                    .checkpoint_parts
+                    .first()
+                    .map(|p| p.location.location.path().ends_with(".json"))
+                    .unwrap_or(false)
+                {
+                    FileType::Json
+                } else {
+                    FileType::Parquet
+                };
+
+                let scan = ScanNode {
+                    file_type,
+                    files: checkpoint_files,
+                    schema: base_schema.clone(),
+                };
+
+                // Use Transform to pass through all columns and prepend version literal
+                let transform = Transform::new_top_level().with_inserted_field(
+                    None::<String>,
+                    Arc::new(Expression::literal(checkpoint_version as i64)),
+                );
+
+                let select = SelectNode {
+                    columns: vec![Arc::new(Expression::Transform(transform))],
+                    output_schema: schema_with_version.clone(),
+                };
+
+                scans.push(ScanWithVersion { scan, select });
+            }
         }
 
-        // Add commit files (in reverse order - newest first to find P&M faster)
+        // Add commit files (each has its own version)
         for commit in log_segment.ascending_commit_files.iter().rev() {
-            files.push(commit.location.clone());
+            let scan = ScanNode {
+                file_type: FileType::Json,
+                files: vec![commit.location.clone()],
+                schema: base_schema.clone(),
+            };
+
+            // Use Transform to pass through all columns and prepend version literal
+            let transform = Transform::new_top_level()
+                .with_inserted_field(None::<String>, Arc::new(Expression::literal(commit.version as i64)));
+
+            let select = SelectNode {
+                columns: vec![Arc::new(Expression::Transform(transform))],
+                output_schema: schema_with_version.clone(),
+            };
+
+            scans.push(ScanWithVersion { scan, select });
         }
 
-        // Determine file type based on what we're scanning
-        let file_type = if !log_segment.checkpoint_parts.is_empty() {
-            FileType::Parquet
-        } else {
-            FileType::Json
-        };
-
-        // Build sender/receiver pair for metadata protocol reader
-        let (sender, receiver) = StateSender::build(ConsumerKdfState::MetadataProtocolReader(
+        // Build consumer with version DESC ordering requirement
+        // This ensures first P&M found is from the highest (latest) version
+        let (metadata_reader, receiver) = StateSender::build(ConsumerKdfState::MetadataProtocolReader(
             MetadataProtocolReaderState::new(),
         ));
 
         let plan = MetadataLoadPlan {
-            scan: ScanNode {
-                file_type,
-                files,
-                schema,
-            },
-            metadata_reader: sender,
+            scans,
+            metadata_reader,
             sink: SinkNode::drop(),
         };
 
@@ -746,7 +795,7 @@ impl SnapshotStateMachine {
         states: Vec<ConsumerKdfState>,
     ) -> DeltaResult<()> {
         for state in states {
-            if let ConsumerKdfState::CheckpointHintReader(hint_state) = state {
+            if let ConsumerKdfState::CheckpointHintReader(mut hint_state) = state {
                 // Check for errors first
                 if let Some(error) = hint_state.take_error() {
                     return Err(Error::generic(error));
@@ -782,7 +831,7 @@ impl SnapshotStateMachine {
         states: Vec<ConsumerKdfState>,
     ) -> DeltaResult<()> {
         for state in states {
-            if let ConsumerKdfState::MetadataProtocolReader(mp_state) = state {
+            if let ConsumerKdfState::MetadataProtocolReader(mut mp_state) = state {
                 // Check for errors first
                 if let Some(error) = mp_state.take_error() {
                     return Err(Error::generic(error));
@@ -945,6 +994,11 @@ pub struct ScanBuildState {
 }
 
 impl ScanBuildState {
+    /// Get the log segment from the snapshot
+    fn log_segment(&self) -> &LogSegment {
+        self.snapshot.log_segment()
+    }
+
     /// Get the log root URL from the snapshot
     fn log_root(&self) -> &Url {
         &self.snapshot.log_segment().log_root
@@ -993,15 +1047,16 @@ impl ScanBuildState {
         DataSkippingFilter::compute_stats_schema(referenced_schema)
     }
 
-    /// Create a partition prune filter sender.
+    /// Create a partition prune filter.
     ///
-    /// Returns a (sender, receiver) pair for the partition prune filter.
-    /// The receiver can be discarded since partition pruning is stateless.
+    /// Returns a `FilterByKDF` wrapping the partition prune state.
+    /// Partition pruning is stateless, so no ordering or partitioning requirements.
     #[inline]
     fn create_partition_prune_filter(&self) -> Option<FilterByKDF> {
         self.partition_prune_state.as_ref().map(|s| {
             let (sender, _receiver) = StateSender::build(s.clone());
-            sender
+            // PartitionPrune is stateless - no partitioning or ordering requirements
+            FilterByKDF::new(sender, None, None)
         })
     }
 
@@ -1352,11 +1407,43 @@ impl ScanStateMachine {
         state: &ScanBuildState,
     ) -> DeltaResult<(ScanStateMachinePhase, ScanStateMachinePlan)> {
         use crate::actions::{get_commit_schema, ADD_NAME, REMOVE_NAME};
+        use crate::expressions::Transform;
         use crate::scan::data_skipping::as_sql_data_skipping_predicate;
         use crate::scan::log_replay::{get_add_transform_expr, SCAN_ROW_SCHEMA};
+        use crate::schema::{DataType, StructField, StructType};
 
-        // Schema for reading add/remove actions from commit files
-        let schema = get_commit_schema().project(&[ADD_NAME, REMOVE_NAME])?;
+        // Base schema for reading add/remove actions from commit files (without version)
+        let base_schema = get_commit_schema().project(&[ADD_NAME, REMOVE_NAME])?;
+
+        // Output schema with version column prepended
+        let version_field = StructField::not_null("version", DataType::LONG);
+        let mut fields_with_version = vec![version_field];
+        fields_with_version.extend(base_schema.fields().cloned());
+        let schema_with_version: SchemaRef = Arc::new(StructType::new_unchecked(fields_with_version));
+
+        // Build per-file scans with version literals from log segment
+        let log_segment = state.log_segment();
+        let mut scans: Vec<ScanWithVersion> = Vec::new();
+
+        // Add commit files (each has its own version) - reverse order for version DESC
+        for commit in log_segment.ascending_commit_files.iter().rev() {
+            let scan = ScanNode {
+                file_type: FileType::Json,
+                files: vec![commit.location.clone()],
+                schema: base_schema.clone(),
+            };
+
+            // Use Transform to pass through all columns and prepend version literal
+            let transform = Transform::new_top_level()
+                .with_inserted_field(None::<String>, Arc::new(Expression::literal(commit.version as i64)));
+
+            let select = SelectNode {
+                columns: vec![Arc::new(Expression::Transform(transform))],
+                output_schema: schema_with_version.clone(),
+            };
+
+            scans.push(ScanWithVersion { scan, select });
+        }
 
         // Use the standard scan row schema and transform expression from log_replay
         let output_schema = SCAN_ROW_SCHEMA.clone();
@@ -1382,20 +1469,14 @@ impl ScanStateMachine {
             _ => None,
         };
 
-        // Create sender/receiver pair for AddRemoveDedup filter
-        let (dedup_sender, dedup_receiver) = StateSender::build(
-            FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new()),
-        );
+        // Create AddRemoveDedup filter with parallelism capabilities
+        let (dedup_filter, dedup_receiver) = FilterByKDF::add_remove_dedup();
 
         let plan = CommitPhasePlan {
-            scan: ScanNode {
-                file_type: FileType::Json,
-                files: state.commit_files.clone(),
-                schema,
-            },
+            scans,
             data_skipping,
             partition_prune_filter: state.create_partition_prune_filter(),
-            dedup_filter: dedup_sender,
+            dedup_filter,
             project: SelectNode {
                 columns: vec![transform_expr],
                 output_schema,
@@ -1442,8 +1523,8 @@ impl ScanStateMachine {
         let output_schema = schema.clone();
         let columns = vec![Expression::column(["sidecar"]).into()];
 
-        // Create sender/receiver pair for sidecar collector
-        let (sender, receiver) = StateSender::build(ConsumerKdfState::SidecarCollector(
+        // Create consumer with sender/receiver pair for sidecar collector
+        let (sidecar_collector, receiver) = StateSender::build(ConsumerKdfState::SidecarCollector(
             SidecarCollectorState::new(self.state.log_root().clone()),
         ));
 
@@ -1457,7 +1538,7 @@ impl ScanStateMachine {
                 columns,
                 output_schema,
             },
-            sidecar_collector: sender,
+            sidecar_collector,
             sink: SinkNode::drop(), // Drop sink - side effect only (collects sidecar paths)
         };
 
@@ -1487,7 +1568,7 @@ impl ScanStateMachine {
         };
 
         // For V2 checkpoints with sidecars, read from sidecar files
-        let files = if !self.state.sidecar_files.is_empty() {
+        let files: Vec<FileMeta> = if !self.state.sidecar_files.is_empty() {
             self.state.sidecar_files.clone()
         } else {
             self.state.checkpoint_files.clone()
@@ -1509,10 +1590,11 @@ impl ScanStateMachine {
                 .unwrap_or(FileType::Parquet)
         };
 
-        // Create sender/receiver pair for CheckpointDedup filter
+        // Create CheckpointDedup filter (stateless, no partitioning/ordering requirements)
         let (dedup_sender, dedup_receiver) = StateSender::build(
             FilterKdfState::CheckpointDedup(checkpoint_dedup_state),
         );
+        let dedup_filter = FilterByKDF::new(dedup_sender, None, None);
 
         let plan = CheckpointLeafPlan {
             scan: ScanNode {
@@ -1521,7 +1603,7 @@ impl ScanStateMachine {
                 schema,
             },
             partition_prune_filter: self.state.create_partition_prune_filter(),
-            dedup_filter: dedup_sender,
+            dedup_filter,
             project: SelectNode {
                 columns: vec![transform_expr],
                 output_schema,
@@ -1577,15 +1659,17 @@ impl ScanStateMachine {
             None => FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new()),
         };
 
-        // Create sender/receiver pair for the dedup filter
+        // Create AddRemoveDedup filter WITHOUT version ordering requirement.
+        // Within a single JSON checkpoint file, all rows are at the same version,
+        // so version ordering is not needed. The dedup state is already seeded
+        // from the commit phase which handled version-ordered processing.
         let (dedup_sender, dedup_receiver) = StateSender::build(dedup_state);
+        let dedup_filter = FilterByKDF::new(dedup_sender, None, None);
 
-        // Create sender/receiver pair for sidecar collector
-        let (sidecar_sender, sidecar_receiver) = StateSender::build(
-            ConsumerKdfState::SidecarCollector(SidecarCollectorState::new(
-                self.state.log_root().clone(),
-            )),
-        );
+        // Create consumer with sender/receiver pair for sidecar collector
+        let (sidecar_collector, sidecar_receiver) = StateSender::build(ConsumerKdfState::SidecarCollector(
+            SidecarCollectorState::new(self.state.log_root().clone()),
+        ));
 
         let plan = JsonCheckpointPhasePlan {
             scan: ScanNode {
@@ -1593,9 +1677,9 @@ impl ScanStateMachine {
                 files: self.state.checkpoint_files.clone(),
                 schema: schema.clone(),
             },
-            sidecar_collector: sidecar_sender,
+            sidecar_collector,
             partition_prune_filter: self.state.create_partition_prune_filter(),
-            dedup_filter: dedup_sender,
+            dedup_filter,
             project: SelectNode {
                 columns: vec![get_add_transform_expr()],
                 output_schema: SCAN_ROW_SCHEMA.clone(),
@@ -1632,6 +1716,10 @@ impl ScanStateMachine {
             | DeclarativePlanNode::ParseJson { child, .. }
             | DeclarativePlanNode::FirstNonNull { child, .. }
             | DeclarativePlanNode::Sink { child, .. } => self.check_schema_has_sidecar(child),
+            // Union - check all children
+            DeclarativePlanNode::Union { children } => {
+                children.iter().any(|c| self.check_schema_has_sidecar(c))
+            }
             // Leaf nodes that aren't SchemaQuery
             DeclarativePlanNode::Scan(_) | DeclarativePlanNode::FileListing(_) => false,
         }

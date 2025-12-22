@@ -4,11 +4,17 @@
 //!
 //! When reading parquet files, we relax the kernel schema's nullability constraints
 //! because parquet files store nullable parents' children as nullable. After reading,
-//! we wrap the scan with a `NullabilityValidationExec` to enforce the kernel's
-//! nullability semantics at runtime.
+//! we wrap the scan with a `NullabilityValidationExec` which:
+//! 1. Validates that non-nullable nested fields don't contain nulls when parent is present
+//! 2. Outputs batches with the original (tighter) kernel schema for Union compatibility
+//!
+//! # Computed Columns
+//!
+//! To add computed columns (e.g., version from filename), wrap the scan in a Select
+//! node with a Transform expression. For multiple files with different transforms,
+//! use Union to combine separate Scan→Select pipelines.
 
 use std::sync::Arc;
-use datafusion::execution::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_datasource::{
     source::DataSourceExec,
@@ -26,40 +32,47 @@ use delta_kernel::schema::{relax_nullability_for_reading, collect_fields_needing
 use crate::error::{DfResult, DfError};
 use crate::exec::NullabilityValidationExec;
 
-/// Convert a kernel ScanNode into a DataFusion DataSourceExec with ParquetSource.
+/// Convert a kernel ScanNode into a DataFusion DataSourceExec with ParquetSource or JsonSource.
 pub fn compile_scan(
     node: &ScanNode,
-    session_state: &SessionState,
+    _session_state: &datafusion::execution::SessionState,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
     match node.file_type {
-        FileType::Parquet => compile_parquet_scan(node, session_state),
-        FileType::Json => compile_json_scan(node, session_state),
+        FileType::Parquet => compile_parquet_scan(node),
+        FileType::Json => compile_json_scan(node),
     }
 }
 
-fn compile_parquet_scan(node: &ScanNode, _session_state: &SessionState) -> DfResult<Arc<dyn ExecutionPlan>> {
+fn compile_parquet_scan(node: &ScanNode) -> DfResult<Arc<dyn ExecutionPlan>> {
     // 1. Collect fields needing validation BEFORE relaxing the schema
     let validations = collect_fields_needing_validation(&node.schema);
     
-    // 2. Relax schema for reading - nullable parents get nullable children
+    // 2. Convert ORIGINAL schema to Arrow - this is our target output schema
+    let target_schema: Arc<arrow::datatypes::Schema> = Arc::new(
+        node.schema.as_ref().try_into_arrow()
+            .map_err(|e| DfError::PlanCompilation(format!("Failed to convert kernel schema to Arrow: {}", e)))?
+    );
+    
+    // 3. Relax schema for reading - nullable parents get nullable children
     // This avoids DataFusion's "Cannot cast nullable to non-nullable" error
     let relaxed_schema = relax_nullability_for_reading(&node.schema);
-    let arrow_schema = (&relaxed_schema).try_into_arrow()
-        .map_err(|e| DfError::PlanCompilation(format!("Failed to convert kernel schema to Arrow: {}", e)))?;
-    let file_schema = Arc::new(arrow_schema);
+    let file_schema: Arc<arrow::datatypes::Schema> = Arc::new(
+        (&relaxed_schema).try_into_arrow()
+            .map_err(|e| DfError::PlanCompilation(format!("Failed to convert relaxed schema to Arrow: {}", e)))?
+    );
     
-    // 3. Convert FileMeta to PartitionedFile
+    // 4. Convert FileMeta to PartitionedFile
     // All files go into a single group to preserve ordering (important for KDFs)
     let partitioned_files: Vec<PartitionedFile> = node.files.iter()
-        .map(|file_meta| {
-            PartitionedFile::new(file_meta.location.path().to_string(), file_meta.size as u64)
+        .map(|file| {
+            PartitionedFile::new(file.location.path().to_string(), file.size as u64)
         })
         .collect();
     
     // Create a single FileGroup to preserve ordering
     let file_group = FileGroup::new(partitioned_files);
     
-    // 4. Extract base URL for object store registration
+    // 5. Extract base URL for object store registration
     // Use the first file's directory as the base
     let first_file_url = node.files.first()
         .ok_or_else(|| DfError::PlanCompilation("Scan node has no files".to_string()))?
@@ -72,10 +85,10 @@ fn compile_parquet_scan(node: &ScanNode, _session_state: &SessionState) -> DfRes
     );
     let object_store_url = ObjectStoreUrl::parse(&base_url_str)?;
     
-    // 5. Create ParquetSource
+    // 6. Create ParquetSource
     let parquet_source = Arc::new(ParquetSource::default());
     
-    // 6. Build FileScanConfig using the builder
+    // 7. Build FileScanConfig using the builder
     let file_scan_config = FileScanConfigBuilder::new(
         object_store_url,
         file_schema,
@@ -85,18 +98,17 @@ fn compile_parquet_scan(node: &ScanNode, _session_state: &SessionState) -> DfRes
     .with_projection_indices(None) // No column pruning for now
     .build();
     
-    // 7. Create DataSourceExec from the config
+    // 8. Create DataSourceExec from the config
     let scan_exec = DataSourceExec::from_data_source(file_scan_config);
     
-    // 8. Wrap with validation if kernel schema has non-nullable nested fields
-    if validations.is_empty() {
-        Ok(scan_exec)
-    } else {
-        Ok(Arc::new(NullabilityValidationExec::new(scan_exec, validations)))
-    }
+    // 9. Wrap with NullabilityValidationExec which:
+    //    - Validates non-nullable constraints
+    //    - Outputs batches with the original (tighter) target schema
+    // This ensures Union compatibility with JSON scans
+    Ok(Arc::new(NullabilityValidationExec::new(scan_exec, validations, target_schema)))
 }
 
-fn compile_json_scan(node: &ScanNode, _session_state: &SessionState) -> DfResult<Arc<dyn ExecutionPlan>> {
+fn compile_json_scan(node: &ScanNode) -> DfResult<Arc<dyn ExecutionPlan>> {
     // 1. Convert kernel schema to Arrow schema
     let arrow_schema = node.schema.as_ref().try_into_arrow()
         .map_err(|e| DfError::PlanCompilation(format!("Failed to convert kernel schema to Arrow: {}", e)))?;
@@ -105,8 +117,8 @@ fn compile_json_scan(node: &ScanNode, _session_state: &SessionState) -> DfResult
     // 2. Convert FileMeta to PartitionedFile
     // All files go into a single group to preserve ordering (important for KDFs)
     let partitioned_files: Vec<PartitionedFile> = node.files.iter()
-        .map(|file_meta| {
-            PartitionedFile::new(file_meta.location.path().to_string(), file_meta.size as u64)
+        .map(|file| {
+            PartitionedFile::new(file.location.path().to_string(), file.size as u64)
         })
         .collect();
     

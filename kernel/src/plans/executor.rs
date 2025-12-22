@@ -25,7 +25,7 @@ use crate::schema::DataType;
 use crate::{DeltaResult, Engine, EngineData, Error};
 
 use super::declarative::DeclarativePlanNode;
-use super::kdf_state::{ConsumerKdfState, FilterKdfState, OwnedState};
+use super::kdf_state::{ConsumerKdfState, ConsumerStateSender, FilterKdfState, OwnedState};
 use super::nodes::*;
 
 /// Type alias for the result iterator.
@@ -158,6 +158,7 @@ impl<'a> DeclarativePlanExecutor<'a> {
                 self.execute_first_non_null(*child, node)
             }
             DeclarativePlanNode::Sink { child, node } => self.execute_sink(*child, node),
+            DeclarativePlanNode::Union { children } => self.execute_union(children),
         }
     }
 
@@ -187,6 +188,14 @@ impl<'a> DeclarativePlanExecutor<'a> {
             | DeclarativePlanNode::ParseJson { child, .. }
             | DeclarativePlanNode::Sink { child, .. } => self.infer_output_schema(child)?,
             DeclarativePlanNode::Select { node, .. } => node.output_schema.clone(),
+            DeclarativePlanNode::Union { children } => {
+                // Union output schema is the schema of the first child
+                // (all children should have compatible schemas)
+                children.first()
+                    .map(|c| self.infer_output_schema(c))
+                    .transpose()?
+                    .unwrap_or_else(|| Arc::new(crate::schema::StructType::new_unchecked(vec![])))
+            }
         })
     }
 
@@ -233,7 +242,7 @@ impl<'a> DeclarativePlanExecutor<'a> {
         match file_type {
             FileType::Json => {
                 let json_handler = self.engine.json_handler();
-                let files_iter = json_handler.read_json_files(files.as_slice(), schema, None)?;
+                let files_iter = json_handler.read_json_files(&files, schema, None)?;
                 Ok(Box::new(files_iter.map(|result| {
                     result.and_then(|engine_data| {
                         let len = engine_data.len();
@@ -243,8 +252,7 @@ impl<'a> DeclarativePlanExecutor<'a> {
             }
             FileType::Parquet => {
                 let parquet_handler = self.engine.parquet_handler();
-                let files_iter =
-                    parquet_handler.read_parquet_files(files.as_slice(), schema, None)?;
+                let files_iter = parquet_handler.read_parquet_files(&files, schema, None)?;
                 Ok(Box::new(files_iter.map(|result| {
                     result.and_then(|engine_data| {
                         let len = engine_data.len();
@@ -253,6 +261,18 @@ impl<'a> DeclarativePlanExecutor<'a> {
                 })))
             }
         }
+    }
+
+    /// Execute a Union node - concatenates results from all children.
+    fn execute_union(&self, children: Vec<DeclarativePlanNode>) -> DeltaResult<FilteredDataIter> {
+        // Execute each child to get its iterator (doesn't consume data yet)
+        let child_iters: Vec<FilteredDataIter> = children
+            .into_iter()
+            .map(|child| self.execute(child))
+            .collect::<DeltaResult<Vec<_>>>()?;
+
+        // Chain all iterators together - data still streams lazily
+        Ok(Box::new(child_iters.into_iter().flat_map(|iter| iter)))
     }
 
     /// Execute a FileListing node - lists files from a storage path.
@@ -401,7 +421,7 @@ impl<'a> DeclarativePlanExecutor<'a> {
     fn execute_consume_by_kdf(
         &self,
         child: DeclarativePlanNode,
-        node: ConsumerByKDF,
+        node: ConsumerStateSender,
     ) -> DeltaResult<FilteredDataIter> {
         let child_iter = self.execute(child)?;
         // Create owned state from the sender - state is cloned from template

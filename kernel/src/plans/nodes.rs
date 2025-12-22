@@ -5,16 +5,17 @@
 
 use std::sync::Arc;
 
-use crate::expressions::Expression;
-use crate::schema::SchemaRef;
+use crate::expressions::{Expression, VariadicExpressionOp};
+use crate::schema::{ColumnName, SchemaRef};
 use crate::FileMeta;
 
 use crate::Version;
 
 use super::kdf_state::{
-    CheckpointHintReaderState, ConsumerKdfState, ConsumerStateSender, FilterKdfState,
-    FilterStateSender, LogSegmentBuilderState, MetadataProtocolReaderState, SchemaReaderState,
-    SchemaStoreState, SidecarCollectorState,
+    AddRemoveDedupState, CheckpointDedupState, CheckpointHintReaderState, ConsumerKdfState,
+    ConsumerStateSender, FilterKdfState, FilterStateReceiver, FilterStateSender,
+    LogSegmentBuilderState, MetadataProtocolReaderState, SchemaReaderState, SchemaStoreState,
+    SidecarCollectorState, StateSender,
 };
 
 // =============================================================================
@@ -63,13 +64,19 @@ pub enum FileType {
 ///
 /// When compiled to DataFusion, the `DefaultSchemaAdapterFactory` automatically
 /// enforces these semantics by adapting file-level record batches to the table schema.
+///
+/// # Adding Computed Columns
+///
+/// To add computed columns (e.g., version from filename), wrap the scan in a Select
+/// node with a Transform expression. For multiple files with different transforms,
+/// use Union to combine separate Scan→Select pipelines.
 #[derive(Debug, Clone)]
 pub struct ScanNode {
     /// Type of files to read
     pub file_type: FileType,
     /// Files to scan
     pub files: Vec<FileMeta>,
-    /// Schema specifying the desired output structure and nullability constraints
+    /// Schema specifying the desired output structure and nullability constraints.
     pub schema: SchemaRef,
 }
 
@@ -86,51 +93,351 @@ pub struct FileListingNode {
 // Unary Nodes (one child, not stored here - stored in tree wrapper)
 // =============================================================================
 
+// =============================================================================
+// Ordering and Partitioning Specifications for KDFs
+// =============================================================================
+
+/// Specifies ordering requirements for a KDF.
+///
+/// Used to declare what ordering the KDF needs for correct execution.
+/// This information allows executors to automatically insert sort operators.
+#[derive(Debug, Clone)]
+pub struct OrderingSpec {
+    /// Column to order by
+    pub column: ColumnName,
+    /// True for descending order, false for ascending
+    pub descending: bool,
+}
+
+impl OrderingSpec {
+    /// Create a new ordering specification.
+    pub fn new(column: ColumnName, descending: bool) -> Self {
+        Self { column, descending }
+    }
+
+    /// Create a descending ordering specification.
+    pub fn desc(column: ColumnName) -> Self {
+        Self::new(column, true)
+    }
+
+    /// Create an ascending ordering specification.
+    pub fn asc(column: ColumnName) -> Self {
+        Self::new(column, false)
+    }
+}
+
 /// Filter rows using a kernel-defined function (KDF).
 ///
 /// KDFs are filters implemented in kernel-rs that engines must use because they
 /// contain Delta-specific logic (e.g., deduplication, stats skipping).
 /// The function produces a selection vector; engines call the kernel FFI to apply it.
 ///
-/// `FilterByKDF` is a type alias for `StateSender<FilterKdfState>`. Plans hold the sender
-/// (which creates `OwnedState` for each partition), while phases hold the corresponding
+/// # Parallelism Support
+///
+/// `FilterByKDF` declares its parallelism capabilities:
+/// - `partitionable_by`: If `Some`, the executor MAY hash-partition input by this expression.
+///   The kernel guarantees correctness when partitioned this way.
+/// - `requires_ordering`: If `Some`, the executor MUST ensure this ordering within each partition.
+///
+/// # State Management
+///
+/// The `sender` field is a `StateSender<FilterKdfState>` that creates `OwnedState` for each
+/// partition during execution. Plans hold the sender, while phases hold the corresponding
 /// `StateReceiver` to collect results after execution.
 ///
 /// # Creating FilterByKDF
 ///
-/// Use `StateSender::build(template)` to create a sender/receiver pair:
+/// Use the provided constructors:
 ///
 /// ```ignore
-/// use delta_kernel::plans::kdf_state::{StateSender, FilterKdfState, AddRemoveDedupState};
+/// use delta_kernel::plans::nodes::FilterByKDF;
 ///
-/// let (sender, receiver) = StateSender::build(
-///     FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new())
-/// );
-/// // sender (FilterByKDF) goes into the plan
-/// // receiver (FilterStateReceiver) goes into the phase
+/// // Add/Remove deduplication - can partition by path, requires version DESC
+/// let (filter, receiver) = FilterByKDF::add_remove_dedup();
+///
+/// // Checkpoint deduplication - stateless, any distribution works
+/// let (filter, receiver) = FilterByKDF::checkpoint_dedup();
 /// ```
-pub type FilterByKDF = FilterStateSender;
+#[derive(Debug, Clone)]
+pub struct FilterByKDF {
+    /// State sender - creates owned states for each partition.
+    /// The sender is cloned into each partition's stream.
+    pub sender: FilterStateSender,
 
-/// Type alias for consumer KDF sender.
+    /// Expression to partition by for parallel execution.
+    /// If `Some`, executor MAY hash-partition input by this expression.
+    /// Kernel guarantees correctness when partitioned this way.
+    pub partitionable_by: Option<Arc<Expression>>,
+
+    /// Required ordering within each partition (or globally if single partition).
+    /// If `Some`, executor MUST ensure this ordering.
+    pub requires_ordering: Option<OrderingSpec>,
+}
+
+impl FilterByKDF {
+    /// Create a new FilterByKDF with the given sender and metadata.
+    pub fn new(
+        sender: FilterStateSender,
+        partitionable_by: Option<Arc<Expression>>,
+        requires_ordering: Option<OrderingSpec>,
+    ) -> Self {
+        Self {
+            sender,
+            partitionable_by,
+            requires_ordering,
+        }
+    }
+
+    /// Create an AddRemoveDedup filter with its parallelism capabilities.
+    ///
+    /// AddRemoveDedup:
+    /// - CAN partition by `coalesce(add.path, remove.path)` - deduplication is path-specific
+    /// - REQUIRES version DESC ordering within each partition
+    ///
+    /// Returns both the filter (goes into the plan) and receiver (goes into the phase).
+    pub fn add_remove_dedup() -> (Self, FilterStateReceiver) {
+        let (sender, receiver) = StateSender::build(FilterKdfState::AddRemoveDedup(
+            AddRemoveDedupState::new(),
+        ));
+
+        // Partitionable by coalesce(add.path, remove.path)
+        // All rows for a given path will be routed to the same partition
+        let partitionable_by = Some(Arc::new(Expression::variadic(
+            VariadicExpressionOp::Coalesce,
+            vec![
+                Expression::column(["add", "path"]),
+                Expression::column(["remove", "path"]),
+            ],
+        )));
+
+        // Requires version DESC ordering within each partition
+        let requires_ordering = Some(OrderingSpec::desc(ColumnName::new(["version"])));
+
+        (
+            Self {
+                sender,
+                partitionable_by,
+                requires_ordering,
+            },
+            receiver,
+        )
+    }
+
+    /// Create a CheckpointDedup filter.
+    ///
+    /// CheckpointDedup:
+    /// - NO partitioning requirement (stateless - any distribution works)
+    /// - NO ordering requirement
+    ///
+    /// Returns both the filter (goes into the plan) and receiver (goes into the phase).
+    pub fn checkpoint_dedup() -> (Self, FilterStateReceiver) {
+        let (sender, receiver) = StateSender::build(FilterKdfState::CheckpointDedup(
+            CheckpointDedupState::new(),
+        ));
+
+        (
+            Self {
+                sender,
+                partitionable_by: None,
+                requires_ordering: None,
+            },
+            receiver,
+        )
+    }
+
+    /// Create a FilterByKDF from an existing sender (for compatibility).
+    ///
+    /// This infers parallelism capabilities from the sender's template state:
+    /// - AddRemoveDedup: partitionable by path, requires version DESC
+    /// - CheckpointDedup: no requirements
+    /// - PartitionPrune: no requirements
+    pub fn from_sender(sender: FilterStateSender) -> Self {
+        match sender.template() {
+            FilterKdfState::AddRemoveDedup(_) => {
+                let partitionable_by = Some(Arc::new(Expression::variadic(
+                    VariadicExpressionOp::Coalesce,
+                    vec![
+                        Expression::column(["add", "path"]),
+                        Expression::column(["remove", "path"]),
+                    ],
+                )));
+                let requires_ordering = Some(OrderingSpec::desc(ColumnName::new(["version"])));
+                Self {
+                    sender,
+                    partitionable_by,
+                    requires_ordering,
+                }
+            }
+            FilterKdfState::CheckpointDedup(_) | FilterKdfState::PartitionPrune(_) => Self {
+                sender,
+                partitionable_by: None,
+                requires_ordering: None,
+            },
+        }
+    }
+
+    /// Get a reference to the underlying state sender.
+    pub fn sender(&self) -> &FilterStateSender {
+        &self.sender
+    }
+
+    /// Get access to the template state (for inspection).
+    pub fn template(&self) -> &FilterKdfState {
+        self.sender.template()
+    }
+
+    /// Create an owned state for a partition.
+    ///
+    /// Delegates to the underlying sender.
+    pub fn create_owned(&self) -> super::kdf_state::OwnedFilterState {
+        self.sender.create_owned()
+    }
+
+    /// Check if this KDF can be partitioned (has a partitionable_by expression).
+    pub fn can_partition(&self) -> bool {
+        self.partitionable_by.is_some()
+    }
+
+    /// Check if this KDF requires ordering.
+    pub fn requires_order(&self) -> bool {
+        self.requires_ordering.is_some()
+    }
+}
+
+use super::kdf_state::ConsumerStateReceiver;
+
+/// Consumer KDF with optional ordering requirement.
 ///
-/// `ConsumerByKDF` is a type alias for `StateSender<ConsumerKdfState>`. Plans hold the sender
-/// (which creates `OwnedState` for each partition), while phases hold the corresponding
-/// `StateReceiver` to collect results after execution.
+/// Similar to `FilterByKDF`, this struct holds a state sender and optional
+/// ordering requirement. Plans hold the sender (which creates `OwnedState`
+/// for each partition), while phases hold the corresponding `StateReceiver`
+/// to collect results after execution.
 ///
 /// # Creating ConsumerByKDF
 ///
-/// Use `StateSender::build(template)` to create a sender/receiver pair:
+/// Use the provided constructors:
 ///
 /// ```ignore
-/// use delta_kernel::plans::kdf_state::{StateSender, ConsumerKdfState, CheckpointHintReaderState};
+/// use delta_kernel::plans::nodes::ConsumerByKDF;
 ///
-/// let (sender, receiver) = StateSender::build(
-///     ConsumerKdfState::CheckpointHintReader(CheckpointHintReaderState::new())
-/// );
-/// // sender (ConsumerByKDF) goes into the plan
-/// // receiver (ConsumerStateReceiver) goes into the phase
+/// // MetadataProtocolReader with version DESC ordering
+/// let (consumer, receiver) = ConsumerByKDF::metadata_protocol_reader();
+///
+/// // LogSegmentBuilder without ordering
+/// let (consumer, receiver) = ConsumerByKDF::log_segment_builder(log_root, None, None);
 /// ```
-pub type ConsumerByKDF = ConsumerStateSender;
+#[derive(Debug, Clone)]
+pub struct ConsumerByKDF {
+    /// State sender - creates owned states for each partition.
+    /// The sender is cloned into each partition's stream.
+    pub sender: ConsumerStateSender,
+
+    /// Required ordering within each partition (or globally if single partition).
+    /// If `Some`, executor MUST ensure this ordering.
+    pub requires_ordering: Option<OrderingSpec>,
+}
+
+impl ConsumerByKDF {
+    /// Create a new ConsumerByKDF with the given sender and optional ordering.
+    pub fn new(sender: ConsumerStateSender, requires_ordering: Option<OrderingSpec>) -> Self {
+        Self {
+            sender,
+            requires_ordering,
+        }
+    }
+
+    /// Create a MetadataProtocolReader consumer with version DESC ordering.
+    ///
+    /// This consumer extracts the first non-null metadata and protocol actions
+    /// from log files. With `version DESC` ordering, the first P&M found is
+    /// guaranteed to be from the highest (latest) version.
+    pub fn metadata_protocol_reader() -> (Self, ConsumerStateReceiver) {
+        let (sender, receiver) = StateSender::build(ConsumerKdfState::MetadataProtocolReader(
+            MetadataProtocolReaderState::new(),
+        ));
+        (
+            Self {
+                sender,
+                requires_ordering: Some(OrderingSpec::desc(ColumnName::new(["version"]))),
+            },
+            receiver,
+        )
+    }
+
+    /// Create a LogSegmentBuilder consumer (no ordering required).
+    ///
+    /// This consumer builds a LogSegment from file listing results by accumulating
+    /// commit files, checkpoint parts, and compaction files.
+    pub fn log_segment_builder(
+        log_root: url::Url,
+        end_version: Option<Version>,
+        checkpoint_hint_version: Option<Version>,
+    ) -> (Self, ConsumerStateReceiver) {
+        let (sender, receiver) = StateSender::build(ConsumerKdfState::LogSegmentBuilder(
+            LogSegmentBuilderState::new(log_root, end_version, checkpoint_hint_version),
+        ));
+        (
+            Self {
+                sender,
+                requires_ordering: None,
+            },
+            receiver,
+        )
+    }
+
+    /// Create a CheckpointHintReader consumer (no ordering required).
+    ///
+    /// This consumer extracts checkpoint hint information from the scan results
+    /// of the `_last_checkpoint` file.
+    pub fn checkpoint_hint_reader() -> (Self, ConsumerStateReceiver) {
+        let (sender, receiver) = StateSender::build(ConsumerKdfState::CheckpointHintReader(
+            CheckpointHintReaderState::new(),
+        ));
+        (
+            Self {
+                sender,
+                requires_ordering: None,
+            },
+            receiver,
+        )
+    }
+
+    /// Create a SidecarCollector consumer (no ordering required).
+    ///
+    /// This consumer collects sidecar file paths from V2 checkpoint manifest scan results.
+    pub fn sidecar_collector(log_root: url::Url) -> (Self, ConsumerStateReceiver) {
+        let (sender, receiver) = StateSender::build(ConsumerKdfState::SidecarCollector(
+            SidecarCollectorState::new(log_root),
+        ));
+        (
+            Self {
+                sender,
+                requires_ordering: None,
+            },
+            receiver,
+        )
+    }
+
+    /// Create a ConsumerByKDF from a raw sender (for backwards compatibility).
+    ///
+    /// Use this when you already have a `ConsumerStateSender` and don't need ordering.
+    pub fn from_sender(sender: ConsumerStateSender) -> Self {
+        Self {
+            sender,
+            requires_ordering: None,
+        }
+    }
+
+    /// Check if this consumer requires ordering.
+    pub fn requires_order(&self) -> bool {
+        self.requires_ordering.is_some()
+    }
+
+    /// Get a reference to the underlying state sender.
+    pub fn sender(&self) -> &ConsumerStateSender {
+        &self.sender
+    }
+}
 
 /// Consume rows using a kernel-defined function (KDF).
 ///

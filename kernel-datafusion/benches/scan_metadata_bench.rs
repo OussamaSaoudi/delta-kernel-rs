@@ -18,9 +18,13 @@
 //! cargo bench --bench scan_metadata_bench -- --baseline main
 //! ```
 
+use std::hint::black_box;
 use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::execution::SessionStateBuilder;
+use datafusion_common::config::ConfigOptions;
 use futures::StreamExt;
 use tokio::runtime::Runtime;
 use url::Url;
@@ -56,9 +60,22 @@ fn setup_default_engine() -> (Url, Arc<DefaultEngine<TokioBackgroundExecutor>>) 
     (url, engine)
 }
 
-/// Setup the DataFusion executor
+/// Setup the DataFusion executor with row group parallelism and parallel dedup
 fn setup_datafusion_executor() -> Arc<DataFusionExecutor> {
-    Arc::new(DataFusionExecutor::new().expect("Failed to create DataFusion executor"))
+    // Enable row group parallelism for parquet reads
+    let mut config = ConfigOptions::default();
+    config.optimizer.repartition_file_scans = true;
+
+    let runtime = Arc::new(RuntimeEnv::default());
+    let session_state = SessionStateBuilder::new()
+        .with_config(config.into())
+        .with_runtime_env(runtime)
+        .build();
+
+    Arc::new(
+        DataFusionExecutor::with_session_state(session_state)
+            .with_parallel_dedup(true),
+    )
 }
 
 /// Create a partition filter predicate: repository = 'backend-api'
@@ -94,7 +111,7 @@ fn bench_default_engine_no_predicate(c: &mut Criterion) {
                 .expect("Failed to get scan metadata");
             // Consume the iterator to do the actual work
             for result in metadata_iter {
-                result.expect("Failed to process scan metadata");
+                black_box(result.expect("Failed to process scan metadata"));
             }
         })
     });
@@ -126,7 +143,7 @@ fn bench_datafusion_no_predicate(c: &mut Criterion) {
                 let scan = snapshot.clone().scan_builder().build().expect("Failed to build scan");
                 let mut stream = std::pin::pin!(scan.scan_metadata_async(executor.clone()));
                 while let Some(result) = stream.next().await {
-                    result.expect("Failed to process scan metadata");
+                    black_box(result.expect("Failed to process scan metadata"));
                 }
             })
         })
@@ -159,7 +176,7 @@ fn bench_default_engine_partition_filter(c: &mut Criterion) {
                 .scan_metadata(engine.as_ref())
                 .expect("Failed to get scan metadata");
             for result in metadata_iter {
-                result.expect("Failed to process scan metadata");
+                black_box(result.expect("Failed to process scan metadata"));
             }
         })
     });
@@ -196,7 +213,7 @@ fn bench_datafusion_partition_filter(c: &mut Criterion) {
                     .expect("Failed to build scan");
                 let mut stream = std::pin::pin!(scan.scan_metadata_async(executor.clone()));
                 while let Some(result) = stream.next().await {
-                    result.expect("Failed to process scan metadata");
+                    black_box(result.expect("Failed to process scan metadata"));
                 }
             })
         })
@@ -229,7 +246,7 @@ fn bench_default_engine_data_skipping(c: &mut Criterion) {
                 .scan_metadata(engine.as_ref())
                 .expect("Failed to get scan metadata");
             for result in metadata_iter {
-                result.expect("Failed to process scan metadata");
+                black_box(result.expect("Failed to process scan metadata"));
             }
         })
     });
@@ -266,7 +283,7 @@ fn bench_datafusion_data_skipping(c: &mut Criterion) {
                     .expect("Failed to build scan");
                 let mut stream = std::pin::pin!(scan.scan_metadata_async(executor.clone()));
                 while let Some(result) = stream.next().await {
-                    result.expect("Failed to process scan metadata");
+                    black_box(result.expect("Failed to process scan metadata"));
                 }
             })
         })

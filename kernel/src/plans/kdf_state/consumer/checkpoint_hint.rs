@@ -1,12 +1,13 @@
 //! CheckpointHintReader Consumer KDF - extracts checkpoint hint from _last_checkpoint scan.
 
-use std::sync::{Arc, Mutex};
-
 use crate::{DeltaResult, EngineData, Version};
 
-/// Inner mutable state for CheckpointHintReader.
-#[derive(Debug, Default)]
-struct CheckpointHintReaderInner {
+/// State for CheckpointHintReader consumer KDF - extracts checkpoint hint from scan results.
+///
+/// Uses RowVisitor pattern to eliminate downcasting and column extraction boilerplate.
+/// Direct mutation (no interior mutability) - owned state is mutated and passed back.
+#[derive(Debug, Clone, Default)]
+pub struct CheckpointHintReaderState {
     /// The extracted checkpoint version
     version: Option<Version>,
     /// The number of actions stored in the checkpoint
@@ -23,48 +24,30 @@ struct CheckpointHintReaderInner {
     error: Option<String>,
 }
 
-/// State for CheckpointHintReader consumer KDF - extracts checkpoint hint from scan results.
-///
-/// Uses RowVisitor pattern to eliminate downcasting and column extraction boilerplate.
-#[derive(Debug, Clone)]
-pub struct CheckpointHintReaderState {
-    inner: Arc<Mutex<CheckpointHintReaderInner>>,
-}
-
-impl Default for CheckpointHintReaderState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl CheckpointHintReaderState {
     /// Create new state for reading checkpoint hint.
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(CheckpointHintReaderInner::default())),
-        }
+        Self::default()
     }
 
     /// Apply consumer to a batch of checkpoint hint data using RowVisitor pattern.
     #[inline]
-    pub fn apply(&self, batch: &dyn EngineData) -> DeltaResult<bool> {
+    pub fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<bool> {
         use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
         use crate::schema::{ColumnName, DataType};
 
-        let mut inner = self.inner.lock().unwrap();
-
         // If we already processed a hint, stop
-        if inner.processed {
+        if self.processed {
             return Ok(false);
         }
 
         // If we have an error, stop processing
-        if inner.error.is_some() {
+        if self.error.is_some() {
             return Ok(false);
         }
 
         struct HintVisitor<'a> {
-            inner: &'a mut CheckpointHintReaderInner,
+            state: &'a mut CheckpointHintReaderState,
         }
 
         impl crate::engine_data::RowVisitor for HintVisitor<'_> {
@@ -86,18 +69,18 @@ impl CheckpointHintReaderState {
                 }
 
                 // We only expect one row in the _last_checkpoint file
-                self.inner.version = getters[0].get_long(0, "version")?.map(|v| v as Version);
-                self.inner.size = getters[1].get_long(0, "size")?;
-                self.inner.parts = getters[2].get_int(0, "parts")?;
-                self.inner.size_in_bytes = getters[3].get_long(0, "sizeInBytes")?;
-                self.inner.num_of_add_files = getters[4].get_long(0, "numOfAddFiles")?;
-                self.inner.processed = true;
+                self.state.version = getters[0].get_long(0, "version")?.map(|v| v as Version);
+                self.state.size = getters[1].get_long(0, "size")?;
+                self.state.parts = getters[2].get_int(0, "parts")?;
+                self.state.size_in_bytes = getters[3].get_long(0, "sizeInBytes")?;
+                self.state.num_of_add_files = getters[4].get_long(0, "numOfAddFiles")?;
+                self.state.processed = true;
 
                 Ok(())
             }
         }
 
-        let mut visitor = HintVisitor { inner: &mut inner };
+        let mut visitor = HintVisitor { state: self };
         visitor.visit_rows_of(batch)?;
 
         // Return false to indicate we're done (Break)
@@ -105,69 +88,63 @@ impl CheckpointHintReaderState {
     }
 
     /// Finalize the state after iteration completes.
-    pub fn finalize(&self) {
+    pub fn finalize(&mut self) {
         // Nothing special needed for finalization
     }
 
     /// Check if a hint was successfully extracted.
     pub fn has_hint(&self) -> bool {
-        self.inner.lock().unwrap().version.is_some()
+        self.version.is_some()
     }
 
     /// Check if an error occurred during processing.
     pub fn has_error(&self) -> bool {
-        self.inner.lock().unwrap().error.is_some()
+        self.error.is_some()
     }
 
     /// Take the error, if any.
-    pub fn take_error(&self) -> Option<String> {
-        self.inner.lock().unwrap().error.take()
+    pub fn take_error(&mut self) -> Option<String> {
+        self.error.take()
     }
 
     /// Get the extracted version, if any.
     pub fn get_version(&self) -> Option<Version> {
-        self.inner.lock().unwrap().version
+        self.version
     }
 
     /// Get the extracted parts count, if any.
     pub fn get_parts(&self) -> Option<i32> {
-        self.inner.lock().unwrap().parts
+        self.parts
     }
 
-    // Single test helper instead of 6 separate accessor methods
+    // Test helper accessors
     #[cfg(test)]
-    #[allow(private_interfaces)]
-    pub(crate) fn inner(&self) -> std::sync::MutexGuard<'_, CheckpointHintReaderInner> {
-        self.inner.lock().unwrap()
-    }
-}
-
-// Make inner public for testing
-#[cfg(test)]
-impl CheckpointHintReaderInner {
     pub(crate) fn version(&self) -> Option<Version> {
         self.version
     }
 
-    pub(crate) fn parts(&self) -> Option<i32> {
+    #[cfg(test)]
+    pub(crate) fn parts_count(&self) -> Option<i32> {
         self.parts
     }
 
+    #[cfg(test)]
     pub(crate) fn size(&self) -> Option<i64> {
         self.size
     }
 
-    pub(crate) fn error(&self) -> Option<&String> {
+    #[cfg(test)]
+    pub(crate) fn error_ref(&self) -> Option<&String> {
         self.error.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn size_in_bytes(&self) -> Option<i64> {
         self.size_in_bytes
     }
 
+    #[cfg(test)]
     pub(crate) fn num_of_add_files(&self) -> Option<i64> {
         self.num_of_add_files
     }
 }
-
-

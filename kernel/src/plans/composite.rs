@@ -4,7 +4,7 @@
 //! Engines that want compile-time knowledge of plan structure can use these directly.
 
 use super::nodes::*;
-use super::kdf_state::ConsumerKdfState;
+use super::kdf_state::{ConsumerKdfState, ConsumerStateSender};
 use super::{AsQueryPlan, DeclarativePlanNode};
 
 // =============================================================================
@@ -26,13 +26,27 @@ pub struct DataSkippingPlan {
 // Phase Plans (complete operation plans)
 // =============================================================================
 
+/// A scan node with a select that adds a version column.
+///
+/// Used to build Union of per-file scans where each file's version is added as a column.
+#[derive(Debug, Clone)]
+pub struct ScanWithVersion {
+    /// The scan node for this file
+    pub scan: ScanNode,
+    /// Select node that adds the version column via Transform
+    pub select: SelectNode,
+}
+
 /// Plan for processing commit files (JSON log files).
 ///
-/// Structure: Scan → [DataSkipping] → [PartitionPrune] → AddRemoveDedup → Project → Sink
+/// Structure: Union(ScanWithVersion...) → [DataSkipping] → [PartitionPrune] → AddRemoveDedup → Project → Sink
+///
+/// Each commit file is scanned individually with a version literal added via Transform.
+/// This enables version DESC ordering which is required for AddRemoveDedup.
 #[derive(Debug, Clone)]
 pub struct CommitPhasePlan {
-    /// Scan commit JSON files
-    pub scan: ScanNode,
+    /// Per-file scans with version - combined into a Union
+    pub scans: Vec<ScanWithVersion>,
     /// Optional data skipping optimization
     pub data_skipping: Option<DataSkippingPlan>,
     /// Optional partition pruning filter (partitionValues-only pruning)
@@ -55,7 +69,7 @@ pub struct CommitPhasePlan {
 /// 3. Collect the sidecar file paths via ConsumeByKDF
 /// 4. These paths are then used in the CheckpointLeaf phase
 ///
-/// Uses `ConsumerByKDF` (sender) - the corresponding receiver is stored in the phase.
+/// Uses `ConsumerStateSender` directly - the corresponding receiver is stored in the phase.
 #[derive(Debug, Clone)]
 pub struct CheckpointManifestPlan {
     /// Scan manifest parquet file
@@ -63,7 +77,7 @@ pub struct CheckpointManifestPlan {
     /// Project sidecar file paths
     pub project: SelectNode,
     /// Consumer KDF sender to collect sidecar file paths
-    pub sidecar_collector: ConsumerByKDF,
+    pub sidecar_collector: ConsumerStateSender,
     /// Terminal sink (default: Drop)
     pub sink: SinkNode,
 }
@@ -90,30 +104,32 @@ pub struct CheckpointLeafPlan {
 /// Structure: FileListing → ConsumeByKDF (LogSegmentBuilder) → Sink
 ///
 /// The consumer KDF processes file listing results to build a LogSegment.
-/// Uses `ConsumerByKDF` (sender) - the corresponding receiver is stored in the phase.
+/// Uses `ConsumerStateSender` directly - the corresponding receiver is stored in the phase.
 #[derive(Debug, Clone)]
 pub struct FileListingPhasePlan {
     /// List files from _delta_log
     pub listing: FileListingNode,
     /// Consumer KDF sender to build LogSegment from listing results
-    pub log_segment_builder: ConsumerByKDF,
+    pub log_segment_builder: ConsumerStateSender,
     /// Terminal sink (default: Drop)
     pub sink: SinkNode,
 }
 
 /// Plan for loading table metadata (protocol and metadata actions).
 ///
-/// Structure: Scan → ConsumeByKDF (MetadataProtocolReader) → Sink
+/// Structure: Union(ScanWithVersion...) → ConsumeByKDF (MetadataProtocolReader) → Sink
 ///
-/// The consumer KDF processes scan results to extract the first non-null
-/// protocol and metadata actions needed for snapshot construction.
-/// Uses `ConsumerByKDF` (sender) - the corresponding receiver is stored in the phase.
+/// Each file is scanned individually with a version literal added via Transform.
+/// This enables version DESC ordering which ensures the first P&M found is from
+/// the latest version.
+///
+/// Uses `ConsumerStateSender` directly - the corresponding receiver is stored in the phase.
 #[derive(Debug, Clone)]
 pub struct MetadataLoadPlan {
-    /// Scan protocol/metadata files (JSON commits or Parquet checkpoints)
-    pub scan: ScanNode,
+    /// Per-file scans with version - combined into a Union
+    pub scans: Vec<ScanWithVersion>,
     /// Consumer KDF sender to extract protocol and metadata from scan results
-    pub metadata_reader: ConsumerByKDF,
+    pub metadata_reader: ConsumerStateSender,
     /// Terminal sink (default: Drop)
     pub sink: SinkNode,
 }
@@ -123,13 +139,13 @@ pub struct MetadataLoadPlan {
 /// Structure: Scan (JSON) → ConsumeByKDF (CheckpointHintReader) → Sink
 ///
 /// The consumer KDF processes scan results to extract the checkpoint hint.
-/// Uses `ConsumerByKDF` (sender) - the corresponding receiver is stored in the phase.
+/// Uses `ConsumerStateSender` directly - the corresponding receiver is stored in the phase.
 #[derive(Debug, Clone)]
 pub struct CheckpointHintPlan {
     /// Scan the _last_checkpoint JSON file
     pub scan: ScanNode,
     /// Consumer KDF sender to extract checkpoint hint from scan results
-    pub hint_reader: ConsumerByKDF,
+    pub hint_reader: ConsumerStateSender,
     /// Terminal sink (default: Drop)
     pub sink: SinkNode,
 }
@@ -160,13 +176,13 @@ pub struct SchemaQueryPhasePlan {
 /// - If sidecars were collected: transition to CheckpointLeaf to read sidecar files
 /// - If no sidecars: all add actions were in the checkpoint, done
 ///
-/// Uses `ConsumerByKDF` (sender) - the corresponding receiver is stored in the phase.
+/// Uses `ConsumerStateSender` directly - the corresponding receiver is stored in the phase.
 #[derive(Debug, Clone)]
 pub struct JsonCheckpointPhasePlan {
     /// Scan JSON checkpoint file
     pub scan: ScanNode,
     /// Consumer KDF sender to collect sidecar file paths (sees all rows before filtering)
-    pub sidecar_collector: ConsumerByKDF,
+    pub sidecar_collector: ConsumerStateSender,
     /// Optional partition pruning filter (partitionValues-only pruning)
     pub partition_prune_filter: Option<FilterByKDF>,
     /// Deduplication filter for add/remove actions
@@ -194,7 +210,24 @@ fn maybe_filter_by_kdf(plan: DeclarativePlanNode, filter: Option<&FilterByKDF>) 
 
 impl AsQueryPlan for CommitPhasePlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
-        let mut plan = DeclarativePlanNode::Scan(self.scan.clone());
+        // Build Union of per-file Scan→Select pipelines
+        let children: Vec<DeclarativePlanNode> = self
+            .scans
+            .iter()
+            .map(|swv| {
+                DeclarativePlanNode::Select {
+                    child: Box::new(DeclarativePlanNode::Scan(swv.scan.clone())),
+                    node: swv.select.clone(),
+                }
+            })
+            .collect();
+
+        // Create source - Union if multiple children, or single child
+        let mut plan = if children.len() == 1 {
+            children.into_iter().next().unwrap()
+        } else {
+            DeclarativePlanNode::Union { children }
+        };
 
         // Add data skipping if present
         if let Some(ds) = &self.data_skipping {
@@ -280,10 +313,28 @@ impl AsQueryPlan for FileListingPhasePlan {
 
 impl AsQueryPlan for MetadataLoadPlan {
     fn as_query_plan(&self) -> DeclarativePlanNode {
-        let scan = DeclarativePlanNode::Scan(self.scan.clone());
+        // Build Union of per-file Scan→Select pipelines
+        let children: Vec<DeclarativePlanNode> = self
+            .scans
+            .iter()
+            .map(|swv| {
+                DeclarativePlanNode::Select {
+                    child: Box::new(DeclarativePlanNode::Scan(swv.scan.clone())),
+                    node: swv.select.clone(),
+                }
+            })
+            .collect();
+
+        // Create source - Union if multiple children, or single child
+        let source = if children.len() == 1 {
+            children.into_iter().next().unwrap()
+        } else {
+            DeclarativePlanNode::Union { children }
+        };
+
         DeclarativePlanNode::Sink {
             child: Box::new(DeclarativePlanNode::ConsumeByKDF {
-                child: Box::new(scan),
+                child: Box::new(source),
                 node: self.metadata_reader.clone(),
             }),
             node: self.sink.clone(),

@@ -36,9 +36,9 @@ impl ConsumerKdfState {
     /// - `Ok(true)` = Continue (keep feeding data)
     /// - `Ok(false)` = Break (stop iteration)
     ///
-    /// Uses interior mutability - takes `&self` to enable use in lazy iterators.
+    /// Uses direct mutation - takes `&mut self` for efficient state updates.
     #[inline]
-    pub fn apply(&self, batch: &dyn EngineData) -> DeltaResult<bool> {
+    pub fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<bool> {
         match self {
             Self::LogSegmentBuilder(state) => state.apply(batch),
             Self::CheckpointHintReader(state) => state.apply(batch),
@@ -48,7 +48,7 @@ impl ConsumerKdfState {
     }
 
     /// Finalize the consumer state after iteration completes.
-    pub fn finalize(&self) {
+    pub fn finalize(&mut self) {
         match self {
             Self::LogSegmentBuilder(state) => state.finalize(),
             Self::CheckpointHintReader(state) => state.finalize(),
@@ -68,7 +68,7 @@ impl ConsumerKdfState {
     }
 
     /// Take the error as a DeltaResult, if any.
-    pub fn take_error(&self) -> Option<Error> {
+    pub fn take_error(&mut self) -> Option<Error> {
         match self {
             Self::LogSegmentBuilder(state) => {
                 state.take_error().map(Error::generic)
@@ -88,5 +88,3 @@ impl ConsumerKdfState {
 
 // Implement FFI conversion using the macro
 crate::impl_ffi_convertible!(ConsumerKdfState);
-
-

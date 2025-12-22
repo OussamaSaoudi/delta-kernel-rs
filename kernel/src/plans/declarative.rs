@@ -3,6 +3,7 @@
 //! This enum provides a recursive tree representation of plans.
 //! Engines that want generic plan execution can use this to walk the tree.
 
+use super::kdf_state::ConsumerStateSender;
 use super::nodes::*;
 
 /// Declarative plan node - a recursive tree structure.
@@ -57,10 +58,10 @@ pub enum DeclarativePlanNode {
     /// - `true` = Continue (keep feeding data)
     /// - `false` = Break (stop iteration)
     ///
-    /// Uses `ConsumerByKDF` (sender) - the corresponding receiver is stored in the phase.
+    /// Uses `ConsumerStateSender` directly - the corresponding receiver is stored in the phase.
     ConsumeByKDF {
         child: Box<DeclarativePlanNode>,
-        node: ConsumerByKDF,
+        node: ConsumerStateSender,
     },
     
     /// Filter using predicate expression
@@ -100,6 +101,18 @@ pub enum DeclarativePlanNode {
     Sink {
         child: Box<DeclarativePlanNode>,
         node: SinkNode,
+    },
+
+    // =========================================================================
+    // N-ary Nodes (multiple children)
+    // =========================================================================
+
+    /// Union multiple child streams (concatenation).
+    ///
+    /// Results from all children are concatenated in order.
+    /// All children must have compatible schemas.
+    Union {
+        children: Vec<DeclarativePlanNode>,
     },
 }
 
@@ -167,10 +180,10 @@ impl DeclarativePlanNode {
     /// let plan = listing_node.consume_by_kdf(sender);
     /// // Store receiver in the phase for later collection
     /// ```
-    pub fn consume_by_kdf(self, kdf: ConsumerByKDF) -> Self {
+    pub fn consume_by_kdf(self, sender: ConsumerStateSender) -> Self {
         Self::ConsumeByKDF {
             child: Box::new(self),
-            node: kdf,
+            node: sender,
         }
     }
 
@@ -222,6 +235,14 @@ impl DeclarativePlanNode {
         }
     }
 
+    /// Create a union of multiple child plans.
+    ///
+    /// Results from all children are concatenated in order.
+    /// All children must have compatible schemas.
+    pub fn union(children: Vec<Self>) -> Self {
+        Self::Union { children }
+    }
+
     // =========================================================================
     // Sink builder methods
     // =========================================================================
@@ -265,6 +286,8 @@ impl DeclarativePlanNode {
             | Self::ParseJson { child, .. }
             | Self::FirstNonNull { child, .. }
             | Self::Sink { child, .. } => vec![child.as_ref()],
+            // N-ary nodes
+            Self::Union { children } => children.iter().collect(),
         }
     }
 

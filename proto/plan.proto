@@ -118,6 +118,9 @@ message DeclarativePlanNode {
 
     // Sink nodes (terminal)
     SinkPlan sink = 16;
+
+    // N-ary nodes (multiple children)
+    UnionPlan union = 17;
   }
 }
 
@@ -158,5 +161,14 @@ message FirstNonNullPlan {
 message SinkPlan {
   DeclarativePlanNode child = 1;
   SinkNode node = 2;
+}
+
+// -----------------------------------------------------------------------------
+// N-ary Plan Wrappers (multiple children)
+// -----------------------------------------------------------------------------
+
+// Union multiple child streams (concatenation)
+message UnionPlan {
+  repeated DeclarativePlanNode children = 1;
 }
 

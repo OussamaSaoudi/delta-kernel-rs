@@ -12,6 +12,7 @@ use datafusion_functions_aggregate::first_last::first_value_udaf;
 use delta_kernel::plans::DeclarativePlanNode;
 use delta_kernel::schema::SchemaRef;
 use crate::error::{DfResult, DfError};
+use crate::executor::ParallelismConfig;
 use crate::expr::{lower_expression, lower_column};
 use crate::scan::compile_scan as compile_scan_impl;
 use crate::exec::{KdfFilterExec, ConsumeKdfExec, FileListingExec, SchemaQueryExec};
@@ -44,6 +45,13 @@ fn infer_output_schema(plan: &DeclarativePlanNode) -> DfResult<SchemaRef> {
         | DeclarativePlanNode::ParseJson { child, .. }
         | DeclarativePlanNode::Sink { child, .. } => infer_output_schema(child)?,
         DeclarativePlanNode::Select { node, .. } => node.output_schema.clone(),
+        DeclarativePlanNode::Union { children } => {
+            // Union output schema is the schema of the first child
+            children.first()
+                .map(|c| infer_output_schema(c))
+                .transpose()?
+                .unwrap_or_else(|| Arc::new(StructType::try_new(vec![]).unwrap()))
+        }
     })
 }
 
@@ -51,6 +59,7 @@ fn infer_output_schema(plan: &DeclarativePlanNode) -> DfResult<SchemaRef> {
 pub fn compile_plan(
     plan: &DeclarativePlanNode,
     session_state: &SessionState,
+    parallelism_config: &ParallelismConfig,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
     match plan {
         DeclarativePlanNode::Scan(node) => {
@@ -63,27 +72,30 @@ pub fn compile_plan(
             compile_schema_query(node, session_state)
         }
         DeclarativePlanNode::FilterByKDF { child, node } => {
-            compile_filter_by_kdf(child, node, session_state)
+            compile_filter_by_kdf(child, node, session_state, parallelism_config)
         }
         DeclarativePlanNode::ConsumeByKDF { child, node } => {
-            compile_consume_by_kdf(child, node, session_state)
+            compile_consume_by_kdf(child, node, session_state, parallelism_config)
         }
         DeclarativePlanNode::FilterByExpression { child, node } => {
-            compile_filter_by_expr(child, node, session_state)
+            compile_filter_by_expr(child, node, session_state, parallelism_config)
         }
         DeclarativePlanNode::Select { child, node } => {
-            compile_select(child, node, session_state)
+            compile_select(child, node, session_state, parallelism_config)
         }
         DeclarativePlanNode::ParseJson { child, node } => {
-            compile_parse_json(child, node, session_state)
+            compile_parse_json(child, node, session_state, parallelism_config)
         }
         DeclarativePlanNode::FirstNonNull { child, node } => {
-            compile_first_non_null(child, node, session_state)
+            compile_first_non_null(child, node, session_state, parallelism_config)
         }
         DeclarativePlanNode::Sink { child, node } => {
             // Sinks are transparent in DataFusion - just compile the child
             // The driver handles Results vs Drop semantics
-            compile_sink(child, node, session_state)
+            compile_sink(child, node, session_state, parallelism_config)
+        }
+        DeclarativePlanNode::Union { children } => {
+            compile_union(children, session_state, parallelism_config)
         }
     }
 }
@@ -94,10 +106,11 @@ fn compile_sink(
     child: &DeclarativePlanNode,
     _node: &delta_kernel::plans::SinkNode,
     session_state: &SessionState,
+    parallelism_config: &ParallelismConfig,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
     // Sinks are transparent in DataFusion - just compile the child
     // The driver handles Results vs Drop semantics
-    compile_plan(child, session_state)
+    compile_plan(child, session_state, parallelism_config)
 }
 
 fn compile_scan(
@@ -105,6 +118,27 @@ fn compile_scan(
     session_state: &SessionState,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
     compile_scan_impl(node, session_state)
+}
+
+fn compile_union(
+    children: &[DeclarativePlanNode],
+    session_state: &SessionState,
+    parallelism_config: &ParallelismConfig,
+) -> DfResult<Arc<dyn ExecutionPlan>> {
+    use datafusion_physical_plan::union::UnionExec;
+
+    if children.is_empty() {
+        return Err(DfError::PlanCompilation("Union requires at least one child".to_string()));
+    }
+
+    // Compile all children
+    let child_plans: Vec<Arc<dyn ExecutionPlan>> = children
+        .iter()
+        .map(|child| compile_plan(child, session_state, parallelism_config))
+        .collect::<DfResult<Vec<_>>>()?;
+
+    // Create UnionExec to concatenate all child streams
+    Ok(UnionExec::try_new(child_plans)?)
 }
 
 fn compile_file_listing(
@@ -133,17 +167,23 @@ fn compile_filter_by_kdf(
     child: &DeclarativePlanNode,
     node: &delta_kernel::plans::FilterByKDF,
     session_state: &SessionState,
+    parallelism_config: &ParallelismConfig,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
-    let child_plan = compile_plan(child, session_state)?;
-    Ok(Arc::new(KdfFilterExec::new(child_plan, node.clone())))
+    let child_plan = compile_plan(child, session_state, parallelism_config)?;
+    Ok(Arc::new(KdfFilterExec::new(
+        child_plan,
+        node.clone(),
+        parallelism_config.clone(),
+    )))
 }
 
 fn compile_consume_by_kdf(
     child: &DeclarativePlanNode,
-    node: &delta_kernel::plans::ConsumeByKDF,
+    node: &delta_kernel::plans::kdf_state::ConsumerStateSender,
     session_state: &SessionState,
+    parallelism_config: &ParallelismConfig,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
-    let child_plan = compile_plan(child, session_state)?;
+    let child_plan = compile_plan(child, session_state, parallelism_config)?;
     Ok(Arc::new(ConsumeKdfExec::new(child_plan, node.clone())))
 }
 
@@ -151,8 +191,9 @@ fn compile_filter_by_expr(
     child: &DeclarativePlanNode,
     node: &delta_kernel::plans::FilterByExpressionNode,
     session_state: &SessionState,
+    parallelism_config: &ParallelismConfig,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
-    let child_plan = compile_plan(child, session_state)?;
+    let child_plan = compile_plan(child, session_state, parallelism_config)?;
     
     // FilterByExpressionNode stores the predicate as Arc<Expression>
     // Lower it to a DataFusion Expr (predicates don't need output type or input schema)
@@ -177,6 +218,7 @@ fn compile_select(
     child: &DeclarativePlanNode,
     node: &delta_kernel::plans::SelectNode,
     session_state: &SessionState,
+    parallelism_config: &ParallelismConfig,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
     use delta_kernel::Expression;
     use delta_kernel::schema::DataType;
@@ -184,7 +226,7 @@ fn compile_select(
     // Get input schema from child node for Transform expressions
     let input_schema = infer_output_schema(child)?;
     
-    let child_plan = compile_plan(child, session_state)?;
+    let child_plan = compile_plan(child, session_state, parallelism_config)?;
     let schema = child_plan.schema();
     let df_schema = datafusion_common::DFSchema::try_from_qualified_schema("", &schema)?;
     
@@ -354,12 +396,13 @@ fn compile_parse_json(
     child: &DeclarativePlanNode,
     node: &delta_kernel::plans::ParseJsonNode,
     session_state: &SessionState,
+    parallelism_config: &ParallelismConfig,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
     use crate::json_parse::{build_nested_column_expr, generate_schema_extractions};
     use datafusion_expr::{Expr, lit};
     use datafusion_common::Column as DfColumn;
     
-    let child_plan = compile_plan(child, session_state)?;
+    let child_plan = compile_plan(child, session_state, parallelism_config)?;
     let child_schema = child_plan.schema();
     let df_schema = datafusion_common::DFSchema::try_from_qualified_schema("", &child_schema)?;
     
@@ -446,9 +489,10 @@ fn compile_parse_json(
 fn compile_first_non_null(
     child: &DeclarativePlanNode,
     node: &delta_kernel::plans::FirstNonNullNode,
-    _session_state: &SessionState,
+    session_state: &SessionState,
+    parallelism_config: &ParallelismConfig,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
-    let child_plan = compile_plan(child, _session_state)?;
+    let child_plan = compile_plan(child, session_state, parallelism_config)?;
     let schema = child_plan.schema();
     
     // Build aggregate expressions for each column using first_value with IGNORE NULLS

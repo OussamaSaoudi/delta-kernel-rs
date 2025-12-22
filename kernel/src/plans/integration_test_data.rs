@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use prost::Message;
 
-use crate::plans::kdf_state::{AddRemoveDedupState, FilterKdfState, StateSender};
+use crate::plans::nodes::FilterByKDF;
 use crate::plans::*;
 use crate::proto_generated as proto;
 use crate::schema::{DataType, StructField, StructType};
@@ -49,14 +49,12 @@ fn create_declarative_plan_bytes() -> Vec<u8> {
         },
     };
 
-    // Create sender/receiver pair - only sender goes into plan
-    let (dedup_sender, _receiver) = StateSender::build(
-        FilterKdfState::AddRemoveDedup(AddRemoveDedupState::new()),
-    );
+    // Create AddRemoveDedup filter with parallelism capabilities
+    let (dedup_filter, _receiver) = FilterByKDF::add_remove_dedup();
 
     let filter = DeclarativePlanNode::FilterByKDF {
         child: Box::new(parse_json),
-        node: dedup_sender,
+        node: dedup_filter,
     };
 
     let proto_plan: proto::DeclarativePlanNode = (&filter).into();

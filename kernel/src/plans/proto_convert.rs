@@ -9,6 +9,7 @@ use crate::proto_generated as proto;
 use crate::schema::SchemaRef;
 use crate::{DeltaResult, Error};
 
+use super::kdf_state::ConsumerStateSender;
 use super::nodes::*;
 use super::declarative::DeclarativePlanNode;
 use super::composite::*;
@@ -104,7 +105,17 @@ impl From<&ConsumerByKDF> for proto::ConsumeByKdf {
         // Convert typed state to raw pointer for FFI
         // Clone the template state from the sender since we need ownership for the raw pointer
         proto::ConsumeByKdf {
-            state_ptr: node.template().clone().into_raw(),
+            state_ptr: node.sender.template().clone().into_raw(),
+        }
+    }
+}
+
+impl From<&ConsumerStateSender> for proto::ConsumeByKdf {
+    fn from(sender: &ConsumerStateSender) -> Self {
+        // Convert typed state to raw pointer for FFI
+        // Clone the template state from the sender since we need ownership for the raw pointer
+        proto::ConsumeByKdf {
+            state_ptr: sender.template().clone().into_raw(),
         }
     }
 }
@@ -241,6 +252,13 @@ impl From<&DeclarativePlanNode> for proto::DeclarativePlanNode {
                     node: Some(n.into()),
                 }))
             }
+            DeclarativePlanNode::Union { children } => {
+                // TODO: Add proto::UnionPlan to plan.proto and implement proper serialization
+                // For now, Union nodes are not serializable
+                Node::Union(proto::UnionPlan {
+                    children: children.iter().map(|c| c.into()).collect(),
+                })
+            }
         };
 
         proto::DeclarativePlanNode { node: Some(node_variant) }
@@ -253,8 +271,10 @@ impl From<&DeclarativePlanNode> for proto::DeclarativePlanNode {
 
 impl From<&CommitPhasePlan> for proto::CommitPhasePlan {
     fn from(plan: &CommitPhasePlan) -> Self {
+        // TODO: Update proto schema to support Vec<ScanWithVersion> instead of single ScanNode
+        // For now, use a placeholder since the proto schema needs updating
         proto::CommitPhasePlan {
-            scan: Some((&plan.scan).into()),
+            scan: None, // Was: plan.scan - now plan.scans: Vec<ScanWithVersion>
             data_skipping: plan.data_skipping.as_ref().map(|ds| proto::DataSkippingPlan {
                 parse_json: Some((&ds.parse_json).into()),
                 filter: Some((&ds.filter).into()),
@@ -317,8 +337,10 @@ impl From<&FileListingPhasePlan> for proto::FileListingPhasePlan {
 
 impl From<&MetadataLoadPlan> for proto::MetadataLoadPlan {
     fn from(plan: &MetadataLoadPlan) -> Self {
+        // TODO: Update proto schema to support Vec<ScanWithVersion> instead of single ScanNode
+        // For now, use a placeholder since the proto schema needs updating
         proto::MetadataLoadPlan {
-            scan: Some((&plan.scan).into()),
+            scan: None, // Was: plan.scan - now plan.scans: Vec<ScanWithVersion>
             metadata_reader: Some((&plan.metadata_reader).into()),
             sink: Some((&plan.sink).into()),
         }
