@@ -25,8 +25,11 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::SessionStateBuilder;
 use datafusion_common::config::ConfigOptions;
+use datafusion_execution::memory_pool::GreedyMemoryPool;
+use datafusion_execution::runtime_env::RuntimeEnvBuilder;
 use futures::StreamExt;
 use tokio::runtime::Runtime;
+use tracing_subscriber::EnvFilter;
 use url::Url;
 
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
@@ -62,20 +65,31 @@ fn setup_default_engine() -> (Url, Arc<DefaultEngine<TokioBackgroundExecutor>>) 
 
 /// Setup the DataFusion executor with row group parallelism and parallel dedup
 fn setup_datafusion_executor() -> Arc<DataFusionExecutor> {
-    // Enable row group parallelism for parquet reads
     let mut config = ConfigOptions::default();
     config.optimizer.repartition_file_scans = true;
+    config.execution.target_partitions = num_cpus::get();
+    config.optimizer.enable_round_robin_repartition = false; // ← Add this!
+                                                             // config.execution.batch_size = 512; // Try reducing to 1024 or 512
 
-    let runtime = Arc::new(RuntimeEnv::default());
+    // Create memory pool
+    let memory_pool = Arc::new(GreedyMemoryPool::new(
+        8 * 1024 * 1024 * 1024, // 1GB - adjust based on your needs
+    ));
+
+    // Actually USE the memory pool in RuntimeEnv
+    let runtime = Arc::new(
+        RuntimeEnvBuilder::new()
+            .with_memory_pool(memory_pool)
+            .build()
+            .unwrap(),
+    );
+
     let session_state = SessionStateBuilder::new()
         .with_config(config.into())
         .with_runtime_env(runtime)
         .build();
 
-    Arc::new(
-        DataFusionExecutor::with_session_state(session_state)
-            .with_parallel_dedup(true),
-    )
+    Arc::new(DataFusionExecutor::with_session_state(session_state).with_parallel_dedup(true))
 }
 
 /// Create a partition filter predicate: repository = 'backend-api'
@@ -105,7 +119,11 @@ fn bench_default_engine_no_predicate(c: &mut Criterion) {
 
     group.bench_function(BenchmarkId::new("engine", "DefaultEngine"), |b| {
         b.iter(|| {
-            let scan = snapshot.clone().scan_builder().build().expect("Failed to build scan");
+            let scan = snapshot
+                .clone()
+                .scan_builder()
+                .build()
+                .expect("Failed to build scan");
             let metadata_iter = scan
                 .scan_metadata(engine.as_ref())
                 .expect("Failed to get scan metadata");
@@ -121,7 +139,12 @@ fn bench_default_engine_no_predicate(c: &mut Criterion) {
 
 /// Benchmark scan metadata with DataFusion (no predicate)
 fn bench_datafusion_no_predicate(c: &mut Criterion) {
-    let rt = Runtime::new().expect("Failed to create runtime");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(num_cpus::get()) // Match your DataFusion partition count
+        .thread_name("datafusion-worker")
+        .enable_all()
+        .build()
+        .expect("Failed to create runtime");
     let url = table_url();
     let executor = setup_datafusion_executor();
 
@@ -140,7 +163,11 @@ fn bench_datafusion_no_predicate(c: &mut Criterion) {
     group.bench_function(BenchmarkId::new("engine", "DataFusion"), |b| {
         b.iter(|| {
             rt.block_on(async {
-                let scan = snapshot.clone().scan_builder().build().expect("Failed to build scan");
+                let scan = snapshot
+                    .clone()
+                    .scan_builder()
+                    .build()
+                    .expect("Failed to build scan");
                 let mut stream = std::pin::pin!(scan.scan_metadata_async(executor.clone()));
                 while let Some(result) = stream.next().await {
                     black_box(result.expect("Failed to process scan metadata"));
@@ -256,7 +283,20 @@ fn bench_default_engine_data_skipping(c: &mut Criterion) {
 
 /// Benchmark scan metadata with DataFusion (data skipping filter)
 fn bench_datafusion_data_skipping(c: &mut Criterion) {
-    let rt = Runtime::new().expect("Failed to create runtime");
+    // Initialize tracing once
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("datafusion=debug")),
+        )
+        .with_test_writer() // Prevents interference with benchmark output
+        .try_init();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(num_cpus::get()) // Match your DataFusion partition count
+        .thread_name("datafusion-worker")
+        .enable_all()
+        .build()
+        .expect("Failed to create runtime");
     let url = table_url();
     let executor = setup_datafusion_executor();
     let predicate = data_skipping_predicate();
@@ -303,4 +343,3 @@ criterion_group!(
 );
 
 criterion_main!(benches);
-

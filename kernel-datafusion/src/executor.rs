@@ -6,7 +6,9 @@ use datafusion::execution::{
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::displayable;
-use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties, SendableRecordBatchStream};
+use datafusion::physical_plan::{
+    ExecutionPlan, ExecutionPlanProperties, SendableRecordBatchStream,
+};
 use datafusion_common::config::ConfigOptions;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -212,12 +214,14 @@ impl DataFusionExecutor {
     /// which insert `RepartitionExec`, `SortExec`, and `SortPreservingMergeExec`
     /// based on the declared requirements of each operator.
     pub fn optimize(&self, plan: Arc<dyn ExecutionPlan>) -> DfResult<Arc<dyn ExecutionPlan>> {
-        let optimizer = PhysicalOptimizer::default();
         let config = self.session_state.config_options();
         let mut result = plan;
-        for rule in optimizer.rules.iter() {
+
+        // Use physical_optimizers() from SessionState, NOT PhysicalOptimizer::default()
+        for rule in self.session_state.physical_optimizers() {
             result = rule.optimize(result, config)?;
         }
+
         Ok(result)
     }
 
@@ -248,10 +252,7 @@ impl DataFusionExecutor {
 
         // Step 4: Handle multiple partitions by coalescing
         let output_partitions = optimized_plan.output_partitioning().partition_count();
-        debug!(
-            "Output partitioning: {} partition(s)",
-            output_partitions
-        );
+        debug!("Output partitioning: {} partition(s)", output_partitions);
 
         let final_plan: Arc<dyn ExecutionPlan> = if output_partitions == 1 {
             optimized_plan
