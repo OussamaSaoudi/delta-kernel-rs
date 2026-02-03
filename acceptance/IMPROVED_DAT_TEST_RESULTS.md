@@ -6,14 +6,15 @@ This document summarizes the results of running the `improved_dat` test suite ag
 
 | Status | Count |
 |--------|-------|
-| Passed | 573 |
-| Failed | 146 |
+| Passed | 647 |
+| Failed | 72 |
 | Skipped | 30 (timestamp-based time travel + domain metadata) |
 | Total | 719 |
 
 Note: 39 DV-* tests were removed due to broken symlinks in test data.
 
 ### Recent Fixes
+- **Row-level predicate filtering** - Apply predicate to filter rows after scan execution (+74 tests)
 - **Schema-aware predicate parsing** - Using sqlparser crate with automatic type coercion based on table schema (+36 tests)
 - **Column mapping metadata comparison** - Fixed validation to ignore Arrow field metadata (column mapping IDs), allowing column-mapped tables to pass validation (+33 tests)
 
@@ -42,11 +43,13 @@ The following test categories are working correctly:
 
 ## Failure Categories
 
-### 1. Row Count Mismatch (~98 tests)
+### 1. Row Count Mismatch (MOSTLY FIXED)
 
-Tests where the kernel returns different row counts than expected. Primary cause: **kernel does not perform row-level predicate filtering** - it only does file-level data skipping. The `scan.execute()` returns all rows from files that pass data skipping; row filtering must be done by the caller using `scan.physical_predicate()`.
+~~Tests where the kernel returns different row counts than expected.~~
 
-**Affected tests:** `ds_*` (data skipping tests), and others with predicates that can't skip entire files.
+**FIXED:** Now applying row-level predicate filtering after scan execution using `evaluate_predicate()` and `filter_record_batch()`. This fixed ~74 tests.
+
+**Remaining issues:** Some tests may still fail due to unsupported predicate syntax (LIKE operator) or edge cases.
 
 ### 2. Timestamp-based Time Travel (~57 tests)
 

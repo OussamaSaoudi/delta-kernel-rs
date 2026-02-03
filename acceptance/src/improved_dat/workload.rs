@@ -3,8 +3,10 @@
 use std::sync::Arc;
 
 use delta_kernel::arrow::array::RecordBatch;
-use delta_kernel::arrow::compute::concat_batches;
+use delta_kernel::arrow::compute::{concat_batches, filter_record_batch};
 use delta_kernel::engine::arrow_data::EngineDataArrowExt as _;
+use delta_kernel::engine::arrow_expression::evaluate_expression::evaluate_predicate;
+use delta_kernel::expressions::Predicate;
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, Engine, Error, Version};
 use itertools::Itertools;
@@ -143,13 +145,20 @@ pub fn execute_read_workload(
     // Get schema before scan_builder() takes ownership
     let table_schema = snapshot.schema();
 
-    // Build scan with optional predicate
-    let mut scan_builder = snapshot.scan_builder();
-    if let Some(pred_str) = predicate_str {
+    // Parse predicate (store for row-level filtering after scan)
+    let predicate: Option<Predicate> = if let Some(pred_str) = predicate_str {
         // Use schema-aware parser to coerce literal types to match column types
-        let predicate = parse_predicate_with_schema(pred_str, table_schema.as_ref())
+        let pred = parse_predicate_with_schema(pred_str, table_schema.as_ref())
             .map_err(|e| Error::generic(format!("Failed to parse predicate: {}", e)))?;
-        scan_builder = scan_builder.with_predicate(Some(Arc::new(predicate)));
+        Some(pred)
+    } else {
+        None
+    };
+
+    // Build scan with optional predicate (for file-level data skipping)
+    let mut scan_builder = snapshot.scan_builder();
+    if let Some(ref pred) = predicate {
+        scan_builder = scan_builder.with_predicate(Some(Arc::new(pred.clone())));
     }
     let scan = scan_builder.build()?;
 
@@ -169,8 +178,26 @@ pub fn execute_read_workload(
         })
         .try_collect()?;
 
+    // Apply row-level filtering if predicate was provided
+    let filtered_batches = if let Some(ref pred) = predicate {
+        batches
+            .into_iter()
+            .map(|batch| {
+                if batch.num_rows() == 0 {
+                    return Ok(batch);
+                }
+                // Evaluate predicate to get a boolean mask
+                let mask = evaluate_predicate(pred, &batch, false)?;
+                // Filter the batch using the mask
+                filter_record_batch(&batch, &mask).map_err(Error::from)
+            })
+            .collect::<DeltaResult<Vec<_>>>()?
+    } else {
+        batches
+    };
+
     Ok(ReadResult {
-        batches,
+        batches: filtered_batches,
         schema: Some(schema),
     })
 }
