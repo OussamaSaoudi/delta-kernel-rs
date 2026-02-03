@@ -10,7 +10,7 @@ use delta_kernel::{DeltaResult, Engine, Error, Version};
 use itertools::Itertools;
 use url::Url;
 
-use super::predicate_parser::parse_predicate;
+use super::predicate_parser::parse_predicate_with_schema;
 use super::types::WorkloadSpec;
 
 /// Result of executing a read workload
@@ -140,10 +140,14 @@ pub fn execute_read_workload(
     }
     let snapshot = builder.build(engine.as_ref())?;
 
+    // Get schema before scan_builder() takes ownership
+    let table_schema = snapshot.schema();
+
     // Build scan with optional predicate
     let mut scan_builder = snapshot.scan_builder();
     if let Some(pred_str) = predicate_str {
-        let predicate = parse_predicate(pred_str)
+        // Use schema-aware parser to coerce literal types to match column types
+        let predicate = parse_predicate_with_schema(pred_str, table_schema.as_ref())
             .map_err(|e| Error::generic(format!("Failed to parse predicate: {}", e)))?;
         scan_builder = scan_builder.with_predicate(Some(Arc::new(predicate)));
     }

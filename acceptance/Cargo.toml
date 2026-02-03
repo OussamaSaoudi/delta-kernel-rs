@@ -21,6 +21,7 @@ delta_kernel = { path = "../kernel", features = [
   "internal-api",
 ] }
 chrono = "0.4"
+sqlparser = "0.53"
 futures = "0.3"
 itertools = "0.14"
 object_store = "0.12.3" # must 'match' arrow version above

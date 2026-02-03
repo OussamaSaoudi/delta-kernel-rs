@@ -1,476 +1,502 @@
-//! SQL-like predicate parser for improved_dat test predicates.
+//! SQL predicate parser for improved_dat test predicates.
 //!
-//! Parses predicates like `"long_col >= 900 AND long_col < 950"` into kernel [`Predicate`] types.
+//! Uses sqlparser crate to parse SQL WHERE clause expressions and converts them
+//! to kernel [`Predicate`] types with automatic type coercion based on schema.
 
 use delta_kernel::expressions::{ColumnName, Expression, Predicate, Scalar};
-use delta_kernel::schema::DataType;
+use delta_kernel::schema::{DataType, DecimalType, PrimitiveType, Schema, StructType};
+use sqlparser::ast::{BinaryOperator, Expr, UnaryOperator, Value};
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser;
 
 /// Error type for predicate parsing
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
-    #[error("Unexpected end of input")]
-    UnexpectedEof,
-    #[error("Unexpected token: {0}")]
-    UnexpectedToken(String),
-    #[error("Expected {expected}, found {found}")]
-    Expected { expected: String, found: String },
-    #[error("Invalid number: {0}")]
-    InvalidNumber(String),
+    #[error("SQL parse error: {0}")]
+    SqlParser(String),
+    #[error("Unsupported expression: {0}")]
+    UnsupportedExpr(String),
+    #[error("Unsupported operator: {0}")]
+    UnsupportedOperator(String),
+    #[error("Invalid literal: {0}")]
+    InvalidLiteral(String),
 }
 
-/// Token types for the lexer
-#[derive(Debug, Clone, PartialEq)]
-enum Token {
-    // Identifiers and literals
-    Ident(String),
-    Integer(i64),
-    Float(f64),
-    String(String),
-    Boolean(bool),
-    Null,
-
-    // Comparison operators
-    Eq,        // =
-    Ne,        // != or <>
-    Lt,        // <
-    Le,        // <=
-    Gt,        // >
-    Ge,        // >=
-    NullSafeEq, // <=>
-
-    // Boolean operators
-    And,
-    Or,
-    Not,
-
-    // Keywords
-    Is,
-    In,
-    Like,
-
-    // Punctuation
-    LParen,
-    RParen,
-    Comma,
-    Dot,
-
-    // End of input
-    Eof,
+impl From<sqlparser::parser::ParserError> for ParseError {
+    fn from(e: sqlparser::parser::ParserError) -> Self {
+        ParseError::SqlParser(e.to_string())
+    }
 }
 
-/// Lexer for tokenizing predicate strings
-struct Lexer<'a> {
-    input: &'a str,
-    pos: usize,
+/// Schema-aware predicate parser
+pub struct SchemaAwareParser<'a> {
+    schema: Option<&'a Schema>,
 }
 
-impl<'a> Lexer<'a> {
-    fn new(input: &'a str) -> Self {
-        Self { input, pos: 0 }
+impl<'a> SchemaAwareParser<'a> {
+    /// Create a new parser with optional schema for type coercion
+    pub fn new(schema: Option<&'a Schema>) -> Self {
+        Self { schema }
     }
 
-    fn peek_char(&self) -> Option<char> {
-        self.input[self.pos..].chars().next()
-    }
+    /// Find the data type of a column in the schema
+    fn find_column_type(&self, column_name: &ColumnName) -> Option<&DataType> {
+        let schema = self.schema?;
+        let parts = column_name.path();
 
-    fn next_char(&mut self) -> Option<char> {
-        let c = self.peek_char()?;
-        self.pos += c.len_utf8();
-        Some(c)
-    }
+        // Navigate through nested structs
+        let mut current_struct: &StructType = schema;
+        let mut result_type: Option<&DataType> = None;
 
-    fn skip_whitespace(&mut self) {
-        while let Some(c) = self.peek_char() {
-            if c.is_whitespace() {
-                self.next_char();
+        for (i, part) in parts.iter().enumerate() {
+            let field = current_struct.fields().find(|f| f.name() == part)?;
+            if i == parts.len() - 1 {
+                result_type = Some(field.data_type());
             } else {
-                break;
+                // Navigate into struct
+                if let DataType::Struct(inner) = field.data_type() {
+                    current_struct = inner;
+                } else {
+                    return None;
+                }
             }
         }
+        result_type
     }
 
-    fn read_ident(&mut self) -> String {
-        let start = self.pos;
-        while let Some(c) = self.peek_char() {
-            if c.is_alphanumeric() || c == '_' {
-                self.next_char();
-            } else {
-                break;
-            }
-        }
-        self.input[start..self.pos].to_string()
+    /// Check if data type is INTEGER
+    fn is_integer(dt: &DataType) -> bool {
+        matches!(dt, DataType::Primitive(PrimitiveType::Integer))
     }
 
-    fn read_number(&mut self) -> Result<Token, ParseError> {
-        let start = self.pos;
-        let mut has_dot = false;
-        let mut has_sign = false;
+    /// Check if data type is SHORT
+    fn is_short(dt: &DataType) -> bool {
+        matches!(dt, DataType::Primitive(PrimitiveType::Short))
+    }
 
-        // Handle negative sign
-        if self.peek_char() == Some('-') {
-            has_sign = true;
-            self.next_char();
-        }
+    /// Check if data type is BYTE
+    fn is_byte(dt: &DataType) -> bool {
+        matches!(dt, DataType::Primitive(PrimitiveType::Byte))
+    }
 
-        while let Some(c) = self.peek_char() {
-            if c.is_ascii_digit() {
-                self.next_char();
-            } else if c == '.' && !has_dot {
-                has_dot = true;
-                self.next_char();
-            } else {
-                break;
-            }
-        }
+    /// Check if data type is LONG
+    fn is_long(dt: &DataType) -> bool {
+        matches!(dt, DataType::Primitive(PrimitiveType::Long))
+    }
 
-        let num_str = &self.input[start..self.pos];
+    /// Check if data type is FLOAT
+    fn is_float(dt: &DataType) -> bool {
+        matches!(dt, DataType::Primitive(PrimitiveType::Float))
+    }
 
-        // Check for empty number (just a sign)
-        if has_sign && num_str.len() == 1 {
-            return Err(ParseError::InvalidNumber(num_str.to_string()));
-        }
+    /// Check if data type is DOUBLE
+    fn is_double(dt: &DataType) -> bool {
+        matches!(dt, DataType::Primitive(PrimitiveType::Double))
+    }
 
-        if has_dot {
-            num_str
-                .parse::<f64>()
-                .map(Token::Float)
-                .map_err(|_| ParseError::InvalidNumber(num_str.to_string()))
+    /// Check if data type is DATE
+    fn is_date(dt: &DataType) -> bool {
+        matches!(dt, DataType::Primitive(PrimitiveType::Date))
+    }
+
+    /// Check if data type is TIMESTAMP
+    fn is_timestamp(dt: &DataType) -> bool {
+        matches!(dt, DataType::Primitive(PrimitiveType::Timestamp))
+    }
+
+    /// Check if data type is TIMESTAMP_NTZ
+    fn is_timestamp_ntz(dt: &DataType) -> bool {
+        matches!(dt, DataType::Primitive(PrimitiveType::TimestampNtz))
+    }
+
+    /// Get decimal type if this is a decimal
+    fn get_decimal_type(dt: &DataType) -> Option<&DecimalType> {
+        if let DataType::Primitive(PrimitiveType::Decimal(dtype)) = dt {
+            Some(dtype)
         } else {
-            num_str
-                .parse::<i64>()
-                .map(Token::Integer)
-                .map_err(|_| ParseError::InvalidNumber(num_str.to_string()))
+            None
         }
     }
 
-    fn read_string(&mut self, quote: char) -> Result<String, ParseError> {
-        self.next_char(); // consume opening quote
-        let start = self.pos;
-        while let Some(c) = self.peek_char() {
-            if c == quote {
-                let s = self.input[start..self.pos].to_string();
-                self.next_char(); // consume closing quote
-                return Ok(s);
-            } else if c == '\\' {
-                self.next_char(); // skip escape
-                self.next_char(); // skip escaped char
-            } else {
-                self.next_char();
-            }
-        }
-        Err(ParseError::UnexpectedEof)
-    }
-
-    fn next_token(&mut self) -> Result<Token, ParseError> {
-        self.skip_whitespace();
-
-        let c = match self.peek_char() {
-            Some(c) => c,
-            None => return Ok(Token::Eof),
-        };
-
-        // Single character tokens and operators
-        match c {
-            '(' => {
-                self.next_char();
-                return Ok(Token::LParen);
-            }
-            ')' => {
-                self.next_char();
-                return Ok(Token::RParen);
-            }
-            ',' => {
-                self.next_char();
-                return Ok(Token::Comma);
-            }
-            '.' => {
-                self.next_char();
-                return Ok(Token::Dot);
-            }
-            '=' => {
-                self.next_char();
-                return Ok(Token::Eq);
-            }
-            '<' => {
-                self.next_char();
-                match self.peek_char() {
-                    Some('=') => {
-                        self.next_char();
-                        // Check for <=> (null-safe equality)
-                        if self.peek_char() == Some('>') {
-                            self.next_char();
-                            return Ok(Token::NullSafeEq);
-                        }
-                        return Ok(Token::Le);
+    /// Convert a SQL literal value to a kernel Scalar, with optional type coercion
+    fn value_to_scalar(
+        &self,
+        value: &Value,
+        target_type: Option<&DataType>,
+    ) -> Result<Scalar, ParseError> {
+        match value {
+            Value::Number(n, _) => {
+                // Parse as the target type if known, otherwise default to Long
+                if let Some(dt) = target_type {
+                    if Self::is_integer(dt) {
+                        let i: i32 = n.parse().map_err(|_| {
+                            ParseError::InvalidLiteral(format!("Cannot parse '{}' as INTEGER", n))
+                        })?;
+                        return Ok(Scalar::Integer(i));
                     }
-                    Some('>') => {
-                        self.next_char();
-                        return Ok(Token::Ne);
+                    if Self::is_short(dt) {
+                        let s: i16 = n.parse().map_err(|_| {
+                            ParseError::InvalidLiteral(format!("Cannot parse '{}' as SHORT", n))
+                        })?;
+                        return Ok(Scalar::Short(s));
                     }
-                    _ => return Ok(Token::Lt),
+                    if Self::is_byte(dt) {
+                        let b: i8 = n.parse().map_err(|_| {
+                            ParseError::InvalidLiteral(format!("Cannot parse '{}' as BYTE", n))
+                        })?;
+                        return Ok(Scalar::Byte(b));
+                    }
+                    if Self::is_long(dt) {
+                        let l: i64 = n.parse().map_err(|_| {
+                            ParseError::InvalidLiteral(format!("Cannot parse '{}' as LONG", n))
+                        })?;
+                        return Ok(Scalar::Long(l));
+                    }
+                    if Self::is_float(dt) {
+                        let f: f32 = n.parse().map_err(|_| {
+                            ParseError::InvalidLiteral(format!("Cannot parse '{}' as FLOAT", n))
+                        })?;
+                        return Ok(Scalar::Float(f));
+                    }
+                    if Self::is_double(dt) {
+                        let d: f64 = n.parse().map_err(|_| {
+                            ParseError::InvalidLiteral(format!("Cannot parse '{}' as DOUBLE", n))
+                        })?;
+                        return Ok(Scalar::Double(d));
+                    }
+                    if let Some(decimal_type) = Self::get_decimal_type(dt) {
+                        // Parse decimal - for now just parse as f64 and scale
+                        let d: f64 = n.parse().map_err(|_| {
+                            ParseError::InvalidLiteral(format!("Cannot parse '{}' as DECIMAL", n))
+                        })?;
+                        let scale_factor = 10_i128.pow(decimal_type.scale() as u32);
+                        let bits = (d * scale_factor as f64).round() as i128;
+                        return Scalar::decimal(bits, decimal_type.precision(), decimal_type.scale())
+                            .map_err(|e| ParseError::InvalidLiteral(format!("Invalid decimal: {}", e)));
+                    }
+                }
+                // Default: try to parse as i64, fall back to f64
+                if let Ok(i) = n.parse::<i64>() {
+                    Ok(Scalar::Long(i))
+                } else if let Ok(f) = n.parse::<f64>() {
+                    Ok(Scalar::Double(f))
+                } else {
+                    Err(ParseError::InvalidLiteral(format!(
+                        "Cannot parse number: {}",
+                        n
+                    )))
                 }
             }
-            '>' => {
-                self.next_char();
-                if self.peek_char() == Some('=') {
-                    self.next_char();
-                    return Ok(Token::Ge);
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
+                // Handle date/timestamp strings if target type requires
+                if let Some(dt) = target_type {
+                    if Self::is_date(dt) {
+                        // Parse date string like "2024-01-15"
+                        let date = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(
+                            |_| ParseError::InvalidLiteral(format!("Cannot parse '{}' as DATE", s)),
+                        )?;
+                        let days = date
+                            .signed_duration_since(
+                                chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+                            )
+                            .num_days() as i32;
+                        return Ok(Scalar::Date(days));
+                    }
+                    if Self::is_timestamp(dt) || Self::is_timestamp_ntz(dt) {
+                        // Parse timestamp string
+                        let ts =
+                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+                                .or_else(|_| {
+                                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                                })
+                                .or_else(|_| {
+                                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+                                })
+                                .or_else(|_| {
+                                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                                })
+                                .map_err(|_| {
+                                    ParseError::InvalidLiteral(format!(
+                                        "Cannot parse '{}' as TIMESTAMP",
+                                        s
+                                    ))
+                                })?;
+                        let micros = ts.and_utc().timestamp_micros();
+                        return Ok(Scalar::Timestamp(micros));
+                    }
                 }
-                return Ok(Token::Gt);
+                Ok(Scalar::String(s.clone()))
             }
-            '!' => {
-                self.next_char();
-                if self.peek_char() == Some('=') {
-                    self.next_char();
-                    return Ok(Token::Ne);
-                }
-                return Err(ParseError::UnexpectedToken("!".to_string()));
+            Value::Boolean(b) => Ok(Scalar::Boolean(*b)),
+            Value::Null => {
+                // Use target type for null if known
+                let dt = target_type.cloned().unwrap_or(DataType::STRING);
+                Ok(Scalar::Null(dt))
             }
-            '\'' | '"' => {
-                let s = self.read_string(c)?;
-                return Ok(Token::String(s));
-            }
-            _ => {}
-        }
-
-        // Numbers (including negative)
-        if c.is_ascii_digit() || (c == '-' && self.input[self.pos + 1..].chars().next().is_some_and(|c| c.is_ascii_digit())) {
-            return self.read_number();
-        }
-
-        // Identifiers and keywords
-        if c.is_alphabetic() || c == '_' {
-            let ident = self.read_ident();
-            let upper = ident.to_uppercase();
-            return Ok(match upper.as_str() {
-                "AND" => Token::And,
-                "OR" => Token::Or,
-                "NOT" => Token::Not,
-                "IS" => Token::Is,
-                "IN" => Token::In,
-                "LIKE" => Token::Like,
-                "NULL" => Token::Null,
-                "TRUE" => Token::Boolean(true),
-                "FALSE" => Token::Boolean(false),
-                _ => Token::Ident(ident),
-            });
-        }
-
-        Err(ParseError::UnexpectedToken(c.to_string()))
-    }
-}
-
-/// Parser for predicate expressions
-pub struct PredicateParser<'a> {
-    lexer: Lexer<'a>,
-    current: Token,
-}
-
-impl<'a> PredicateParser<'a> {
-    /// Create a new parser for the given input
-    pub fn new(input: &'a str) -> Result<Self, ParseError> {
-        let mut lexer = Lexer::new(input);
-        let current = lexer.next_token()?;
-        Ok(Self { lexer, current })
-    }
-
-    fn advance(&mut self) -> Result<(), ParseError> {
-        self.current = self.lexer.next_token()?;
-        Ok(())
-    }
-
-    fn expect(&mut self, expected: Token) -> Result<(), ParseError> {
-        if self.current == expected {
-            self.advance()
-        } else {
-            Err(ParseError::Expected {
-                expected: format!("{:?}", expected),
-                found: format!("{:?}", self.current),
-            })
+            _ => Err(ParseError::UnsupportedExpr(format!(
+                "Unsupported literal: {:?}",
+                value
+            ))),
         }
     }
 
-    /// Parse the entire predicate expression
-    pub fn parse(&mut self) -> Result<Predicate, ParseError> {
-        let pred = self.parse_or()?;
-        if self.current != Token::Eof {
-            return Err(ParseError::UnexpectedToken(format!("{:?}", self.current)));
+    /// Extract column name from an expression (for type lookup)
+    fn extract_column_name(&self, expr: &Expr) -> Option<ColumnName> {
+        match expr {
+            Expr::Identifier(ident) => Some(ColumnName::new([ident.value.clone()])),
+            Expr::CompoundIdentifier(parts) => {
+                let names: Vec<String> = parts.iter().map(|p| p.value.clone()).collect();
+                Some(ColumnName::new(names))
+            }
+            _ => None,
         }
-        Ok(pred)
     }
 
-    // OR has lowest precedence
-    fn parse_or(&mut self) -> Result<Predicate, ParseError> {
-        let mut left = self.parse_and()?;
-        while self.current == Token::Or {
-            self.advance()?;
-            let right = self.parse_and()?;
-            left = Predicate::or(left, right);
-        }
-        Ok(left)
-    }
-
-    // AND has higher precedence than OR
-    fn parse_and(&mut self) -> Result<Predicate, ParseError> {
-        let mut left = self.parse_not()?;
-        while self.current == Token::And {
-            self.advance()?;
-            let right = self.parse_not()?;
-            left = Predicate::and(left, right);
-        }
-        Ok(left)
-    }
-
-    // NOT has higher precedence than AND/OR
-    fn parse_not(&mut self) -> Result<Predicate, ParseError> {
-        if self.current == Token::Not {
-            self.advance()?;
-            let inner = self.parse_not()?;
-            return Ok(Predicate::not(inner));
-        }
-        self.parse_comparison()
-    }
-
-    // Comparison operators
-    fn parse_comparison(&mut self) -> Result<Predicate, ParseError> {
-        let left = self.parse_primary_expr()?;
-
-        // Handle IS NULL / IS NOT NULL
-        if self.current == Token::Is {
-            self.advance()?;
-            let negated = if self.current == Token::Not {
-                self.advance()?;
-                true
-            } else {
-                false
-            };
-            if self.current != Token::Null {
-                return Err(ParseError::Expected {
-                    expected: "NULL".to_string(),
-                    found: format!("{:?}", self.current),
-                });
+    /// Convert a SQL expression to a kernel Expression
+    fn expr_to_expression(
+        &self,
+        expr: &Expr,
+        type_hint: Option<&DataType>,
+    ) -> Result<Expression, ParseError> {
+        match expr {
+            Expr::Identifier(ident) => {
+                Ok(Expression::column(ColumnName::new([ident.value.clone()])))
             }
-            self.advance()?;
-            return if negated {
-                Ok(Predicate::is_not_null(left))
-            } else {
-                Ok(Predicate::is_null(left))
-            };
-        }
-
-        // Handle comparison operators
-        let pred = match &self.current {
-            Token::Eq => {
-                self.advance()?;
-                let right = self.parse_primary_expr()?;
-                Predicate::eq(left, right)
+            Expr::CompoundIdentifier(parts) => {
+                let names: Vec<String> = parts.iter().map(|p| p.value.clone()).collect();
+                Ok(Expression::column(ColumnName::new(names)))
             }
-            Token::Ne => {
-                self.advance()?;
-                let right = self.parse_primary_expr()?;
-                Predicate::ne(left, right)
+            Expr::Value(value) => {
+                let scalar = self.value_to_scalar(value, type_hint)?;
+                Ok(Expression::literal(scalar))
             }
-            Token::Lt => {
-                self.advance()?;
-                let right = self.parse_primary_expr()?;
-                Predicate::lt(left, right)
-            }
-            Token::Le => {
-                self.advance()?;
-                let right = self.parse_primary_expr()?;
-                Predicate::le(left, right)
-            }
-            Token::Gt => {
-                self.advance()?;
-                let right = self.parse_primary_expr()?;
-                Predicate::gt(left, right)
-            }
-            Token::Ge => {
-                self.advance()?;
-                let right = self.parse_primary_expr()?;
-                Predicate::ge(left, right)
-            }
-            Token::NullSafeEq => {
-                self.advance()?;
-                let right = self.parse_primary_expr()?;
-                // <=> is null-safe equality: returns true if both are NULL
-                // This is DISTINCT inverted: NOT DISTINCT(a, b)
-                Predicate::not(Predicate::distinct(left, right))
-            }
-            _ => {
-                // Just a boolean expression (column reference)
-                Predicate::from_expr(left)
-            }
-        };
-        Ok(pred)
-    }
-
-    // Primary expressions: literals, columns, parenthesized expressions
-    fn parse_primary_expr(&mut self) -> Result<Expression, ParseError> {
-        match &self.current {
-            Token::LParen => {
-                self.advance()?;
-                let pred = self.parse_or()?;
-                self.expect(Token::RParen)?;
-                Ok(Expression::from_pred(pred))
-            }
-            Token::Integer(n) => {
-                let n = *n;
-                self.advance()?;
-                Ok(Expression::literal(Scalar::Long(n)))
-            }
-            Token::Float(f) => {
-                let f = *f;
-                self.advance()?;
-                Ok(Expression::literal(Scalar::Double(f)))
-            }
-            Token::String(s) => {
-                let s = s.clone();
-                self.advance()?;
-                Ok(Expression::literal(Scalar::String(s)))
-            }
-            Token::Boolean(b) => {
-                let b = *b;
-                self.advance()?;
-                Ok(Expression::literal(Scalar::Boolean(b)))
-            }
-            Token::Null => {
-                self.advance()?;
-                // Use a generic NULL type
-                Ok(Expression::null_literal(DataType::STRING))
-            }
-            Token::Ident(name) => {
-                let mut parts = vec![name.clone()];
-                self.advance()?;
-                // Handle nested column references like "data.category"
-                while self.current == Token::Dot {
-                    self.advance()?;
-                    if let Token::Ident(part) = &self.current {
-                        parts.push(part.clone());
-                        self.advance()?;
+            Expr::Nested(inner) => self.expr_to_expression(inner, type_hint),
+            Expr::UnaryOp { op, expr } => match op {
+                UnaryOperator::Minus => {
+                    // Handle negative numbers
+                    if let Expr::Value(Value::Number(n, long)) = expr.as_ref() {
+                        let neg_n = format!("-{}", n);
+                        let neg_value = Value::Number(neg_n, *long);
+                        let scalar = self.value_to_scalar(&neg_value, type_hint)?;
+                        Ok(Expression::literal(scalar))
                     } else {
-                        return Err(ParseError::Expected {
-                            expected: "identifier".to_string(),
-                            found: format!("{:?}", self.current),
-                        });
+                        Err(ParseError::UnsupportedExpr(
+                            "Unary minus on non-literal".to_string(),
+                        ))
                     }
                 }
-                Ok(Expression::column(ColumnName::new(parts)))
+                _ => Err(ParseError::UnsupportedOperator(format!("{:?}", op))),
+            },
+            _ => Err(ParseError::UnsupportedExpr(format!("{:?}", expr))),
+        }
+    }
+
+    /// Convert a SQL expression to a kernel Predicate
+    fn expr_to_predicate(&self, expr: &Expr) -> Result<Predicate, ParseError> {
+        match expr {
+            Expr::BinaryOp { left, op, right } => {
+                // For comparisons, try to infer type from column side
+                let left_col = self.extract_column_name(left);
+                let right_col = self.extract_column_name(right);
+
+                let type_hint = left_col
+                    .as_ref()
+                    .and_then(|c| self.find_column_type(c))
+                    .or_else(|| right_col.as_ref().and_then(|c| self.find_column_type(c)));
+
+                match op {
+                    BinaryOperator::Eq => {
+                        let l = self.expr_to_expression(left, type_hint)?;
+                        let r = self.expr_to_expression(right, type_hint)?;
+                        Ok(Predicate::eq(l, r))
+                    }
+                    BinaryOperator::NotEq => {
+                        let l = self.expr_to_expression(left, type_hint)?;
+                        let r = self.expr_to_expression(right, type_hint)?;
+                        Ok(Predicate::ne(l, r))
+                    }
+                    BinaryOperator::Lt => {
+                        let l = self.expr_to_expression(left, type_hint)?;
+                        let r = self.expr_to_expression(right, type_hint)?;
+                        Ok(Predicate::lt(l, r))
+                    }
+                    BinaryOperator::LtEq => {
+                        let l = self.expr_to_expression(left, type_hint)?;
+                        let r = self.expr_to_expression(right, type_hint)?;
+                        Ok(Predicate::le(l, r))
+                    }
+                    BinaryOperator::Gt => {
+                        let l = self.expr_to_expression(left, type_hint)?;
+                        let r = self.expr_to_expression(right, type_hint)?;
+                        Ok(Predicate::gt(l, r))
+                    }
+                    BinaryOperator::GtEq => {
+                        let l = self.expr_to_expression(left, type_hint)?;
+                        let r = self.expr_to_expression(right, type_hint)?;
+                        Ok(Predicate::ge(l, r))
+                    }
+                    BinaryOperator::And => {
+                        let l = self.expr_to_predicate(left)?;
+                        let r = self.expr_to_predicate(right)?;
+                        Ok(Predicate::and(l, r))
+                    }
+                    BinaryOperator::Or => {
+                        let l = self.expr_to_predicate(left)?;
+                        let r = self.expr_to_predicate(right)?;
+                        Ok(Predicate::or(l, r))
+                    }
+                    BinaryOperator::Spaceship => {
+                        // <=> null-safe equality
+                        let l = self.expr_to_expression(left, type_hint)?;
+                        let r = self.expr_to_expression(right, type_hint)?;
+                        Ok(Predicate::not(Predicate::distinct(l, r)))
+                    }
+                    _ => Err(ParseError::UnsupportedOperator(format!("{:?}", op))),
+                }
             }
-            _ => Err(ParseError::UnexpectedToken(format!("{:?}", self.current))),
+            Expr::UnaryOp { op, expr } => match op {
+                UnaryOperator::Not => {
+                    let inner = self.expr_to_predicate(expr)?;
+                    Ok(Predicate::not(inner))
+                }
+                _ => Err(ParseError::UnsupportedOperator(format!("{:?}", op))),
+            },
+            Expr::IsNull(inner) => {
+                let e = self.expr_to_expression(inner, None)?;
+                Ok(Predicate::is_null(e))
+            }
+            Expr::IsNotNull(inner) => {
+                let e = self.expr_to_expression(inner, None)?;
+                Ok(Predicate::is_not_null(e))
+            }
+            Expr::Nested(inner) => self.expr_to_predicate(inner),
+            Expr::Between {
+                expr,
+                negated,
+                low,
+                high,
+            } => {
+                // Convert BETWEEN to: expr >= low AND expr <= high (or NOT of that)
+                let col = self.extract_column_name(expr);
+                let type_hint = col.as_ref().and_then(|c| self.find_column_type(c));
+
+                let e = self.expr_to_expression(expr, type_hint)?;
+                let l = self.expr_to_expression(low, type_hint)?;
+                let h = self.expr_to_expression(high, type_hint)?;
+
+                let between_pred =
+                    Predicate::and(Predicate::ge(e.clone(), l), Predicate::le(e, h));
+
+                if *negated {
+                    Ok(Predicate::not(between_pred))
+                } else {
+                    Ok(between_pred)
+                }
+            }
+            Expr::InList {
+                expr,
+                list,
+                negated,
+            } => {
+                // Convert IN to: expr = v1 OR expr = v2 OR ...
+                let col = self.extract_column_name(expr);
+                let type_hint = col.as_ref().and_then(|c| self.find_column_type(c));
+
+                let e = self.expr_to_expression(expr, type_hint)?;
+
+                if list.is_empty() {
+                    // Empty IN list - always false (or true if negated)
+                    return Ok(if *negated {
+                        Predicate::from_expr(Expression::literal(Scalar::Boolean(true)))
+                    } else {
+                        Predicate::from_expr(Expression::literal(Scalar::Boolean(false)))
+                    });
+                }
+
+                let mut predicates: Vec<Predicate> = Vec::new();
+                for item in list {
+                    let v = self.expr_to_expression(item, type_hint)?;
+                    predicates.push(Predicate::eq(e.clone(), v));
+                }
+
+                // Combine with OR
+                let mut result = predicates.remove(0);
+                for p in predicates {
+                    result = Predicate::or(result, p);
+                }
+
+                if *negated {
+                    Ok(Predicate::not(result))
+                } else {
+                    Ok(result)
+                }
+            }
+            Expr::Like {
+                negated: _,
+                expr,
+                pattern,
+                ..
+            } => {
+                // LIKE is tricky - kernel doesn't have native LIKE support
+                // For now, we'll return an error suggesting it's unsupported
+                Err(ParseError::UnsupportedExpr(format!(
+                    "LIKE operator not supported by kernel: {} LIKE {:?}",
+                    expr, pattern
+                )))
+            }
+            // Handle simple column reference as boolean
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
+                let e = self.expr_to_expression(expr, Some(&DataType::BOOLEAN))?;
+                Ok(Predicate::from_expr(e))
+            }
+            _ => Err(ParseError::UnsupportedExpr(format!("{:?}", expr))),
+        }
+    }
+
+    /// Parse a predicate string
+    pub fn parse(&self, input: &str) -> Result<Predicate, ParseError> {
+        let dialect = GenericDialect {};
+        // Wrap in SELECT WHERE to make it a valid SQL statement
+        let sql = format!("SELECT * FROM t WHERE {}", input);
+        let statements = Parser::parse_sql(&dialect, &sql)?;
+
+        if statements.len() != 1 {
+            return Err(ParseError::SqlParser("Expected single statement".to_string()));
+        }
+
+        // Extract the WHERE clause
+        match &statements[0] {
+            sqlparser::ast::Statement::Query(query) => {
+                if let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() {
+                    if let Some(selection) = &select.selection {
+                        return self.expr_to_predicate(selection);
+                    }
+                }
+                Err(ParseError::SqlParser("No WHERE clause found".to_string()))
+            }
+            _ => Err(ParseError::SqlParser(
+                "Expected SELECT statement".to_string(),
+            )),
         }
     }
 }
 
-/// Parse a SQL-like predicate string into a kernel Predicate
+/// Parse a SQL-like predicate string into a kernel Predicate (without schema)
 pub fn parse_predicate(input: &str) -> Result<Predicate, ParseError> {
-    let mut parser = PredicateParser::new(input)?;
-    parser.parse()
+    let parser = SchemaAwareParser::new(None);
+    parser.parse(input)
+}
+
+/// Parse a SQL-like predicate string with schema for type coercion
+pub fn parse_predicate_with_schema(input: &str, schema: &Schema) -> Result<Predicate, ParseError> {
+    let parser = SchemaAwareParser::new(Some(schema));
+    parser.parse(input)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use delta_kernel::schema::StructField;
 
     #[test]
     fn test_simple_equality() {
@@ -524,5 +550,38 @@ mod tests {
     fn test_not_predicate() {
         let pred = parse_predicate("NOT a = 1").unwrap();
         assert!(matches!(pred, Predicate::Not(_)));
+    }
+
+    #[test]
+    fn test_between() {
+        let pred = parse_predicate("x BETWEEN 0 AND 100").unwrap();
+        // BETWEEN becomes AND of two comparisons
+        assert!(matches!(pred, Predicate::Junction(_)));
+    }
+
+    #[test]
+    fn test_in_list() {
+        let pred = parse_predicate("x IN (1, 2, 3)").unwrap();
+        // IN becomes OR of equalities
+        assert!(matches!(pred, Predicate::Junction(_)));
+    }
+
+    #[test]
+    fn test_schema_aware_int32() {
+        let schema = StructType::try_new(vec![
+            StructField::new("int_col", DataType::INTEGER, true)
+        ]).unwrap();
+
+        let pred = parse_predicate_with_schema("int_col = 42", &schema).unwrap();
+        // Should create Int32 literal, not Int64
+        if let Predicate::Binary(bin) = pred {
+            if let Expression::Literal(scalar) = bin.right.as_ref() {
+                assert!(matches!(scalar, Scalar::Integer(42)));
+            } else {
+                panic!("Expected literal on right side");
+            }
+        } else {
+            panic!("Expected binary predicate");
+        }
     }
 }

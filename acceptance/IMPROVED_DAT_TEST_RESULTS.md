@@ -6,14 +6,15 @@ This document summarizes the results of running the `improved_dat` test suite ag
 
 | Status | Count |
 |--------|-------|
-| Passed | 537 |
-| Failed | 182 |
+| Passed | 573 |
+| Failed | 146 |
 | Skipped | 30 (timestamp-based time travel + domain metadata) |
 | Total | 719 |
 
 Note: 39 DV-* tests were removed due to broken symlinks in test data.
 
 ### Recent Fixes
+- **Schema-aware predicate parsing** - Using sqlparser crate with automatic type coercion based on table schema (+36 tests)
 - **Column mapping metadata comparison** - Fixed validation to ignore Arrow field metadata (column mapping IDs), allowing column-mapped tables to pass validation (+33 tests)
 
 ## Test Categories
@@ -69,18 +70,13 @@ These tests expect the kernel to produce an error, but the operation succeeds. T
 | `rt_err_002_tracking_disabled_error` | `DELTA_ROW_TRACKING_NOT_ENABLED` | Kernel should error when row tracking is disabled |
 | CDC error tests | Various | CDC-specific error validations |
 
-### 5. Type Mismatch in Predicates (~120 tests)
+### 5. Type Mismatch in Predicates (MOSTLY FIXED)
 
-The kernel does not auto-cast between numeric types when evaluating predicates. This causes failures when comparing columns to literals of different types.
+~~The kernel does not auto-cast between numeric types when evaluating predicates.~~
 
-**Examples:**
-- `Int32 <= Int64` (54 tests)
-- `Int32 > Int64` (28 tests)
-- `Int32 < Int64` (16 tests)
-- `Float64 > Int64` (4 tests)
-- `Date32 <= Utf8` (6 tests)
+**FIXED:** Now using schema-aware predicate parsing with `sqlparser` crate. The parser looks up column types in the table schema and coerces literals to match. This fixed ~36 tests.
 
-**Root cause:** The predicate parser creates `Int64` literals for all integers. The kernel requires exact type matching.
+**Remaining issues:** Some edge cases may still fail if the column is not found in the schema (e.g., nested structs with complex paths).
 
 ### 6. Unsupported Predicate Syntax (~72 tests)
 
