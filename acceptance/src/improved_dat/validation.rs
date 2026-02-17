@@ -296,6 +296,12 @@ pub async fn read_expected_data(expected_dir: &Path) -> DeltaResult<Option<Recor
     let mut schema = None;
 
     for meta in files {
+        let path_str = meta.location.to_string();
+        // Skip hidden files (Spark .crc checksums) and metadata files (_SUCCESS, _committed, etc.)
+        let filename = path_str.rsplit('/').next().unwrap_or(&path_str);
+        if filename.starts_with('.') || filename.starts_with('_') {
+            continue;
+        }
         if let Some(ext) = meta.location.extension() {
             if ext == "parquet" {
                 let reader = ParquetObjectReader::new(store.clone(), meta.location);
