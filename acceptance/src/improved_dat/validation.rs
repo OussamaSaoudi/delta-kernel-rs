@@ -395,15 +395,11 @@ pub async fn validate_read_result(
             });
         }
 
-        // Check columns match
-        let data_matches = if actual_sorted {
-            // Sorted comparison: element-by-element
-            columns_match(actual.columns(), expected.columns())
-        } else {
-            // Unsortable data (all struct/list/map columns): use multiset comparison
-            columns_match(actual.columns(), expected.columns())
-                || multiset_match(&actual, &expected)
-        };
+        // Check columns match (try element-by-element first, fall back to multiset)
+        // Multiset fallback is needed even for sorted data because tied sort keys
+        // produce non-deterministic row ordering within equal groups.
+        let data_matches = columns_match(actual.columns(), expected.columns())
+            || multiset_match(&actual, &expected);
 
         if !data_matches {
             eprintln!("\n=== DATA MISMATCH ===");
