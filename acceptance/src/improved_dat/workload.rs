@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use delta_kernel::arrow::array::RecordBatch;
 use delta_kernel::arrow::compute::{concat_batches, filter_record_batch};
+use delta_kernel::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 use delta_kernel::engine::arrow_data::EngineDataArrowExt as _;
 use delta_kernel::engine::arrow_expression::evaluate_expression::evaluate_predicate;
 use delta_kernel::expressions::Predicate;
@@ -23,11 +24,93 @@ pub struct ReadResult {
     pub schema: Option<Arc<delta_kernel::arrow::datatypes::Schema>>,
 }
 
+/// Strip field-level metadata from an Arrow data type (recursive for structs, lists, maps).
+///
+/// This is needed because the kernel's `transform_to_logical` inconsistently applies field
+/// metadata: batches that go through `apply_schema` (when there's a transform expression) get
+/// metadata like `delta.typeChanges`, while batches that don't need a transform are returned
+/// without it. Arrow's `concat_batches` requires identical schemas, so we strip metadata to
+/// normalize.
+fn strip_field_metadata(dt: &ArrowDataType) -> ArrowDataType {
+    match dt {
+        ArrowDataType::Struct(fields) => {
+            let new_fields: Vec<ArrowField> = fields
+                .iter()
+                .map(|f| {
+                    let new_dt = strip_field_metadata(f.data_type());
+                    ArrowField::new(f.name(), new_dt, f.is_nullable())
+                })
+                .collect();
+            ArrowDataType::Struct(new_fields.into())
+        }
+        ArrowDataType::List(field) => {
+            let new_dt = strip_field_metadata(field.data_type());
+            ArrowDataType::List(Arc::new(ArrowField::new(field.name(), new_dt, field.is_nullable())))
+        }
+        ArrowDataType::Map(field, sorted) => {
+            let new_dt = strip_field_metadata(field.data_type());
+            ArrowDataType::Map(
+                Arc::new(ArrowField::new(field.name(), new_dt, field.is_nullable())),
+                *sorted,
+            )
+        }
+        other => other.clone(),
+    }
+}
+
+/// Strip all field-level metadata from an Arrow schema.
+fn strip_schema_metadata(schema: &ArrowSchema) -> ArrowSchema {
+    let new_fields: Vec<ArrowField> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            let new_dt = strip_field_metadata(f.data_type());
+            ArrowField::new(f.name(), new_dt, f.is_nullable())
+        })
+        .collect();
+    ArrowSchema::new(new_fields)
+}
+
 impl ReadResult {
-    /// Concatenate all batches into a single RecordBatch
+    /// Concatenate all batches into a single RecordBatch.
+    ///
+    /// Strips field-level metadata before concatenation to work around a kernel bug where
+    /// `transform_to_logical` inconsistently applies schema metadata (e.g. `delta.typeChanges`)
+    /// across batches from different parquet files.
     pub fn concat(self) -> DeltaResult<RecordBatch> {
         let schema = self.schema.ok_or_else(|| Error::generic("No schema"))?;
-        Ok(concat_batches(&schema, self.batches.iter()).map_err(Error::from)?)
+        let stripped_schema = Arc::new(strip_schema_metadata(&schema));
+
+        // Rebuild each batch with the stripped schema to ensure they all match
+        let normalized_batches: Vec<RecordBatch> = self
+            .batches
+            .into_iter()
+            .map(|batch| {
+                let columns: Vec<_> = batch.columns().to_vec();
+                RecordBatch::try_new(stripped_schema.clone(), columns)
+                    .or_else(|_| {
+                        // If columns don't match the stripped schema (e.g. nested struct has
+                        // different field metadata), cast each column to strip metadata too
+                        let cast_columns: Vec<_> = batch
+                            .columns()
+                            .iter()
+                            .zip(stripped_schema.fields())
+                            .map(|(col, field)| {
+                                if col.data_type() == field.data_type() {
+                                    col.clone()
+                                } else {
+                                    delta_kernel::arrow::compute::cast(col, field.data_type())
+                                        .unwrap_or_else(|_| col.clone())
+                                }
+                            })
+                            .collect();
+                        RecordBatch::try_new(stripped_schema.clone(), cast_columns)
+                    })
+                    .map_err(Error::from)
+            })
+            .collect::<DeltaResult<Vec<_>>>()?;
+
+        Ok(concat_batches(&stripped_schema, normalized_batches.iter()).map_err(Error::from)?)
     }
 }
 
@@ -72,6 +155,7 @@ pub fn execute_workload(
             predicate,
             version,
             timestamp,
+            columns,
             ..
         } => {
             let result = execute_read_workload(
@@ -80,6 +164,7 @@ pub fn execute_workload(
                 predicate.as_deref(),
                 *version,
                 timestamp.as_deref(),
+                columns.as_deref(),
             )?;
             Ok(WorkloadResult::Read(result))
         }
@@ -92,7 +177,7 @@ pub fn execute_workload(
         }
         WorkloadSpec::Txn { version, .. } => {
             // Transaction workloads are validated against expected values in validation.rs
-            let result = execute_snapshot_workload(engine, table_root, Some(*version), None)?;
+            let result = execute_snapshot_workload(engine, table_root, *version, None)?;
             Ok(WorkloadResult::Snapshot(result))
         }
         WorkloadSpec::DomainMetadata {
@@ -123,6 +208,7 @@ pub fn execute_read_workload(
     predicate_str: Option<&str>,
     version: Option<i64>,
     timestamp: Option<&str>,
+    columns: Option<&[String]>,
 ) -> DeltaResult<ReadResult> {
     // Resolve version from timestamp if needed
     let version = if let Some(ts) = timestamp {
@@ -155,10 +241,29 @@ pub fn execute_read_workload(
         None
     };
 
-    // Build scan with optional predicate (for file-level data skipping)
+    // Build scan with optional predicate and column projection
     let mut scan_builder = snapshot.scan_builder();
     if let Some(ref pred) = predicate {
         scan_builder = scan_builder.with_predicate(Some(Arc::new(pred.clone())));
+    }
+    // Apply column projection if specified
+    if let Some(cols) = columns {
+        use delta_kernel::schema::StructType;
+        let projected_fields: Vec<_> = cols
+            .iter()
+            .filter_map(|col_name| {
+                table_schema
+                    .field(col_name)
+                    .cloned()
+            })
+            .collect();
+        if !projected_fields.is_empty() {
+            let projected_schema = Arc::new(
+                StructType::try_new(projected_fields)
+                    .map_err(|e| Error::generic(format!("Failed to create projected schema: {}", e)))?
+            );
+            scan_builder = scan_builder.with_schema(projected_schema);
+        }
     }
     let scan = scan_builder.build()?;
 

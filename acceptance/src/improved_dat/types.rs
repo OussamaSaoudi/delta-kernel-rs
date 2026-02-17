@@ -83,6 +83,9 @@ pub enum WorkloadSpec {
         /// Optional timestamp for time travel (format: "YYYY-MM-DD HH:MM:SS.mmm")
         #[serde(default)]
         timestamp: Option<String>,
+        /// Optional column projection (e.g., ["id", "name"])
+        #[serde(default)]
+        columns: Option<Vec<String>>,
         /// Expected error if this should fail
         #[serde(default)]
         error: Option<ExpectedError>,
@@ -104,8 +107,9 @@ pub enum WorkloadSpec {
     },
     /// Transaction workload - validate SetTransaction
     Txn {
-        /// Version at which to check
-        version: i64,
+        /// Version at which to check (optional, latest if not specified)
+        #[serde(default)]
+        version: Option<i64>,
         /// Expected transaction information
         expected: ExpectedTxn,
         /// Workload name

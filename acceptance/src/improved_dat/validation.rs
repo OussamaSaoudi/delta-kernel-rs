@@ -37,8 +37,9 @@ pub enum ValidationError {
     Kernel(#[from] delta_kernel::Error),
 }
 
-/// Sort a record batch lexicographically by all sortable columns
-pub fn sort_record_batch(batch: RecordBatch) -> DeltaResult<RecordBatch> {
+/// Sort a record batch lexicographically by all sortable columns.
+/// Returns (sorted_batch, was_sorted) where was_sorted indicates if any sorting was possible.
+pub fn sort_record_batch(batch: RecordBatch) -> DeltaResult<(RecordBatch, bool)> {
     let mut sort_columns = vec![];
     for col in batch.columns() {
         match col.data_type() {
@@ -53,7 +54,7 @@ pub fn sort_record_batch(batch: RecordBatch) -> DeltaResult<RecordBatch> {
     }
 
     if sort_columns.is_empty() {
-        return Ok(batch);
+        return Ok((batch, false));
     }
 
     let indices = lexsort_to_indices(&sort_columns, None)?;
@@ -62,19 +63,99 @@ pub fn sort_record_batch(batch: RecordBatch) -> DeltaResult<RecordBatch> {
         .iter()
         .map(|c| take(c, &indices, None).unwrap())
         .collect();
-    Ok(RecordBatch::try_new(batch.schema(), columns)?)
+    Ok((RecordBatch::try_new(batch.schema(), columns)?, true))
 }
 
-/// Normalize a column for comparison (handle timezone equivalence)
-fn normalize_col(col: Arc<dyn Array>) -> Arc<dyn Array> {
-    if let DataType::Timestamp(unit, Some(zone)) = col.data_type() {
-        if **zone == *"+00:00" {
-            let data_type = DataType::Timestamp(*unit, Some("UTC".into()));
-            return delta_kernel::arrow::compute::cast(&col, &data_type)
-                .expect("Could not cast to UTC");
+/// Normalize all struct columns in a record batch to have fields in alphabetical order.
+fn normalize_batch_struct_order(batch: &RecordBatch) -> RecordBatch {
+    use delta_kernel::arrow::datatypes::Field;
+
+    let new_columns: Vec<Arc<dyn Array>> = batch
+        .columns()
+        .iter()
+        .map(|col| normalize_struct_field_order(col.clone()))
+        .collect();
+    let new_fields: Vec<Arc<Field>> = batch
+        .schema()
+        .fields()
+        .iter()
+        .zip(new_columns.iter())
+        .map(|(f, col)| {
+            Arc::new(Field::new(f.name(), col.data_type().clone(), f.is_nullable()))
+        })
+        .collect();
+    let new_schema = Arc::new(delta_kernel::arrow::datatypes::Schema::new(new_fields));
+    RecordBatch::try_new(new_schema, new_columns).unwrap()
+}
+
+/// Compare two record batches as multisets (order-independent) using string representations.
+/// Used when the batch contains only struct/list/map columns that can't be sorted.
+fn multiset_match(actual: &RecordBatch, expected: &RecordBatch) -> bool {
+    use std::collections::HashMap;
+
+    // Normalize struct field order before comparing string representations
+    let actual_normalized = normalize_batch_struct_order(actual);
+    let expected_normalized = normalize_batch_struct_order(expected);
+
+    let actual_str = pretty_format_batches(&[actual_normalized])
+        .map(|d| d.to_string())
+        .unwrap_or_default();
+    let expected_str = pretty_format_batches(&[expected_normalized])
+        .map(|d| d.to_string())
+        .unwrap_or_default();
+
+    // Parse rows from formatted output (skip header lines)
+    fn row_multiset(formatted: &str) -> HashMap<String, usize> {
+        let mut counts = HashMap::new();
+        for line in formatted.lines() {
+            let trimmed = line.trim();
+            // Skip header/separator lines (start with +, or contain column names)
+            if trimmed.starts_with('+') || trimmed.is_empty() {
+                continue;
+            }
+            // Data rows start with '|'
+            if trimmed.starts_with('|') {
+                *counts.entry(trimmed.to_string()).or_insert(0) += 1;
+            }
         }
+        counts
     }
-    col
+
+    row_multiset(&actual_str) == row_multiset(&expected_str)
+}
+
+/// Normalize a column for comparison (handle timezone/precision equivalence)
+///
+/// Handles differences between how Spark writes expected parquet and how
+/// kernel reads delta tables:
+/// - Spark may write Timestamp(Nanosecond, None) while kernel produces
+///   Timestamp(Microsecond, Some("UTC"))
+/// - Normalize all timestamps to Timestamp(Microsecond, Some("UTC"))
+fn normalize_col(col: Arc<dyn Array>) -> Arc<dyn Array> {
+    match col.data_type() {
+        DataType::Timestamp(_unit, tz) => {
+            // Normalize timezone: None and "+00:00" both become "UTC"
+            let target = DataType::Timestamp(
+                delta_kernel::arrow::datatypes::TimeUnit::Microsecond,
+                Some("UTC".into()),
+            );
+            let needs_cast = match tz {
+                None => true,
+                Some(z) if **z == *"+00:00" => true,
+                Some(z) if **z == *"UTC" => {
+                    // Already UTC, but may need precision change
+                    !matches!(col.data_type(), DataType::Timestamp(delta_kernel::arrow::datatypes::TimeUnit::Microsecond, _))
+                }
+                _ => false, // Other timezones, leave as-is
+            };
+            if needs_cast {
+                return delta_kernel::arrow::compute::cast(&col, &target)
+                    .expect("Could not normalize timestamp column");
+            }
+            col
+        }
+        _ => col,
+    }
 }
 
 /// Strip field metadata from a data type (recursive for structs)
@@ -118,14 +199,58 @@ fn strip_metadata_from_array(arr: &Arc<dyn Array>) -> Arc<dyn Array> {
     }
 }
 
-/// Compare two sets of columns for equality (ignoring field metadata)
+/// Reorder struct fields in an array to match a canonical (sorted by name) order.
+/// This handles cases where kernel and Spark produce struct fields in different orders
+/// (e.g., variant columns: kernel produces {metadata, value}, Spark produces {value, metadata}).
+/// Also recursively normalizes nested structs and updates field type declarations to match.
+fn normalize_struct_field_order(arr: Arc<dyn Array>) -> Arc<dyn Array> {
+    use delta_kernel::arrow::array::StructArray;
+    use delta_kernel::arrow::datatypes::Field;
+
+    match arr.data_type() {
+        DataType::Struct(fields) => {
+            let struct_arr = arr.as_any().downcast_ref::<StructArray>().unwrap();
+
+            // Build (name, index) pairs and sort by name
+            let mut indexed_fields: Vec<(usize, &Arc<Field>)> =
+                fields.iter().enumerate().map(|(i, f)| (i, f)).collect();
+            indexed_fields.sort_by(|a, b| a.1.name().cmp(b.1.name()));
+
+            // Reorder columns and fields, recursing into children
+            let new_columns: Vec<Arc<dyn Array>> = indexed_fields
+                .iter()
+                .map(|(orig_idx, _)| normalize_struct_field_order(struct_arr.column(*orig_idx).clone()))
+                .collect();
+            // Rebuild field declarations from the normalized child columns' actual data types
+            let new_fields: Vec<Arc<Field>> = indexed_fields
+                .iter()
+                .zip(new_columns.iter())
+                .map(|((_, orig_field), col)| {
+                    Arc::new(Field::new(
+                        orig_field.name(),
+                        col.data_type().clone(),
+                        orig_field.is_nullable(),
+                    ))
+                })
+                .collect();
+
+            Arc::new(
+                StructArray::try_new(new_fields.into(), new_columns, struct_arr.nulls().cloned())
+                    .unwrap(),
+            )
+        }
+        _ => arr,
+    }
+}
+
+/// Compare two sets of columns for equality (ignoring field metadata and struct field order)
 pub fn columns_match(actual: &[Arc<dyn Array>], expected: &[Arc<dyn Array>]) -> bool {
     if actual.len() != expected.len() {
         return false;
     }
     for (actual, expected) in actual.iter().zip(expected) {
-        let actual = strip_metadata_from_array(&normalize_col(actual.clone()));
-        let expected = strip_metadata_from_array(&normalize_col(expected.clone()));
+        let actual = normalize_struct_field_order(strip_metadata_from_array(&normalize_col(actual.clone())));
+        let expected = normalize_struct_field_order(strip_metadata_from_array(&normalize_col(expected.clone())));
         if &actual != &expected {
             return false;
         }
@@ -246,8 +371,8 @@ pub async fn validate_read_result(
 
     if let Some(expected) = expected {
         // Sort both for comparison
-        let actual = sort_record_batch(actual)?;
-        let expected = sort_record_batch(expected)?;
+        let (actual, actual_sorted) = sort_record_batch(actual)?;
+        let (expected, _) = sort_record_batch(expected)?;
 
         // Check row count
         if actual.num_rows() != expected.num_rows() {
@@ -265,7 +390,16 @@ pub async fn validate_read_result(
         }
 
         // Check columns match
-        if !columns_match(actual.columns(), expected.columns()) {
+        let data_matches = if actual_sorted {
+            // Sorted comparison: element-by-element
+            columns_match(actual.columns(), expected.columns())
+        } else {
+            // Unsortable data (all struct/list/map columns): use multiset comparison
+            columns_match(actual.columns(), expected.columns())
+                || multiset_match(&actual, &expected)
+        };
+
+        if !data_matches {
             eprintln!("\n=== DATA MISMATCH ===");
             eprintln!("Column data does not match");
             eprintln!("\n--- Expected Schema ---");
@@ -285,10 +419,13 @@ pub async fn validate_read_result(
     }
 
     // Also validate against summary.json if present
+    // Use actual_row_count from summary (what Spark returned) rather than
+    // expected_row_count (theoretical count) — both kernel and Spark may apply
+    // data skipping, so we validate kernel matches Spark's behavior.
     if let Some(summary) = read_expected_summary(expected_dir)? {
-        if actual_row_count != summary.expected_row_count {
+        if actual_row_count != summary.actual_row_count {
             return Err(ValidationError::RowCountMismatch {
-                expected: summary.expected_row_count,
+                expected: summary.actual_row_count,
                 actual: actual_row_count,
             });
         }

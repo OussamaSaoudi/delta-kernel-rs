@@ -118,10 +118,11 @@ fn apply_schema_to_list(
     let (field, offset_buffer, values, nulls) = la.clone().into_parts();
 
     let transformed_values = apply_schema_to(&values, &target_inner_type.element_type)?;
-    let transformed_field = ArrowField::new(
+    let transformed_field = new_field_with_metadata(
         field.name(),
-        transformed_values.data_type().clone(),
+        transformed_values.data_type(),
         target_inner_type.contains_null,
+        Some(field.metadata().clone()),
     );
     Ok(ListArray::try_new(
         Arc::new(transformed_field),
@@ -153,10 +154,11 @@ fn apply_schema_to_map(array: &dyn Array, kernel_map_type: &MapType) -> DeltaRes
     // specify the key/value types as the target type iterator.
     let transformed_map_struct_array = transform_struct(&map_struct_array, target_fields)?;
 
-    let transformed_map_field = ArrowField::new(
-        map_field.name().clone(),
-        transformed_map_struct_array.data_type().clone(),
+    let transformed_map_field = new_field_with_metadata(
+        map_field.name(),
+        transformed_map_struct_array.data_type(),
         map_field.is_nullable(),
+        Some(map_field.metadata().clone()),
     );
     Ok(MapArray::try_new(
         Arc::new(transformed_map_field),

@@ -222,6 +222,9 @@ impl<'a> SchemaAwareParser<'a> {
                                     ))
                                 })?;
                         let micros = ts.and_utc().timestamp_micros();
+                        if Self::is_timestamp_ntz(dt) {
+                            return Ok(Scalar::TimestampNtz(micros));
+                        }
                         return Ok(Scalar::Timestamp(micros));
                     }
                 }
@@ -237,6 +240,28 @@ impl<'a> SchemaAwareParser<'a> {
                 "Unsupported literal: {:?}",
                 value
             ))),
+        }
+    }
+
+    /// Recursively extract all column references from a SQL expression.
+    /// Used to convert `(expr) IS NULL` into `col1 IS NULL OR col2 IS NULL ...`
+    /// since a comparison is null iff any of its column operands is null.
+    fn extract_column_refs(expr: &Expr) -> Vec<ColumnName> {
+        match expr {
+            Expr::Identifier(ident) => vec![ColumnName::new([ident.value.clone()])],
+            Expr::CompoundIdentifier(parts) => {
+                let names: Vec<String> = parts.iter().map(|p| p.value.clone()).collect();
+                vec![ColumnName::new(names)]
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                let mut cols = Self::extract_column_refs(left);
+                cols.extend(Self::extract_column_refs(right));
+                cols
+            }
+            Expr::UnaryOp { expr, .. } => Self::extract_column_refs(expr),
+            Expr::Nested(inner) => Self::extract_column_refs(inner),
+            Expr::IsNull(inner) | Expr::IsNotNull(inner) => Self::extract_column_refs(inner),
+            _ => vec![], // Literals, functions, etc. — no column refs
         }
     }
 
@@ -362,12 +387,57 @@ impl<'a> SchemaAwareParser<'a> {
                 _ => Err(ParseError::UnsupportedOperator(format!("{:?}", op))),
             },
             Expr::IsNull(inner) => {
-                let e = self.expr_to_expression(inner, None)?;
-                Ok(Predicate::is_null(e))
+                // Try as expression first; if that fails (e.g., for `(a > 0) IS NULL`),
+                // extract column references and convert to IS NULL on those columns.
+                match self.expr_to_expression(inner, None) {
+                    Ok(e) => Ok(Predicate::is_null(e)),
+                    Err(_) => {
+                        // Inner is a predicate-level expression like `a > 0`.
+                        // `(a > 0) IS NULL` is true when the comparison result is null,
+                        // which happens iff any column operand is null (literals are never
+                        // null). So `(a > 0) IS NULL` ≡ `a IS NULL`, and for compound
+                        // predicates, OR together IS NULL for each referenced column.
+                        let cols = Self::extract_column_refs(inner);
+                        if cols.is_empty() {
+                            return Err(ParseError::UnsupportedExpr(
+                                "IS NULL on predicate with no column references".to_string(),
+                            ));
+                        }
+                        let mut pred = Predicate::is_null(Expression::column(cols[0].clone()));
+                        for col in &cols[1..] {
+                            pred = Predicate::or(
+                                pred,
+                                Predicate::is_null(Expression::column(col.clone())),
+                            );
+                        }
+                        Ok(pred)
+                    }
+                }
             }
             Expr::IsNotNull(inner) => {
-                let e = self.expr_to_expression(inner, None)?;
-                Ok(Predicate::is_not_null(e))
+                match self.expr_to_expression(inner, None) {
+                    Ok(e) => Ok(Predicate::is_not_null(e)),
+                    Err(_) => {
+                        // `(a > 0) IS NOT NULL` ≡ `a IS NOT NULL` (for single-column
+                        // comparisons against literals). For compound predicates, AND
+                        // together IS NOT NULL for each referenced column.
+                        let cols = Self::extract_column_refs(inner);
+                        if cols.is_empty() {
+                            return Err(ParseError::UnsupportedExpr(
+                                "IS NOT NULL on predicate with no column references".to_string(),
+                            ));
+                        }
+                        let mut pred =
+                            Predicate::is_not_null(Expression::column(cols[0].clone()));
+                        for col in &cols[1..] {
+                            pred = Predicate::and(
+                                pred,
+                                Predicate::is_not_null(Expression::column(col.clone())),
+                            );
+                        }
+                        Ok(pred)
+                    }
+                }
             }
             Expr::Nested(inner) => self.expr_to_predicate(inner),
             Expr::Between {
@@ -432,17 +502,51 @@ impl<'a> SchemaAwareParser<'a> {
                 }
             }
             Expr::Like {
-                negated: _,
+                negated,
                 expr,
                 pattern,
                 ..
             } => {
-                // LIKE is tricky - kernel doesn't have native LIKE support
-                // For now, we'll return an error suggesting it's unsupported
+                // Handle LIKE with 'prefix%' patterns by converting to range comparison
+                if let Expr::Value(Value::SingleQuotedString(pat)) = pattern.as_ref() {
+                    if pat == "%" {
+                        // col LIKE '%' matches everything non-null → IS NOT NULL
+                        let e = self.expr_to_expression(expr, None)?;
+                        let pred = Predicate::is_not_null(e);
+                        return Ok(if *negated { Predicate::not(pred) } else { pred });
+                    }
+                    if pat.ends_with('%') && !pat[..pat.len()-1].contains('%') {
+                        // Simple prefix pattern like 'abc%'
+                        let prefix = &pat[..pat.len()-1];
+                        let col = self.extract_column_name(expr);
+                        let type_hint = col.as_ref().and_then(|c| self.find_column_type(c));
+                        let e = self.expr_to_expression(expr, type_hint)?;
+
+                        // Convert to: col >= 'prefix' AND col < 'prefiy'
+                        // where 'prefiy' is prefix with last char incremented
+                        let lower = Expression::literal(Scalar::String(prefix.to_string()));
+                        let mut upper_chars: Vec<char> = prefix.chars().collect();
+                        if let Some(last) = upper_chars.last_mut() {
+                            *last = char::from_u32(*last as u32 + 1).unwrap_or(*last);
+                        }
+                        let upper_str: String = upper_chars.into_iter().collect();
+                        let upper = Expression::literal(Scalar::String(upper_str));
+
+                        let pred = Predicate::and(
+                            Predicate::ge(e.clone(), lower),
+                            Predicate::lt(e, upper),
+                        );
+                        return Ok(if *negated { Predicate::not(pred) } else { pred });
+                    }
+                }
                 Err(ParseError::UnsupportedExpr(format!(
                     "LIKE operator not supported by kernel: {} LIKE {:?}",
                     expr, pattern
                 )))
+            }
+            // Handle boolean literal values as predicates
+            Expr::Value(Value::Boolean(b)) => {
+                Ok(Predicate::from_expr(Expression::literal(Scalar::Boolean(*b))))
             }
             // Handle simple column reference as boolean
             Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
