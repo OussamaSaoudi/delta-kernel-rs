@@ -71,10 +71,32 @@ struct BenchmarkResult {
 /// Each table may use a different storage backend (local, S3, etc.), so we create
 /// an engine per table URL so that `object_store` configures the correct backend
 /// and picks up credentials from the environment.
+///
+/// For S3 URLs, we explicitly pass the AWS region from environment variables
+/// since `object_store` defaults to us-east-1 if not configured, causing
+/// redirect errors for buckets in other regions.
 fn setup_engine_for_url(table_url: &str) -> Arc<DefaultEngine<TokioBackgroundExecutor>> {
     let url = delta_kernel::try_parse_uri(table_url)
         .unwrap_or_else(|e| panic!("Failed to parse table URL '{}': {}", table_url, e));
-    let store = delta_kernel::engine::default::storage::store_from_url(&url)
+
+    // Build storage options, including region for S3 URLs
+    let mut options: Vec<(&str, String)> = Vec::new();
+
+    if url.scheme() == "s3" || url.scheme() == "s3a" {
+        // Explicitly pass region to object_store — it may not pick up AWS_REGION
+        // from the environment in all configurations (e.g., when using IMDS credentials)
+        if let Ok(region) = std::env::var("AWS_REGION") {
+            eprintln!("[INFO] Using AWS_REGION={} for S3 store", region);
+            options.push(("region", region));
+        } else if let Ok(region) = std::env::var("AWS_DEFAULT_REGION") {
+            eprintln!("[INFO] Using AWS_DEFAULT_REGION={} for S3 store", region);
+            options.push(("region", region));
+        } else {
+            eprintln!("[WARN] No AWS_REGION or AWS_DEFAULT_REGION set for S3 URL");
+        }
+    }
+
+    let store = delta_kernel::engine::default::storage::store_from_url_opts(&url, options)
         .unwrap_or_else(|e| panic!("Failed to create store for '{}': {}", table_url, e));
     Arc::new(DefaultEngine::new(store))
 }
