@@ -33,8 +33,15 @@ pub struct TableInfo {
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_info: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Table path. Also accepts `table_root_path` from Java WorkloadSpecGenerator.
+    #[serde(alias = "table_root_path", skip_serializing_if = "Option::is_none")]
     pub table_path: Option<String>,
+    /// Whether this table is managed by Unity Catalog (Java-generated field).
+    #[serde(default)]
+    pub is_catalog_managed: bool,
+    /// Fully-qualified UC table name (Java-generated field, e.g. "catalog.schema.table").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uc_table_name: Option<String>,
     #[serde(skip)]
     pub(crate) table_info_dir: PathBuf,
 }
@@ -65,6 +72,9 @@ impl TableInfo {
 pub struct ReadSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<u64>,
+    /// Operation type from Java-generated specs (e.g. "read_metadata", "read_data").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_type: Option<String>,
 }
 
 /// Specification for snapshot construction workloads.

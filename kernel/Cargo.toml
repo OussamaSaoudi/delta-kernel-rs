@@ -66,6 +66,8 @@ tokio = { version = "1.47", optional = true, features = ["rt-multi-thread"] }
 object_store = { version = "0.12.3", optional = true, features = ["aws", "azure", "gcp", "http"] }
 # TODO: Remove this once https://github.com/apache/arrow-rs/pull/8244 ships
 comfy-table = { version = "~7.1", optional = true }
+# CLI argument parsing for the workload-runner binary
+clap = { version = "4", features = ["derive"], optional = true }
 
 # arrow 55
 [dependencies.arrow_55]
@@ -162,6 +164,11 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "env-filter",
   "fmt",
 ] }
+
+[[bin]]
+name = "workload-runner"
+path = "src/bin/workload_runner.rs"
+required-features = ["default-engine-rustls", "arrow", "internal-api", "clap"]
 
 [[bench]]
 name = "metadata_bench"
