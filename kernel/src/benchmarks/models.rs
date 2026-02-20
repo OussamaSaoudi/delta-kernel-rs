@@ -30,6 +30,7 @@ impl ReadOperationType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableInfo {
     pub name: String,
+    #[serde(default)]
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_info: Option<String>,
