@@ -66,13 +66,16 @@ struct BenchmarkResult {
     custom_metrics: std::collections::HashMap<String, f64>,
 }
 
-/// Set up the default engine for benchmarks.
-fn setup_engine() -> Arc<DefaultEngine<TokioBackgroundExecutor>> {
-    use delta_kernel::engine::default::storage::store_from_url;
-    use delta_kernel::try_parse_uri;
-
-    let dummy_url = try_parse_uri(".").expect("Failed to parse current directory");
-    let store = store_from_url(&dummy_url).expect("Failed to create store");
+/// Set up the default engine for a specific table URL.
+///
+/// Each table may use a different storage backend (local, S3, etc.), so we create
+/// an engine per table URL so that `object_store` configures the correct backend
+/// and picks up credentials from the environment.
+fn setup_engine_for_url(table_url: &str) -> Arc<DefaultEngine<TokioBackgroundExecutor>> {
+    let url = delta_kernel::try_parse_uri(table_url)
+        .unwrap_or_else(|e| panic!("Failed to parse table URL '{}': {}", table_url, e));
+    let store = delta_kernel::engine::default::storage::store_from_url(&url)
+        .unwrap_or_else(|e| panic!("Failed to create store for '{}': {}", table_url, e));
     Arc::new(DefaultEngine::new(store))
 }
 
@@ -113,12 +116,19 @@ fn main() {
     eprintln!("  Warmup: {}", args.warmup);
     eprintln!("  Iterations: {}", args.iterations);
     eprintln!("  Output: {}", args.output.display());
+    eprintln!("  Working directory: {:?}", std::env::current_dir().ok());
+
+    // Log relevant environment variables for debugging credential/config issues
+    log_environment();
+
+    // Log the contents of the workload directory for debugging
+    log_workload_dir(&args.workload_dir);
 
     // Load all workload specs
     let specs = match load_all_workloads(&args.workload_dir) {
         Ok(specs) => specs,
         Err(e) => {
-            eprintln!("Failed to load workload specs: {}", e);
+            eprintln!("[ERROR] Failed to load workload specs: {}", e);
             let results = vec![BenchmarkResult {
                 workload_name: "all".to_string(),
                 spec_type: "unknown".to_string(),
@@ -136,16 +146,38 @@ fn main() {
         }
     };
 
-    eprintln!("Loaded {} workload spec(s)", specs.len());
+    eprintln!("[INFO] Loaded {} workload spec(s)", specs.len());
+    for (i, spec) in specs.iter().enumerate() {
+        let table_root = spec.table_info.resolved_table_root();
+        eprintln!(
+            "[INFO]   [{}] table={}, case={}, type={:?}, table_path={:?}, resolved_root={}",
+            i,
+            spec.table_info.name,
+            spec.case_name,
+            match &spec.spec_type {
+                WorkloadSpecType::Read(_) => "read",
+                WorkloadSpecType::SnapshotConstruction(_) => "snapshot_construction",
+            },
+            spec.table_info.table_path,
+            table_root
+        );
+    }
 
-    let engine = setup_engine();
     let mut results = Vec::new();
 
     for spec in specs {
-        // For Read specs, expand into operation-type variants
+        // Normalize s3a:// paths and prepare spec
+        let mut spec = spec;
+        if let Some(ref path) = spec.table_info.table_path {
+            let normalized = normalize_table_path(path);
+            if normalized != *path {
+                eprintln!("[INFO] Normalized path: {} -> {}", path, normalized);
+                spec.table_info.table_path = Some(normalized);
+            }
+        }
+
         match &spec.spec_type {
             WorkloadSpecType::Read(read_spec) => {
-                // Use the operation_type from the spec JSON, or default to read_metadata
                 let op_type = read_spec
                     .operation_type
                     .as_deref()
@@ -154,11 +186,11 @@ fn main() {
                 let operation = match op_type {
                     "read_metadata" => ReadOperationType::ReadMetadata,
                     "read_data" => {
-                        eprintln!("Skipping read_data (not yet implemented)");
+                        eprintln!("[WARN] Skipping read_data (not yet implemented)");
                         continue;
                     }
                     other => {
-                        eprintln!("Unknown read operation type: {}", other);
+                        eprintln!("[WARN] Unknown read operation type: {}", other);
                         continue;
                     }
                 };
@@ -166,38 +198,121 @@ fn main() {
                 let mut spec_with_op = spec.clone();
                 spec_with_op.operation_type = Some(operation);
 
-                // Normalize s3a:// paths
-                if let Some(ref path) = spec_with_op.table_info.table_path {
-                    let normalized = normalize_table_path(path);
-                    if normalized != *path {
-                        eprintln!("  Normalized path: {} -> {}", path, normalized);
-                        spec_with_op.table_info.table_path = Some(normalized);
-                    }
-                }
+                let table_url = spec_with_op.table_info.resolved_table_root();
+                eprintln!("[INFO] Creating engine for table URL: {}", table_url);
+                let engine = setup_engine_for_url(&table_url);
 
-                let result = run_benchmark(&spec_with_op, engine.clone(), &args);
+                let result = run_benchmark(&spec_with_op, engine, &args);
                 results.push(result);
             }
             WorkloadSpecType::SnapshotConstruction(_) => {
-                let mut spec = spec;
+                let table_url = spec.table_info.resolved_table_root();
+                eprintln!("[INFO] Creating engine for table URL: {}", table_url);
+                let engine = setup_engine_for_url(&table_url);
 
-                // Normalize s3a:// paths
-                if let Some(ref path) = spec.table_info.table_path {
-                    let normalized = normalize_table_path(path);
-                    if normalized != *path {
-                        eprintln!("  Normalized path: {} -> {}", path, normalized);
-                        spec.table_info.table_path = Some(normalized);
-                    }
-                }
-
-                let result = run_benchmark(&spec, engine.clone(), &args);
+                let result = run_benchmark(&spec, engine, &args);
                 results.push(result);
             }
         }
     }
 
     write_results(&args.output, &results);
-    eprintln!("=== Done: {} result(s) written to {} ===", results.len(), args.output.display());
+    eprintln!(
+        "=== Done: {} result(s) written to {} ===",
+        results.len(),
+        args.output.display()
+    );
+}
+
+/// Log relevant environment variables for debugging.
+fn log_environment() {
+    eprintln!("[INFO] Environment:");
+    let vars_to_check = [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "HOME",
+        "PATH",
+    ];
+    for var in &vars_to_check {
+        match std::env::var(var) {
+            Ok(val) => {
+                // Mask sensitive values
+                if var.contains("SECRET") || var.contains("TOKEN") || var.contains("KEY") {
+                    eprintln!("  {}=<set, {} chars>", var, val.len());
+                } else {
+                    let display = if val.len() > 120 {
+                        format!("{}...", &val[..120])
+                    } else {
+                        val
+                    };
+                    eprintln!("  {}={}", var, display);
+                }
+            }
+            Err(_) => eprintln!("  {}=<not set>", var),
+        }
+    }
+    // Check if IMDS (EC2 instance metadata) is likely available
+    eprintln!(
+        "  AWS_EC2_METADATA_DISABLED={}",
+        std::env::var("AWS_EC2_METADATA_DISABLED").unwrap_or_else(|_| "<not set>".to_string())
+    );
+}
+
+/// Log the contents of the workload directory for debugging.
+fn log_workload_dir(dir: &std::path::Path) {
+    eprintln!("[INFO] Workload directory contents:");
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let kind = if path.is_dir() { "DIR" } else { "FILE" };
+            eprintln!("  [{}] {}", kind, path.display());
+
+            // If it's a table directory, log its contents
+            if path.is_dir() {
+                if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                    for sub in sub_entries.flatten() {
+                        let sub_path = sub.path();
+                        let sub_kind = if sub_path.is_dir() { "DIR" } else { "FILE" };
+                        eprintln!("    [{}] {}", sub_kind, sub_path.display());
+                    }
+                }
+                // Log table_info.json content if present
+                let table_info = path.join("table_info.json");
+                if table_info.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&table_info) {
+                        eprintln!("    table_info.json: {}", content.trim());
+                    }
+                }
+                // Log spec files
+                let specs_dir = path.join("specs");
+                if specs_dir.is_dir() {
+                    if let Ok(spec_entries) = std::fs::read_dir(&specs_dir) {
+                        for spec_entry in spec_entries.flatten() {
+                            let spec_path = spec_entry.path();
+                            if spec_path.is_dir() {
+                                let spec_file = spec_path.join("spec.json");
+                                if spec_file.exists() {
+                                    if let Ok(content) = std::fs::read_to_string(&spec_file) {
+                                        eprintln!(
+                                            "    specs/{}/spec.json: {}",
+                                            spec_path.file_name().unwrap().to_string_lossy(),
+                                            content.trim()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        eprintln!("  [ERROR] Cannot read directory: {}", dir.display());
+    }
 }
 
 fn run_benchmark(
@@ -210,13 +325,20 @@ fn run_benchmark(
         WorkloadSpecType::Read(_) => "read",
         WorkloadSpecType::SnapshotConstruction(_) => "snapshot_construction",
     };
+    let table_root = spec.table_info.resolved_table_root();
 
-    eprintln!("Running benchmark: {} (type={})", workload_name, spec_type);
+    eprintln!("----------------------------------------------------------------------");
+    eprintln!("[INFO] Running benchmark: {} (type={})", workload_name, spec_type);
+    eprintln!("[INFO]   Table: {} (path={})", spec.table_info.name, table_root);
+    eprintln!("[INFO]   Warmup: {}, Iterations: {}", args.warmup, args.iterations);
 
     let mut runner = match create_runner(spec.clone(), engine) {
-        Ok(r) => r,
+        Ok(r) => {
+            eprintln!("[INFO]   Runner created successfully");
+            r
+        }
         Err(e) => {
-            eprintln!("  Failed to create runner: {}", e);
+            eprintln!("[ERROR]  Failed to create runner: {}", e);
             return BenchmarkResult {
                 workload_name,
                 spec_type: spec_type.to_string(),
@@ -234,13 +356,13 @@ fn run_benchmark(
 
     // Warmup iterations
     for i in 0..args.warmup {
-        eprintln!("  Warmup {}/{}", i + 1, args.warmup);
+        eprintln!("[INFO]   Warmup {}/{}", i + 1, args.warmup);
         if let Err(e) = runner.setup() {
-            eprintln!("  Setup failed during warmup: {}", e);
+            eprintln!("[ERROR]  Setup failed during warmup: {}", e);
             return error_result(workload_name, spec_type, &format!("Setup failed: {}", e));
         }
         if let Err(e) = runner.execute() {
-            eprintln!("  Execute failed during warmup: {}", e);
+            eprintln!("[ERROR]  Execute failed during warmup: {}", e);
             return error_result(workload_name, spec_type, &format!("Execute failed: {}", e));
         }
         let _ = runner.cleanup();
@@ -250,19 +372,19 @@ fn run_benchmark(
     let mut durations_ms = Vec::with_capacity(args.iterations as usize);
     for i in 0..args.iterations {
         if let Err(e) = runner.setup() {
-            eprintln!("  Setup failed at iteration {}: {}", i + 1, e);
+            eprintln!("[ERROR]  Setup failed at iteration {}: {}", i + 1, e);
             return error_result(workload_name, spec_type, &format!("Setup failed: {}", e));
         }
 
         let start = Instant::now();
         if let Err(e) = runner.execute() {
-            eprintln!("  Execute failed at iteration {}: {}", i + 1, e);
+            eprintln!("[ERROR]  Execute failed at iteration {}: {}", i + 1, e);
             return error_result(workload_name, spec_type, &format!("Execute failed: {}", e));
         }
         let elapsed = start.elapsed();
         let ms = elapsed.as_millis() as i64;
         durations_ms.push(ms);
-        eprintln!("  Iteration {}/{}: {}ms", i + 1, args.iterations, ms);
+        eprintln!("[INFO]   Iteration {}/{}: {}ms", i + 1, args.iterations, ms);
 
         let _ = runner.cleanup();
     }
@@ -270,8 +392,8 @@ fn run_benchmark(
     let (min, max, avg, stddev) = compute_stats(&durations_ms);
 
     eprintln!(
-        "  Result: avg={}ms, min={}ms, max={}ms, stddev={:.2}ms",
-        avg as i64, min, max, stddev
+        "[INFO]   Result: avg={:.1}ms, min={}ms, max={}ms, stddev={:.2}ms",
+        avg, min, max, stddev
     );
 
     BenchmarkResult {
