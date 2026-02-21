@@ -24,6 +24,7 @@
 //! ```
 
 pub mod models;
+pub mod report;
 pub mod runners;
 pub mod utils;
 

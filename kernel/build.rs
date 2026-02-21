@@ -6,4 +6,9 @@ fn main() {
     if let Channel::Nightly = version_meta().unwrap().channel {
         println!("cargo:rustc-cfg=NIGHTLY_CHANNEL");
     }
+
+    // Expose the target triple to the crate via env!("TARGET")
+    if let Ok(target) = std::env::var("TARGET") {
+        println!("cargo:rustc-env=TARGET={target}");
+    }
 }
