@@ -76,15 +76,14 @@ fn get_workload_specs_path() -> PathBuf {
     local_specs
 }
 
-/// Set up the default engine for benchmarks
-fn setup_engine() -> Arc<DefaultEngine<TokioBackgroundExecutor>> {
+/// Set up the default engine for benchmarks, using the table URL to configure
+/// the correct object store (local filesystem, S3, etc.).
+fn setup_engine(table_url: &str) -> Arc<DefaultEngine<TokioBackgroundExecutor>> {
     use delta_kernel::engine::default::storage::store_from_url;
     use delta_kernel::try_parse_uri;
 
-    // Use a dummy URL just to create the store - individual benchmarks will
-    // use their own table paths
-    let dummy_url = try_parse_uri(".").expect("Failed to parse current directory");
-    let store = store_from_url(&dummy_url).expect("Failed to create store");
+    let url = try_parse_uri(table_url).expect("Failed to parse table URL");
+    let store = store_from_url(&url).expect("Failed to create store");
     Arc::new(DefaultEngine::new(store))
 }
 
@@ -183,7 +182,14 @@ fn workload_benchmarks(c: &mut Criterion) {
 
     println!("Loaded {} workload specification(s)", specs.len());
 
-    let engine = setup_engine();
+    // Determine the engine URL from the first spec's table root.
+    // All specs in a single run typically share the same storage backend.
+    let engine_url = specs
+        .first()
+        .map(|s| s.table_info.resolved_table_root())
+        .unwrap_or_else(|| ".".to_string());
+    println!("Creating engine for URL: {}", engine_url);
+    let engine = setup_engine(&engine_url);
 
     // Create a benchmark group for each workload type
     let mut group = c.benchmark_group("workloads");
