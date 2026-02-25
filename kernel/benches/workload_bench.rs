@@ -79,11 +79,21 @@ fn get_workload_specs_path() -> PathBuf {
 /// Set up the default engine for benchmarks, using the table URL to configure
 /// the correct object store (local filesystem, S3, etc.).
 fn setup_engine(table_url: &str) -> Arc<DefaultEngine<TokioBackgroundExecutor>> {
-    use delta_kernel::engine::default::storage::store_from_url;
+    use delta_kernel::engine::default::storage::store_from_url_opts;
     use delta_kernel::try_parse_uri;
 
     let url = try_parse_uri(table_url).expect("Failed to parse table URL");
-    let store = store_from_url(&url).expect("Failed to create store");
+
+    // Pass AWS_REGION/AWS_DEFAULT_REGION from environment since object_store's
+    // parse_url_opts does not automatically read env vars.
+    let mut opts: Vec<(&str, String)> = Vec::new();
+    if let Ok(region) = std::env::var("AWS_REGION") {
+        opts.push(("aws_region", region));
+    } else if let Ok(region) = std::env::var("AWS_DEFAULT_REGION") {
+        opts.push(("aws_region", region));
+    }
+
+    let store = store_from_url_opts(&url, opts).expect("Failed to create store");
     Arc::new(DefaultEngine::new(store))
 }
 
