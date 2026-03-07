@@ -84,9 +84,6 @@ fn unsupported_workload_reason(spec: &WorkloadSpec) -> Option<&'static str> {
         | WorkloadSpec::Snapshot {
             timestamp: Some(_), ..
         } => Some("Timestamp-based time travel not supported by harness"),
-        WorkloadSpec::Read {
-            predicate: Some(_), ..
-        } => Some("Predicate filtering not supported in this build"),
         WorkloadSpec::Txn { .. } => Some("Txn workloads not supported in this build"),
         WorkloadSpec::DomainMetadata { .. } => {
             Some("DomainMetadata workloads not supported in this build")

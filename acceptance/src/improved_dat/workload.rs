@@ -153,6 +153,7 @@ pub fn execute_workload(
             version,
             timestamp,
             columns,
+            predicate,
             ..
         } => {
             let result = execute_read_workload(
@@ -161,6 +162,7 @@ pub fn execute_workload(
                 *version,
                 timestamp.as_deref(),
                 columns.as_deref(),
+                predicate.as_deref(),
             )?;
             Ok(WorkloadResult::Read(result))
         }
@@ -199,6 +201,7 @@ pub fn execute_read_workload(
     version: Option<i64>,
     timestamp: Option<&str>,
     columns: Option<&[String]>,
+    predicate: Option<&str>,
 ) -> DeltaResult<ReadResult> {
     // Resolve version from timestamp if needed
     let version = if let Some(ts) = timestamp {
@@ -235,6 +238,12 @@ pub fn execute_read_workload(
                 })?);
             scan_builder = scan_builder.with_schema(projected_schema);
         }
+    }
+    if let Some(pred_str) = predicate {
+        use super::predicate_parser::parse_predicate_with_schema;
+        let pred = parse_predicate_with_schema(pred_str, &table_schema)
+            .map_err(|e| Error::generic(format!("Failed to parse predicate '{}': {}", pred_str, e)))?;
+        scan_builder = scan_builder.with_predicate(Arc::new(pred));
     }
     let scan = scan_builder.build()?;
 
