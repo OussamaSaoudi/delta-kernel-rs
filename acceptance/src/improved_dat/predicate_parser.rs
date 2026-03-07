@@ -175,8 +175,14 @@ impl<'a> SchemaAwareParser<'a> {
                         })?;
                         let scale_factor = 10_i128.pow(decimal_type.scale() as u32);
                         let bits = (d * scale_factor as f64).round() as i128;
-                        return Scalar::decimal(bits, decimal_type.precision(), decimal_type.scale())
-                            .map_err(|e| ParseError::InvalidLiteral(format!("Invalid decimal: {}", e)));
+                        return Scalar::decimal(
+                            bits,
+                            decimal_type.precision(),
+                            decimal_type.scale(),
+                        )
+                        .map_err(|e| {
+                            ParseError::InvalidLiteral(format!("Invalid decimal: {}", e))
+                        });
                     }
                 }
                 // Default: try to parse as i64, fall back to f64
@@ -196,9 +202,10 @@ impl<'a> SchemaAwareParser<'a> {
                 if let Some(dt) = target_type {
                     if Self::is_date(dt) {
                         // Parse date string like "2024-01-15"
-                        let date = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(
-                            |_| ParseError::InvalidLiteral(format!("Cannot parse '{}' as DATE", s)),
-                        )?;
+                        let date =
+                            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
+                                ParseError::InvalidLiteral(format!("Cannot parse '{}' as DATE", s))
+                            })?;
                         let days = date
                             .signed_duration_since(
                                 chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
@@ -208,28 +215,27 @@ impl<'a> SchemaAwareParser<'a> {
                     }
                     if Self::is_timestamp(dt) || Self::is_timestamp_ntz(dt) {
                         // Parse timestamp string
-                        let ts =
-                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
-                                .or_else(|_| {
-                                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-                                })
-                                .or_else(|_| {
-                                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
-                                })
-                                .or_else(|_| {
-                                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
-                                })
-                                .or_else(|_| {
-                                    // Try date-only format (e.g. '2024-06-01' → midnight)
-                                    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                                        .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
-                                })
-                                .map_err(|_| {
-                                    ParseError::InvalidLiteral(format!(
-                                        "Cannot parse '{}' as TIMESTAMP",
-                                        s
-                                    ))
-                                })?;
+                        let ts = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+                            .or_else(|_| {
+                                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                            })
+                            .or_else(|_| {
+                                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+                            })
+                            .or_else(|_| {
+                                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                            })
+                            .or_else(|_| {
+                                // Try date-only format (e.g. '2024-06-01' → midnight)
+                                chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                                    .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
+                            })
+                            .map_err(|_| {
+                                ParseError::InvalidLiteral(format!(
+                                    "Cannot parse '{}' as TIMESTAMP",
+                                    s
+                                ))
+                            })?;
                         let micros = ts.and_utc().timestamp_micros();
                         if Self::is_timestamp_ntz(dt) {
                             return Ok(Scalar::TimestampNtz(micros));
@@ -341,7 +347,11 @@ impl<'a> SchemaAwareParser<'a> {
                 }
                 _ => Err(ParseError::UnsupportedOperator(format!("{:?}", op))),
             },
-            Expr::BinaryOp { left, op: BinaryOperator::Modulo, right } => {
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Modulo,
+                right,
+            } => {
                 let l = self.expr_to_expression(left, type_hint)?;
                 let r = self.expr_to_expression(right, type_hint)?;
                 Ok(opaque_ops::make_modulo_opaque(l, r))
@@ -382,7 +392,7 @@ impl<'a> SchemaAwareParser<'a> {
                 }
 
                 opaque_ops::make_function_opaque(&func_name, kernel_args)
-                    .map_err(|e| ParseError::UnsupportedExpr(e))
+                    .map_err(ParseError::UnsupportedExpr)
             }
             _ => Err(ParseError::UnsupportedExpr(format!("{:?}", expr))),
         }
@@ -499,8 +509,7 @@ impl<'a> SchemaAwareParser<'a> {
                                 "IS NOT NULL on predicate with no column references".to_string(),
                             ));
                         }
-                        let mut pred =
-                            Predicate::is_not_null(Expression::column(cols[0].clone()));
+                        let mut pred = Predicate::is_not_null(Expression::column(cols[0].clone()));
                         for col in &cols[1..] {
                             pred = Predicate::and(
                                 pred,
@@ -526,8 +535,7 @@ impl<'a> SchemaAwareParser<'a> {
                 let l = self.expr_to_expression(low, type_hint)?;
                 let h = self.expr_to_expression(high, type_hint)?;
 
-                let between_pred =
-                    Predicate::and(Predicate::ge(e.clone(), l), Predicate::le(e, h));
+                let between_pred = Predicate::and(Predicate::ge(e.clone(), l), Predicate::le(e, h));
 
                 if *negated {
                     Ok(Predicate::not(between_pred))
@@ -587,9 +595,9 @@ impl<'a> SchemaAwareParser<'a> {
                         let pred = Predicate::is_not_null(e);
                         return Ok(if *negated { Predicate::not(pred) } else { pred });
                     }
-                    if pat.ends_with('%') && !pat[..pat.len()-1].contains('%') {
+                    if pat.ends_with('%') && !pat[..pat.len() - 1].contains('%') {
                         // Simple prefix pattern like 'abc%'
-                        let prefix = &pat[..pat.len()-1];
+                        let prefix = &pat[..pat.len() - 1];
                         let col = self.extract_column_name(expr);
                         let type_hint = col.as_ref().and_then(|c| self.find_column_type(c));
                         let e = self.expr_to_expression(expr, type_hint)?;
@@ -617,9 +625,9 @@ impl<'a> SchemaAwareParser<'a> {
                 )))
             }
             // Handle boolean literal values as predicates
-            Expr::Value(Value::Boolean(b)) => {
-                Ok(Predicate::from_expr(Expression::literal(Scalar::Boolean(*b))))
-            }
+            Expr::Value(Value::Boolean(b)) => Ok(Predicate::from_expr(Expression::literal(
+                Scalar::Boolean(*b),
+            ))),
             // Handle simple column reference as boolean
             Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
                 let e = self.expr_to_expression(expr, Some(&DataType::BOOLEAN))?;
@@ -657,7 +665,9 @@ impl<'a> SchemaAwareParser<'a> {
         let statements = Parser::parse_sql(&dialect, &sql)?;
 
         if statements.len() != 1 {
-            return Err(ParseError::SqlParser("Expected single statement".to_string()));
+            return Err(ParseError::SqlParser(
+                "Expected single statement".to_string(),
+            ));
         }
 
         // Extract the WHERE clause
@@ -789,9 +799,9 @@ mod tests {
 
     #[test]
     fn test_schema_aware_int32() {
-        let schema = StructType::try_new(vec![
-            StructField::new("int_col", DataType::INTEGER, true)
-        ]).unwrap();
+        let schema =
+            StructType::try_new(vec![StructField::new("int_col", DataType::INTEGER, true)])
+                .unwrap();
 
         let pred = parse_predicate_with_schema("int_col = 42", &schema).unwrap();
         // Should create Int32 literal, not Int64

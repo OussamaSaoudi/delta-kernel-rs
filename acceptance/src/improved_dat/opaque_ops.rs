@@ -52,7 +52,9 @@ impl ArrowOpaqueExpressionOp for YearOp {
         _eval_expr: &ScalarExpressionEvaluator<'_>,
         _exprs: &[Expression],
     ) -> DeltaResult<Scalar> {
-        Err(delta_kernel::Error::generic("year: scalar eval unsupported"))
+        Err(delta_kernel::Error::generic(
+            "year: scalar eval unsupported",
+        ))
     }
 }
 
@@ -146,10 +148,7 @@ impl ArrowOpaqueExpressionOp for DateTruncOp {
         _result_type: Option<&DataType>,
     ) -> DeltaResult<ArrayRef> {
         // date_trunc('MONTH', ts_col)
-        assert!(
-            args.len() == 2,
-            "date_trunc() takes exactly two arguments"
-        );
+        assert!(args.len() == 2, "date_trunc() takes exactly two arguments");
 
         let precision = extract_string_literal(&args[0])?;
         let ts_arr = evaluate_expression(&args[1], batch, None)?;
@@ -186,10 +185,7 @@ impl ArrowOpaqueExpressionOp for DateAddOp {
         batch: &RecordBatch,
         _result_type: Option<&DataType>,
     ) -> DeltaResult<ArrayRef> {
-        assert!(
-            args.len() == 2,
-            "date_add() takes exactly two arguments"
-        );
+        assert!(args.len() == 2, "date_add() takes exactly two arguments");
 
         let date_arr = evaluate_expression(&args[0], batch, None)?;
         let days_arr = evaluate_expression(&args[1], batch, None)?;
@@ -256,10 +252,7 @@ impl ArrowOpaqueExpressionOp for DateDiffOp {
         batch: &RecordBatch,
         _result_type: Option<&DataType>,
     ) -> DeltaResult<ArrayRef> {
-        assert!(
-            args.len() == 2,
-            "datediff() takes exactly two arguments"
-        );
+        assert!(args.len() == 2, "datediff() takes exactly two arguments");
 
         let end_arr = evaluate_expression(&args[0], batch, None)?;
         let start_arr = evaluate_expression(&args[1], batch, None)?;
@@ -538,10 +531,12 @@ fn truncate_timestamp_array(arr: &dyn Array, precision: &str) -> DeltaResult<Arr
                             .and_hms_opt(0, 0, 0)
                             .unwrap()
                     }
-                    "DAY" | "DD" => chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), dt.day())
-                        .unwrap()
-                        .and_hms_opt(0, 0, 0)
-                        .unwrap(),
+                    "DAY" | "DD" => {
+                        chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), dt.day())
+                            .unwrap()
+                            .and_hms_opt(0, 0, 0)
+                            .unwrap()
+                    }
                     "HOUR" | "HH" => {
                         chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), dt.day())
                             .unwrap()
@@ -573,10 +568,7 @@ fn truncate_timestamp_array(arr: &dyn Array, precision: &str) -> DeltaResult<Arr
 use chrono::{Datelike, Timelike};
 
 /// Helper: create an opaque expression for a function call.
-pub fn make_function_opaque(
-    name: &str,
-    args: Vec<Expression>,
-) -> Result<Expression, String> {
+pub fn make_function_opaque(name: &str, args: Vec<Expression>) -> Result<Expression, String> {
     match name.to_lowercase().as_str() {
         "year" => Ok(Expression::arrow_opaque(YearOp, args)),
         "month" => Ok(Expression::arrow_opaque(MonthOp, args)),
