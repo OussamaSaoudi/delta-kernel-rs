@@ -18,6 +18,7 @@ integration-tests/Cargo.lock
 
 # Project
 acceptance/tests/dat/
+/improved_dat/
 ffi/examples/read-table/build
 /build
 /kernel/target
