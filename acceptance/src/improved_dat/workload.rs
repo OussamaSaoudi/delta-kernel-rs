@@ -128,6 +128,10 @@ pub struct SnapshotResult {
     pub writer_features: Vec<String>,
     /// Table ID
     pub table_id: String,
+    /// Format provider (e.g., "parquet")
+    pub format_provider: String,
+    /// Format options
+    pub format_options: std::collections::HashMap<String, String>,
     /// Schema string
     pub schema_string: String,
     /// Partition columns
@@ -339,6 +343,8 @@ pub fn execute_snapshot_workload(
             .map(|f| f.iter().map(|feat| feat.to_string()).collect())
             .unwrap_or_default(),
         table_id: metadata.id().to_string(),
+        format_provider: metadata.format_provider().to_string(),
+        format_options: metadata.format_options().clone(),
         schema_string: metadata.schema_string().to_string(),
         partition_columns: metadata.partition_columns().to_vec(),
         configuration: metadata

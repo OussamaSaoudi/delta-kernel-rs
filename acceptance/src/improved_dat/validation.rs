@@ -672,7 +672,102 @@ pub fn validate_snapshot_metadata(
         validate_protocol(result, &expected_protocol)?;
     }
     if let Some(expected_metadata) = read_expected_metadata(expected_dir)? {
-        validate_metadata(result, &expected_metadata)?;
+        // Check table ID
+        if result.table_id != expected_metadata.id {
+            return Err(ValidationError::MetadataMismatch {
+                message: format!(
+                    "Table ID mismatch: expected {}, got {}",
+                    expected_metadata.id, result.table_id
+                ),
+            });
+        }
+
+        // Check format provider
+        if result.format_provider != expected_metadata.format.provider {
+            return Err(ValidationError::MetadataMismatch {
+                message: format!(
+                    "Format provider mismatch: expected '{}', got '{}'",
+                    expected_metadata.format.provider, result.format_provider
+                ),
+            });
+        }
+
+        // Check format options
+        if result.format_options != expected_metadata.format.options {
+            return Err(ValidationError::MetadataMismatch {
+                message: format!(
+                    "Format options mismatch: expected {:?}, got {:?}",
+                    expected_metadata.format.options, result.format_options
+                ),
+            });
+        }
+
+        // Check schema string (compare as parsed JSON to ignore formatting differences)
+        let expected_schema: serde_json::Value =
+            serde_json::from_str(&expected_metadata.schema_string).map_err(|e| {
+                ValidationError::MetadataMismatch {
+                    message: format!("Failed to parse expected schema_string: {}", e),
+                }
+            })?;
+        let actual_schema: serde_json::Value =
+            serde_json::from_str(&result.schema_string).map_err(|e| {
+                ValidationError::MetadataMismatch {
+                    message: format!("Failed to parse actual schema_string: {}", e),
+                }
+            })?;
+        if expected_schema != actual_schema {
+            return Err(ValidationError::MetadataMismatch {
+                message: format!(
+                    "Schema mismatch:\n  expected: {}\n  got:      {}",
+                    expected_metadata.schema_string, result.schema_string
+                ),
+            });
+        }
+
+        // Check partition columns
+        if result.partition_columns != expected_metadata.partition_columns {
+            return Err(ValidationError::MetadataMismatch {
+                message: format!(
+                    "Partition columns mismatch: expected {:?}, got {:?}",
+                    expected_metadata.partition_columns, result.partition_columns
+                ),
+            });
+        }
+
+        // Check configuration (bidirectional: expected subset actual AND actual subset expected)
+        for (key, expected_value) in &expected_metadata.configuration {
+            match result.configuration.get(key) {
+                Some(actual_value) if actual_value == expected_value => {}
+                Some(actual_value) => {
+                    return Err(ValidationError::MetadataMismatch {
+                        message: format!(
+                            "Configuration '{}' mismatch: expected '{}', got '{}'",
+                            key, expected_value, actual_value
+                        ),
+                    });
+                }
+                None => {
+                    return Err(ValidationError::MetadataMismatch {
+                        message: format!(
+                            "Configuration '{}' missing: expected '{}'",
+                            key, expected_value
+                        ),
+                    });
+                }
+            }
+        }
+        // Check for extra keys in actual that aren't in expected
+        for key in result.configuration.keys() {
+            if !expected_metadata.configuration.contains_key(key) {
+                return Err(ValidationError::MetadataMismatch {
+                    message: format!(
+                        "Configuration has unexpected extra key '{}' with value '{}'",
+                        key,
+                        result.configuration.get(key).unwrap()
+                    ),
+                });
+            }
+        }
     }
     Ok(())
 }
