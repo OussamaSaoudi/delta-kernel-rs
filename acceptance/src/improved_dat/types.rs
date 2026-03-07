@@ -185,6 +185,7 @@ impl WorkloadSpec {
 
 /// Expected error specification
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExpectedError {
     /// Error code (e.g. "DELTA_CDC_NOT_ALLOWED_ON_NON_CDC_TABLE")
     #[serde(alias = "errorCode", alias = "error_code")]
