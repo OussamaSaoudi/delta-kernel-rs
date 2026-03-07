@@ -709,11 +709,9 @@ pub fn validate_snapshot_metadata(
                     message: format!("Failed to parse expected schema_string: {}", e),
                 }
             })?;
-        let actual_schema: serde_json::Value =
-            serde_json::from_str(&result.schema_string).map_err(|e| {
-                ValidationError::MetadataMismatch {
-                    message: format!("Failed to parse actual schema_string: {}", e),
-                }
+        let actual_schema: serde_json::Value = serde_json::from_str(&result.schema_string)
+            .map_err(|e| ValidationError::MetadataMismatch {
+                message: format!("Failed to parse actual schema_string: {}", e),
             })?;
         if expected_schema != actual_schema {
             return Err(ValidationError::MetadataMismatch {

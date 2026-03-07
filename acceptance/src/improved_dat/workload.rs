@@ -143,7 +143,7 @@ pub struct SnapshotResult {
 /// Workload execution result
 pub enum WorkloadResult {
     Read(ReadResult),
-    Snapshot(SnapshotResult),
+    Snapshot(Box<SnapshotResult>),
 }
 
 /// Execute a workload specification and return the result
@@ -173,7 +173,7 @@ pub fn execute_workload(
         } => {
             let result =
                 execute_snapshot_workload(engine, table_root, *version, timestamp.as_deref())?;
-            Ok(WorkloadResult::Snapshot(result))
+            Ok(WorkloadResult::Snapshot(Box::new(result)))
         }
         WorkloadSpec::Cdf {
             start_version,
