@@ -357,3 +357,81 @@ pub fn validate_snapshot(
 
     Ok(())
 }
+
+/// Validate txn (SetTransaction) result against expected values. Panics on mismatch.
+pub fn validate_txn_result(
+    result: &super::workload::TxnResult,
+    expected: &super::types::ExpectedTxn,
+) {
+    assert_eq!(
+        result.app_id, expected.app_id,
+        "Txn app_id mismatch: expected '{}', got '{}'",
+        expected.app_id, result.app_id
+    );
+
+    let actual_version = result.txn_version.unwrap_or_else(|| {
+        panic!(
+            "Txn for app_id '{}' not found in snapshot, expected version {}",
+            expected.app_id, expected.txn_version
+        )
+    });
+
+    assert_eq!(
+        actual_version, expected.txn_version,
+        "Txn version mismatch for app_id '{}': expected {}, got {}",
+        expected.app_id, expected.txn_version, actual_version
+    );
+
+    if let Some(last_updated) = expected.last_updated {
+        println!(
+            "  Note: last_updated={} present in spec but not verifiable via kernel public API",
+            last_updated
+        );
+    }
+}
+
+/// Validate domain metadata against expected values. Panics on mismatch.
+pub fn validate_domain_metadata(
+    result: &super::workload::DomainMetadataResult,
+    expected: &super::types::ExpectedDomainMetadata,
+) {
+    assert_eq!(
+        result.domain, expected.domain,
+        "Domain name mismatch: expected '{}', got '{}'",
+        expected.domain, result.domain
+    );
+
+    if expected.removed {
+        assert!(
+            result.configuration.is_none(),
+            "Domain '{}' should be removed but has configuration: {:?}",
+            expected.domain,
+            result.configuration
+        );
+    } else {
+        let actual_config = result.configuration.as_ref().unwrap_or_else(|| {
+            panic!(
+                "Domain '{}' not found but expected configuration: '{}'",
+                expected.domain, expected.configuration
+            )
+        });
+
+        let expected_json: serde_json::Value = serde_json::from_str(&expected.configuration)
+            .unwrap_or_else(|_| serde_json::Value::String(expected.configuration.clone()));
+        let actual_json: serde_json::Value = serde_json::from_str(actual_config)
+            .unwrap_or_else(|_| serde_json::Value::String(actual_config.clone()));
+
+        let config_matches = match (&expected_json, &actual_json) {
+            (serde_json::Value::Object(exp), serde_json::Value::Object(act)) => {
+                exp.iter().all(|(k, v)| act.get(k) == Some(v))
+            }
+            _ => expected_json == actual_json,
+        };
+
+        assert!(
+            config_matches,
+            "Domain '{}' configuration mismatch: expected '{}', got '{}'",
+            expected.domain, expected.configuration, actual_config
+        );
+    }
+}

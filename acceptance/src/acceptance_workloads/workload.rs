@@ -123,11 +123,29 @@ pub struct SnapshotResult {
     pub metadata: serde_json::Value,
 }
 
+/// Result of executing a txn (SetTransaction) workload
+pub struct TxnResult {
+    /// The application ID queried
+    pub app_id: String,
+    /// The transaction version returned by the kernel (None if app_id not found)
+    pub txn_version: Option<i64>,
+}
+
+/// Result of executing a domain metadata workload
+pub struct DomainMetadataResult {
+    /// The domain name
+    pub domain: String,
+    /// The configuration (None if domain is removed/not found)
+    pub configuration: Option<String>,
+}
+
 /// Workload execution result
 #[allow(clippy::large_enum_variant)]
 pub enum WorkloadResult {
     Read(ReadResult),
     Snapshot(SnapshotResult),
+    Txn(TxnResult),
+    DomainMetadata(DomainMetadataResult),
 }
 
 /// Execute a workload specification and return the result
@@ -160,6 +178,28 @@ pub fn execute_workload(
             let result =
                 execute_snapshot_workload(engine, table_root, *version, timestamp.as_deref())?;
             Ok(WorkloadResult::Snapshot(result))
+        }
+        WorkloadSpec::Txn {
+            version, expected, ..
+        } => {
+            let result = execute_txn_workload(engine, table_root, *version, &expected.app_id)?;
+            Ok(WorkloadResult::Txn(result))
+        }
+        WorkloadSpec::DomainMetadata {
+            version, expected, ..
+        } => {
+            let result =
+                execute_domain_metadata_workload(engine, table_root, *version, &expected.domain)?;
+            Ok(WorkloadResult::DomainMetadata(result))
+        }
+        WorkloadSpec::Cdf {
+            start_version,
+            end_version,
+            ..
+        } => {
+            let result =
+                execute_cdf_workload(engine, table_root, start_version.unwrap_or(0), *end_version)?;
+            Ok(WorkloadResult::Read(result))
         }
         WorkloadSpec::Unsupported => Err(Error::generic(
             "Unsupported workload type in this harness build",
@@ -293,6 +333,82 @@ pub fn execute_snapshot_workload(
         version: snapshot.version(),
         protocol: protocol_value,
         metadata: metadata_value,
+    })
+}
+
+/// Execute a txn (SetTransaction) workload
+pub fn execute_txn_workload(
+    engine: Arc<dyn Engine>,
+    table_root: &Url,
+    version: Option<i64>,
+    app_id: &str,
+) -> DeltaResult<TxnResult> {
+    let mut builder = Snapshot::builder_for(table_root.clone());
+    if let Some(v) = version {
+        builder = builder.at_version(v as Version);
+    }
+    let snapshot = builder.build(engine.as_ref())?;
+
+    let txn_version = snapshot.get_app_id_version(app_id, engine.as_ref())?;
+
+    Ok(TxnResult {
+        app_id: app_id.to_string(),
+        txn_version,
+    })
+}
+
+/// Execute a domain metadata workload
+pub fn execute_domain_metadata_workload(
+    engine: Arc<dyn Engine>,
+    table_root: &Url,
+    version: Option<i64>,
+    domain: &str,
+) -> DeltaResult<DomainMetadataResult> {
+    let mut builder = Snapshot::builder_for(table_root.clone());
+    if let Some(v) = version {
+        builder = builder.at_version(v as Version);
+    }
+    let snapshot = builder.build(engine.as_ref())?;
+
+    let configuration = snapshot.get_domain_metadata_internal(domain, engine.as_ref())?;
+
+    Ok(DomainMetadataResult {
+        domain: domain.to_string(),
+        configuration,
+    })
+}
+
+/// Execute a CDF (Change Data Feed) workload
+pub fn execute_cdf_workload(
+    engine: Arc<dyn Engine>,
+    table_root: &Url,
+    start_version: i64,
+    end_version: Option<i64>,
+) -> DeltaResult<ReadResult> {
+    use delta_kernel::table_changes::TableChanges;
+
+    let start = start_version as Version;
+    let end = end_version.map(|v| v as Version);
+    let table_changes = TableChanges::try_new(table_root.clone(), engine.as_ref(), start, end)?;
+
+    use delta_kernel::engine::arrow_conversion::TryFromKernel;
+    let kernel_schema = table_changes.schema().clone();
+    let arrow_schema = delta_kernel::arrow::datatypes::Schema::try_from_kernel(&kernel_schema)
+        .map_err(|e| Error::generic(format!("Failed to convert CDF schema: {}", e)))?;
+    let schema = Arc::new(arrow_schema);
+
+    let scan = table_changes.into_scan_builder().build()?;
+    let batches: Vec<RecordBatch> = scan
+        .execute(engine)?
+        .map(|data| -> DeltaResult<_> {
+            let record_batch = data?.try_into_record_batch()?;
+            Ok(record_batch)
+        })
+        .try_collect()?;
+
+    Ok(ReadResult {
+        batches,
+        schema: Some(schema),
     })
 }
 

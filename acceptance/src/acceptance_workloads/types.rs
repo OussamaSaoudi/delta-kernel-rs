@@ -58,7 +58,38 @@ pub enum WorkloadSpec {
         #[serde(default)]
         expected: Option<SnapshotExpected>,
     },
-    /// Catch-all for workload types not supported in this build (txn, cdf, domain_metadata, etc.)
+    /// Transaction workload — validate SetTransaction
+    Txn {
+        #[serde(default)]
+        version: Option<i64>,
+        expected: ExpectedTxn,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+    },
+    /// Domain metadata workload
+    DomainMetadata {
+        #[serde(default)]
+        version: Option<i64>,
+        expected: ExpectedDomainMetadata,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+    },
+    /// CDF (Change Data Feed) workload — read table changes
+    Cdf {
+        #[serde(alias = "startVersion", alias = "start_version", default)]
+        start_version: Option<i64>,
+        #[serde(alias = "endVersion", alias = "end_version", default)]
+        end_version: Option<i64>,
+        #[serde(default)]
+        predicate: Option<String>,
+        #[serde(default)]
+        error: Option<ExpectedError>,
+    },
+    /// Catch-all for workload types not yet supported in this build.
     #[serde(other)]
     Unsupported,
 }
@@ -66,8 +97,10 @@ pub enum WorkloadSpec {
 impl WorkloadSpec {
     pub fn expected_error(&self) -> Option<&ExpectedError> {
         match self {
-            Self::Read { error, .. } | Self::Snapshot { error, .. } => error.as_ref(),
-            Self::Unsupported => None,
+            Self::Read { error, .. } | Self::Snapshot { error, .. } | Self::Cdf { error, .. } => {
+                error.as_ref()
+            }
+            Self::Txn { .. } | Self::DomainMetadata { .. } | Self::Unsupported => None,
         }
     }
 }
@@ -80,6 +113,25 @@ pub struct ExpectedError {
     pub error_code: String,
     #[serde(default)]
     pub error_message: Option<String>,
+}
+
+/// Expected transaction information
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExpectedTxn {
+    #[serde(alias = "appId")]
+    pub app_id: String,
+    #[serde(alias = "txnVersion")]
+    pub txn_version: i64,
+    #[serde(alias = "lastUpdated", default)]
+    pub last_updated: Option<i64>,
+}
+
+/// Expected domain metadata
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExpectedDomainMetadata {
+    pub domain: String,
+    pub configuration: String,
+    pub removed: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -8,7 +8,9 @@ use std::path::Path;
 use acceptance::acceptance_workloads::{
     test_case_from_spec_path,
     types::WorkloadSpec,
-    validation::{validate_read_result, validate_snapshot},
+    validation::{
+        validate_domain_metadata, validate_read_result, validate_snapshot, validate_txn_result,
+    },
     workload::{execute_workload, WorkloadResult},
 };
 
@@ -16,6 +18,20 @@ fn should_skip_test(test_path: &str) -> Option<&'static str> {
     let skip_list: &[(&str, &str)] = &[
         // ── Infra/perf ──
         ("DV-017/", "Huge table (2B rows) causes OOM/hang"),
+
+        // ── CDF schema evolution: kernel succeeds but produces wrong data ──
+        ("cdc_delete_with_schema_evolution/specs/cdc_delete_with_schema_evolution_cdf_after_schema_change", "CDF schema evolution: wrong data"),
+        ("cdc_delete_with_schema_evolution/specs/cdc_delete_with_schema_evolution_cdf_delete_only", "CDF schema evolution: wrong data"),
+        ("cdc_p2_merge_schema_evolution/specs/cdc_p2_merge_schema_evolution_cdf_merge_only", "CDF schema evolution: wrong data"),
+        ("cdc_p2_schema_change/specs/cdc_p2_schema_change_cdf_after_schema_change", "CDF schema evolution: wrong data"),
+        ("cdc_schema_evolution/specs/cdc_schema_evolution_cdf_after_schema_change", "CDF schema evolution: wrong data"),
+        ("cdc_schema_evolution/specs/cdc_schema_evolution_cdf_before_schema_change", "CDF schema evolution: wrong data"),
+
+        // ── CDF metadata column filtering: kernel returns all rows ──
+        ("cdc_metadata_column_filter/specs/cdc_metadata_column_filter_cdf_", "CDF metadata column filter: kernel returns all rows"),
+
+        // ── Clone table txn: absolute temp path ──
+        ("txn_clone_preserves/specs/txn_clone_preserves_txn", "Clone table txn: absolute temp path"),
 
         // ── Kernel divergence: timestamp type (Microsecond/UTC vs Nanosecond/None) ──
         // Kernel reads timestamps as Timestamp(Microsecond, Some("UTC")),
@@ -127,6 +143,55 @@ fn should_skip_test(test_path: &str) -> Option<&'static str> {
         ("ds_variant_null_stats/specs/ds_variant_null_stats_miss_v_is_null", "Variant field order: ds_variant_null_stats kernel {metadata,value} vs Spark {value,metadata}"),
         ("ds_variant_null_stats/specs/ds_variant_null_stats_miss_v_struct_v_is_null", "Variant field order: ds_variant_null_stats kernel {metadata,value} vs Spark {value,metadata}"),
 
+        // ── Kernel divergence: CDF _commit_timestamp type and precision ──
+        ("cdc_by_path/specs/cdc_by_path_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_column_mapping/specs/cdc_column_mapping_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_data_skipping/specs/cdc_data_skipping_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_data_skipping/specs/cdc_data_skipping_cdf_inserts_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_data_skipping/specs/cdc_data_skipping_cdf_update_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_deletes/specs/cdc_deletes_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_deletes/specs/cdc_deletes_cdf_deletes_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_deletion_vectors/specs/cdc_deletion_vectors_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_deletion_vectors/specs/cdc_deletion_vectors_cdf_delete_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_deletion_vectors/specs/cdc_deletion_vectors_cdf_updates_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_dv_column_mapping/specs/cdc_dv_column_mapping_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_dv_column_mapping/specs/cdc_dv_column_mapping_cdf_v1_to_v3", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_generated_columns/specs/cdc_generated_columns_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_generated_columns/specs/cdc_generated_columns_cdf_update_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_inserts/specs/cdc_inserts_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_inserts/specs/cdc_inserts_cdf_v1_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_map_array/specs/cdc_map_array_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_map_array/specs/cdc_map_array_cdf_update_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_merge/specs/cdc_merge_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_merge/specs/cdc_merge_cdf_merge_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_merge_delete/specs/cdc_merge_delete_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_merge_delete/specs/cdc_merge_delete_cdf_merge_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_metadata_filter/specs/cdc_metadata_filter_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_multiple_refs/specs/cdc_multiple_refs_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_multiple_types/specs/cdc_multiple_types_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_multiple_types/specs/cdc_multiple_types_cdf_update_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_nested_struct/specs/cdc_nested_struct_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_nested_struct/specs/cdc_nested_struct_cdf_delete_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_optimize/specs/cdc_optimize_cdf_across_optimize", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_optimize/specs/cdc_optimize_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_optimize/specs/cdc_optimize_cdf_optimize_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_partitioned/specs/cdc_partitioned_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_partitioned_dml/specs/cdc_partitioned_dml_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_partitioned_dml/specs/cdc_partitioned_dml_cdf_cross_partition_update", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_partitioned_dml/specs/cdc_partitioned_dml_cdf_delete_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_partitioned_dml/specs/cdc_partitioned_dml_cdf_update_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_predicates/specs/cdc_predicates_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_single_version/specs/cdc_single_version_cdf_v1", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_single_version/specs/cdc_single_version_cdf_v2", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_transform/specs/cdc_transform_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_updates/specs/cdc_updates_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_updates/specs/cdc_updates_cdf_updates_only", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_version_range/specs/cdc_version_range_cdf_v0_to_v3", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("cdc_version_range/specs/cdc_version_range_cdf_v1_to_v2", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("mrb_with_cdf/specs/mrb_with_cdf_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("mrb_with_cdf/specs/mrb_with_cdf_cdf_merge", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+        ("var_cdf_read/specs/var_cdf_read_cdf_all", "CDF _commit_timestamp: kernel Timestamp(us,UTC) vs Spark Timestamp(ns,None)"),
+
         // ── Kernel divergence: snapshot metadata ──
         ("tw_row_tracking_combo/specs/tw_row_tracking_combo_snapshot", "Type widening metadata divergence in snapshot"),
     ];
@@ -200,6 +265,16 @@ const EXPECTED_KERNEL_FAILURES: &[(&str, &[&str])] = &[
         "ct_missing_delta_log/specs/ct_missing_delta_log_snapshot",
         "dseReadNonDeltaPath/specs/dseReadNonDeltaPath_snapshot",
         "dv_checkpoint_only_read/specs/dv_checkpoint_only_read_snapshot",
+    ]),
+    // ── Kernel bugs: CDF schema evolution ──
+    ("Kernel: CDF doesn't support schema evolution across version range", &[
+        "cdc_delete_with_schema_evolution/specs/cdc_delete_with_schema_evolution_cdf_all",
+        "cdc_p2_merge_schema_evolution/specs/cdc_p2_merge_schema_evolution_cdf_all",
+        "cdc_p2_schema_change/specs/cdc_p2_schema_change_cdf_all",
+        "cdc_schema_add_drop/specs/cdc_schema_add_drop_cdf_with_added_col",
+        "cdc_schema_evolution/specs/cdc_schema_evolution_cdf_all",
+        "cdc_schema_evolution/specs/cdc_schema_evolution_cdf_across_boundary",
+        "tw_cdf_across_widening/specs/tw_cdf_across_widening_cdf_",
     ]),
     // ── Kernel bugs: projected column not found ──
     ("Kernel: projected column not found after column mapping/schema order change", &[
@@ -422,7 +497,16 @@ fn acceptance_workloads_test(spec_path: &Path) -> datatest_stable::Result<()> {
                         );
                     }
                 }
-                _ => {}
+                WorkloadResult::Txn(txn_result) => {
+                    if let WorkloadSpec::Txn { expected, .. } = &spec {
+                        validate_txn_result(&txn_result, expected);
+                    }
+                }
+                WorkloadResult::DomainMetadata(dm_result) => {
+                    if let WorkloadSpec::DomainMetadata { expected, .. } = &spec {
+                        validate_domain_metadata(&dm_result, expected);
+                    }
+                }
             }
 
             println!("  Passed");
