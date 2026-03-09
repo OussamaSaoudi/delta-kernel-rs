@@ -775,7 +775,7 @@ async fn execute_existing_table_ops(
         && ops.iter().any(|op| matches!(op, WriteOp::Append { .. }));
 
     // Collect all paths we need to remove (from delete and rewrite ops)
-    let mut paths_to_remove: Vec<String> = Vec::new();
+    let mut paths_to_remove: std::collections::HashSet<String> = std::collections::HashSet::new();
     for op in ops {
         match op {
             WriteOp::Delete { paths } => {
@@ -1081,6 +1081,7 @@ fn read_parquet_as_arrow(parquet_path: &Path) -> DeltaResult<ArrowEngineData> {
         .map_err(|e| Error::generic(format!("Failed to open parquet: {}", e)))?;
     let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| Error::generic(format!("Failed to create parquet reader: {}", e)))?;
+    let parquet_schema = builder.schema().clone();
     let reader = builder
         .build()
         .map_err(|e| Error::generic(format!("Failed to build parquet reader: {}", e)))?;
@@ -1093,7 +1094,9 @@ fn read_parquet_as_arrow(parquet_path: &Path) -> DeltaResult<ArrowEngineData> {
     }
 
     if batches.is_empty() {
-        return Err(Error::generic("Empty parquet file"));
+        // Empty parquet files (0 rows) are valid per the Parquet spec.
+        let empty = RecordBatch::new_empty(parquet_schema);
+        return Ok(ArrowEngineData::new(empty));
     }
 
     let schema = batches[0].schema();
