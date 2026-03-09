@@ -154,6 +154,31 @@ pub enum WorkloadSpec {
         #[serde(default)]
         error: Option<ExpectedError>,
     },
+    /// Write workload — verifies the post-write table state by reading at the result version.
+    ///
+    /// The delta/ directory already contains the full table (all versions including the write).
+    /// The harness reads at `result_version` and validates against expected data.
+    /// It does NOT perform any actual write operation.
+    Write {
+        /// Write operation type (e.g. "INSERT", "MERGE", "PROTOCOL_UPGRADE", "DELETE")
+        #[serde(default)]
+        operation: Option<String>,
+        /// Table version before the write
+        #[serde(default)]
+        initial_version: Option<i64>,
+        /// Table version after the write (the version to read and validate)
+        #[serde(default)]
+        result_version: Option<i64>,
+        /// SQL statement that was executed (documentation only)
+        #[serde(default)]
+        operation_sql: Option<String>,
+        /// Name of the write workload
+        #[serde(default)]
+        name: Option<String>,
+        /// Description of what was tested
+        #[serde(default)]
+        description: Option<String>,
+    },
 }
 
 impl WorkloadSpec {
@@ -168,7 +193,15 @@ impl WorkloadSpec {
             Self::Read { error, .. } | Self::Snapshot { error, .. } | Self::Cdf { error, .. } => {
                 error.as_ref()
             }
-            Self::Txn { .. } | Self::DomainMetadata { .. } => None,
+            Self::Txn { .. } | Self::DomainMetadata { .. } | Self::Write { .. } => None,
+        }
+    }
+
+    /// Whether this workload has a predicate filter
+    pub fn has_predicate(&self) -> bool {
+        match self {
+            Self::Read { predicate, .. } => predicate.is_some(),
+            _ => false,
         }
     }
 
@@ -185,7 +218,6 @@ impl WorkloadSpec {
 
 /// Expected error specification
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ExpectedError {
     /// Error code (e.g. "DELTA_CDC_NOT_ALLOWED_ON_NON_CDC_TABLE")
     #[serde(alias = "errorCode", alias = "error_code")]
@@ -305,4 +337,226 @@ pub struct ExpectedMetadata {
 pub struct ActualMeta {
     pub actual_row_count: u64,
     pub matches_expected: bool,
+}
+
+// ── Structured Write Spec types ─────────────────────────────────────────────
+
+/// Structured write specification from `write.json`.
+/// Contains commits with structured ops (for kernel) and SQL (for SQL engines),
+/// plus expected post-write state.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WriteSpec {
+    /// Must be "write"
+    #[serde(rename = "type")]
+    pub spec_type: String,
+    /// Ordered list of commits to apply
+    pub commits: Vec<WriteCommit>,
+    /// Expected state after all commits
+    #[serde(default)]
+    pub expected: Option<WriteExpectedState>,
+}
+
+/// A single commit in a write spec.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WriteCommit {
+    /// Version this commit targets
+    #[serde(default)]
+    pub version: Option<i64>,
+    /// SQL for SQL engines (optional)
+    #[serde(default)]
+    pub sql: Option<String>,
+    /// Delta operation name from commitInfo
+    #[serde(default)]
+    pub operation: Option<String>,
+    /// Structured operations for kernel execution
+    #[serde(default)]
+    pub ops: Vec<WriteOp>,
+}
+
+/// Structured write operation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "op")]
+pub enum WriteOp {
+    /// Create a new table
+    #[serde(rename = "create")]
+    Create {
+        #[serde(default)]
+        schema: Option<serde_json::Value>,
+        #[serde(default)]
+        partition_columns: Option<Vec<String>>,
+        #[serde(default)]
+        properties: Option<HashMap<String, String>>,
+        #[serde(default)]
+        data: Option<WriteData>,
+    },
+    /// Replace table definition and data
+    #[serde(rename = "replace")]
+    Replace {
+        #[serde(default)]
+        schema: Option<serde_json::Value>,
+        #[serde(default)]
+        partition_columns: Option<Vec<String>>,
+        #[serde(default)]
+        properties: Option<HashMap<String, String>>,
+        #[serde(default)]
+        data: Option<WriteData>,
+    },
+    /// Append data files
+    #[serde(rename = "append")]
+    Append {
+        data: String,
+        #[serde(default)]
+        partition_values: Option<HashMap<String, Option<String>>>,
+    },
+    /// Remove whole files by path
+    #[serde(rename = "delete")]
+    Delete { paths: Vec<String> },
+    /// Replace specific files (remove old + add new)
+    #[serde(rename = "rewrite")]
+    Rewrite {
+        paths: Vec<String>,
+        data: WriteData,
+        #[serde(default)]
+        partition_values: Option<HashMap<String, Option<String>>>,
+    },
+    /// Set full deletion vector state for a file
+    #[serde(rename = "setDeletes")]
+    SetDeletes {
+        path: String,
+        row_indexes: Vec<u64>,
+    },
+    /// Add rows to deletion vector
+    #[serde(rename = "addDeletes")]
+    AddDeletes {
+        path: String,
+        row_indexes: Vec<u64>,
+    },
+    /// Remove rows from deletion vector (undo deletes)
+    #[serde(rename = "restoreRows")]
+    RestoreRows {
+        path: String,
+        row_indexes: Vec<u64>,
+    },
+    /// Remove deletion vector entirely
+    #[serde(rename = "removeDeletes")]
+    RemoveDeletes { path: String },
+    /// Update table schema
+    #[serde(rename = "updateSchema")]
+    UpdateSchema {
+        schema: serde_json::Value,
+    },
+    /// Update table properties
+    #[serde(rename = "updateProperties")]
+    UpdateProperties {
+        #[serde(default)]
+        set: Option<HashMap<String, String>>,
+        #[serde(default)]
+        unset: Option<Vec<String>>,
+    },
+    /// Set clustering columns
+    #[serde(rename = "setClustering")]
+    SetClustering { columns: Vec<String> },
+    /// Set application transaction version
+    #[serde(rename = "setTransaction")]
+    SetTransaction {
+        app_id: String,
+        version: i64,
+    },
+    /// Set domain metadata
+    #[serde(rename = "setDomainMetadata")]
+    SetDomainMetadata {
+        domain: String,
+        configuration: String,
+    },
+    /// Remove domain metadata
+    #[serde(rename = "removeDomainMetadata")]
+    RemoveDomainMetadata { domain: String },
+}
+
+/// Data reference — can be a single file path or a list of file paths.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum WriteData {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl WriteData {
+    pub fn paths(&self) -> Vec<&str> {
+        match self {
+            WriteData::Single(s) => vec![s.as_str()],
+            WriteData::Multiple(v) => v.iter().map(|s| s.as_str()).collect(),
+        }
+    }
+}
+
+/// Expected state after all write commits.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WriteExpectedState {
+    #[serde(default)]
+    pub version: Option<i64>,
+    #[serde(default)]
+    pub protocol: Option<WriteExpectedProtocol>,
+    #[serde(default)]
+    pub metadata: Option<WriteExpectedMetadata>,
+    #[serde(default)]
+    pub files: Option<WriteExpectedFiles>,
+    #[serde(default)]
+    pub deletion_vectors: Option<WriteExpectedDVs>,
+    #[serde(default)]
+    pub domain_metadata: Option<Vec<WriteExpectedDomainMd>>,
+    #[serde(default)]
+    pub transactions: Option<Vec<WriteExpectedTxn>>,
+    #[serde(default)]
+    pub error: Option<WriteExpectedError>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WriteExpectedProtocol {
+    pub min_reader_version: i32,
+    pub min_writer_version: i32,
+    #[serde(default)]
+    pub reader_features: Option<Vec<String>>,
+    #[serde(default)]
+    pub writer_features: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WriteExpectedMetadata {
+    #[serde(default)]
+    pub partition_columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub configuration: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WriteExpectedFiles {
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WriteExpectedDVs {
+    pub count: i64,
+    #[serde(default)]
+    pub total_deleted_rows: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WriteExpectedDomainMd {
+    pub domain: String,
+    pub configuration: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WriteExpectedTxn {
+    pub app_id: String,
+    pub version: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WriteExpectedError {
+    #[serde(rename = "type")]
+    pub error_type: String,
+    #[serde(default)]
+    pub message_contains: Option<String>,
 }

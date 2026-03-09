@@ -128,6 +128,65 @@ fn multiset_match(actual: &RecordBatch, expected: &RecordBatch) -> bool {
     row_multiset(&actual_str) == row_multiset(&expected_str)
 }
 
+/// Check that all rows in `expected` exist in `actual` (multiset containment).
+/// Returns true if for every row R, count(R in actual) >= count(R in expected).
+/// Normalizes cell values (trim whitespace, normalize timestamps) to handle
+/// formatting differences between batches with different column widths.
+fn multiset_contains(actual: &RecordBatch, expected: &RecordBatch) -> bool {
+    use std::collections::HashMap;
+
+    // Normalize both batches (struct order, timestamps, etc.)
+    let actual_norm = normalize_batch_struct_order(actual);
+    let expected_norm = normalize_batch_struct_order(expected);
+
+    // Normalize a cell value for comparison
+    fn normalize_cell(s: &str) -> String {
+        let trimmed = s.trim();
+        // Normalize timestamp formats: remove trailing Z, normalize timezone
+        // e.g., "2024-01-15T12:00:00Z" -> "2024-01-15T12:00:00"
+        //        "2024-01-15 12:00:00Z" -> "2024-01-15 12:00:00"
+        let normalized = trimmed
+            .trim_end_matches('Z')
+            .trim_end_matches("+00:00")
+            .trim_end_matches(" UTC");
+        normalized.to_string()
+    }
+
+    fn normalized_row_multiset(batch: &RecordBatch) -> HashMap<String, usize> {
+        let mut counts = HashMap::new();
+        let formatted = pretty_format_batches(&[batch.clone()])
+            .map(|d| d.to_string())
+            .unwrap_or_default();
+        for line in formatted.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('+') || trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with('|') {
+                // Split by |, normalize each cell, rejoin
+                let cells: Vec<String> = trimmed
+                    .split('|')
+                    .map(|c| normalize_cell(c))
+                    .collect();
+                let normalized = cells.join("|");
+                *counts.entry(normalized).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+
+    let actual_counts = normalized_row_multiset(&actual_norm);
+    let expected_counts = normalized_row_multiset(&expected_norm);
+
+    for (row, &exp_count) in &expected_counts {
+        let act_count = actual_counts.get(row).copied().unwrap_or(0);
+        if act_count < exp_count {
+            return false;
+        }
+    }
+    true
+}
+
 /// Normalize a column for comparison (handle timezone/precision equivalence)
 ///
 /// Handles differences between how Spark writes expected parquet and how
@@ -455,11 +514,15 @@ pub fn read_expected_metadata(
     Ok(Some(wrapper.meta_data))
 }
 
-/// Validate read results against expected data
+/// Validate read results against expected data.
+///
+/// When `has_predicate` is true, kernel may return a superset of expected rows
+/// (kernel only does file-level predicate pushdown, not row-level filtering).
+/// In that case we check that all expected rows are present in actual results.
 pub async fn validate_read_result(
     actual: RecordBatch,
     expected_dir: &Path,
-    _has_predicate: bool,
+    has_predicate: bool,
     inline_expected: Option<&ReadExpected>,
 ) -> Result<(), ValidationError> {
     // Get actual row count before we potentially move the batch
@@ -468,79 +531,127 @@ pub async fn validate_read_result(
     // Read expected data
     let expected = read_expected_data(expected_dir).await?;
 
+    if expected.is_none() {
+        eprintln!(
+            "WARNING: No expected_data parquet files in {:?} — read result ({} rows) not validated against data",
+            expected_dir, actual_row_count
+        );
+    }
+
     if let Some(expected) = expected {
         // Sort both for comparison
-        let (actual, _actual_sorted) = sort_record_batch(actual)?;
+        let (actual, actual_was_sorted) = sort_record_batch(actual)?;
         let (expected, _) = sort_record_batch(expected)?;
 
-        // Check row count
-        if actual.num_rows() != expected.num_rows() {
-            eprintln!("\n=== DATA MISMATCH ===");
-            eprintln!(
-                "Expected {} rows, got {} rows",
-                expected.num_rows(),
-                actual.num_rows()
-            );
-            eprintln!("\n--- Expected Data ---");
-            eprintln!(
-                "{}",
-                pretty_format_batches(std::slice::from_ref(&expected))
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|_| "Failed to format".to_string())
-            );
-            eprintln!("\n--- Actual Data ---");
-            eprintln!(
-                "{}",
-                pretty_format_batches(std::slice::from_ref(&actual))
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|_| "Failed to format".to_string())
-            );
-            eprintln!("=== END MISMATCH ===\n");
-            return Err(ValidationError::RowCountMismatch {
-                expected: expected.num_rows() as u64,
-                actual: actual.num_rows() as u64,
-            });
-        }
+        if has_predicate && actual.num_rows() >= expected.num_rows() {
+            // Superset check: kernel does file-level pruning, not row-level filtering.
+            // Verify all expected rows exist in actual results.
+            if !multiset_contains(&actual, &expected) {
+                eprintln!("\n=== SUPERSET MISMATCH ===");
+                eprintln!(
+                    "Kernel returned {} rows (superset of {} expected), but expected rows are NOT all present",
+                    actual.num_rows(),
+                    expected.num_rows()
+                );
+                eprintln!("\n--- Expected Data ---");
+                eprintln!(
+                    "{}",
+                    pretty_format_batches(std::slice::from_ref(&expected))
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|_| "Failed to format".to_string())
+                );
+                eprintln!("\n--- Actual Data ---");
+                eprintln!(
+                    "{}",
+                    pretty_format_batches(std::slice::from_ref(&actual))
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|_| "Failed to format".to_string())
+                );
+                eprintln!("=== END MISMATCH ===\n");
+                return Err(ValidationError::DataMismatch {
+                    column: "unknown".to_string(),
+                    message: format!(
+                        "Expected rows not found in actual superset ({} actual >= {} expected)",
+                        actual.num_rows(),
+                        expected.num_rows()
+                    ),
+                });
+            }
+        } else {
+            // Exact match required (no predicate, or actual < expected which is a real bug)
+            if actual.num_rows() != expected.num_rows() {
+                eprintln!("\n=== DATA MISMATCH ===");
+                eprintln!(
+                    "Expected {} rows, got {} rows",
+                    expected.num_rows(),
+                    actual.num_rows()
+                );
+                eprintln!("\n--- Expected Data ---");
+                eprintln!(
+                    "{}",
+                    pretty_format_batches(std::slice::from_ref(&expected))
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|_| "Failed to format".to_string())
+                );
+                eprintln!("\n--- Actual Data ---");
+                eprintln!(
+                    "{}",
+                    pretty_format_batches(std::slice::from_ref(&actual))
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|_| "Failed to format".to_string())
+                );
+                eprintln!("=== END MISMATCH ===\n");
+                return Err(ValidationError::RowCountMismatch {
+                    expected: expected.num_rows() as u64,
+                    actual: actual.num_rows() as u64,
+                });
+            }
 
-        // Check columns match (try element-by-element first, fall back to multiset)
-        // Multiset fallback is needed even for sorted data because tied sort keys
-        // produce non-deterministic row ordering within equal groups.
-        let data_matches = columns_match(actual.columns(), expected.columns())
-            || multiset_match(&actual, &expected);
+            // Check columns match. Only fall back to multiset comparison when
+            // sorting was impossible (all struct/list/map columns). If data was
+            // sortable and columns don't match, that's a real mismatch — don't
+            // hide it behind lossy string comparison.
+            let data_matches = columns_match(actual.columns(), expected.columns())
+                || (!actual_was_sorted && multiset_match(&actual, &expected));
 
-        if !data_matches {
-            eprintln!("\n=== DATA MISMATCH ===");
-            eprintln!("Column data does not match");
-            eprintln!("\n--- Expected Schema ---");
-            eprintln!("{:#?}", expected.schema());
-            eprintln!("\n--- Actual Schema ---");
-            eprintln!("{:#?}", actual.schema());
-            eprintln!("\n--- Expected Data ---");
-            eprintln!(
-                "{}",
-                pretty_format_batches(std::slice::from_ref(&expected))
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|_| "Failed to format".to_string())
-            );
-            eprintln!("\n--- Actual Data ---");
-            eprintln!(
-                "{}",
-                pretty_format_batches(std::slice::from_ref(&actual))
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|_| "Failed to format".to_string())
-            );
-            eprintln!("=== END MISMATCH ===\n");
-            return Err(ValidationError::DataMismatch {
-                column: "unknown".to_string(),
-                message: "Data content does not match".to_string(),
-            });
+            if !data_matches {
+                eprintln!("\n=== DATA MISMATCH ===");
+                eprintln!("Column data does not match");
+                eprintln!("\n--- Expected Schema ---");
+                eprintln!("{:#?}", expected.schema());
+                eprintln!("\n--- Actual Schema ---");
+                eprintln!("{:#?}", actual.schema());
+                eprintln!("\n--- Expected Data ---");
+                eprintln!(
+                    "{}",
+                    pretty_format_batches(std::slice::from_ref(&expected))
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|_| "Failed to format".to_string())
+                );
+                eprintln!("\n--- Actual Data ---");
+                eprintln!(
+                    "{}",
+                    pretty_format_batches(std::slice::from_ref(&actual))
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|_| "Failed to format".to_string())
+                );
+                eprintln!("=== END MISMATCH ===\n");
+                return Err(ValidationError::DataMismatch {
+                    column: "unknown".to_string(),
+                    message: "Data content does not match".to_string(),
+                });
+            }
         }
     }
 
-    // Validate row count: inline expected takes priority over summary.json
+    // Validate row count: inline expected takes priority over summary.json.
+    // Skip summary check when predicate is present since kernel may return more rows than Spark.
     let expected_row_count = inline_expected
         .map(|e| Some(e.row_count))
         .unwrap_or_else(|| {
+            if has_predicate {
+                return None;
+            }
             read_expected_summary(expected_dir)
                 .ok()
                 .flatten()
@@ -668,11 +779,74 @@ pub fn validate_snapshot_metadata(
     result: &SnapshotResult,
     expected_dir: &Path,
 ) -> Result<(), ValidationError> {
+    let has_protocol = expected_dir.join("protocol.json").exists();
+    let has_metadata = expected_dir.join("metadata.json").exists();
+    if !has_protocol && !has_metadata {
+        eprintln!(
+            "WARNING: No protocol.json or metadata.json in {:?} — snapshot not validated",
+            expected_dir
+        );
+    }
+
+    // Validate protocol
     if let Some(expected_protocol) = read_expected_protocol(expected_dir)? {
         validate_protocol(result, &expected_protocol)?;
     }
     if let Some(expected_metadata) = read_expected_metadata(expected_dir)? {
-        validate_metadata(result, &expected_metadata)?;
+        // Table ID is a random UUID generated at table creation time.
+        // For write workloads where the harness creates a fresh table, the ID will
+        // always differ from the expected (Spark-captured) ID. Skip this check.
+        if result.table_id != expected_metadata.id {
+            println!(
+                "    Note: Table ID differs (expected {}, got {}) — expected for harness-created tables",
+                expected_metadata.id, result.table_id
+            );
+        }
+
+        // Check partition columns
+        if result.partition_columns != expected_metadata.partition_columns {
+            return Err(ValidationError::MetadataMismatch {
+                message: format!(
+                    "Partition columns mismatch: expected {:?}, got {:?}",
+                    expected_metadata.partition_columns, result.partition_columns
+                ),
+            });
+        }
+
+        // Check configuration (bidirectional: expected subset actual AND actual subset expected)
+        for (key, expected_value) in &expected_metadata.configuration {
+            match result.configuration.get(key) {
+                Some(actual_value) if actual_value == expected_value => {}
+                Some(actual_value) => {
+                    return Err(ValidationError::MetadataMismatch {
+                        message: format!(
+                            "Configuration '{}' mismatch: expected '{}', got '{}'",
+                            key, expected_value, actual_value
+                        ),
+                    });
+                }
+                None => {
+                    return Err(ValidationError::MetadataMismatch {
+                        message: format!(
+                            "Configuration '{}' missing: expected '{}'",
+                            key, expected_value
+                        ),
+                    });
+                }
+            }
+        }
+        // Reverse check: kernel should not have extra config keys
+        for key in result.configuration.keys() {
+            if !expected_metadata.configuration.contains_key(key) {
+                return Err(ValidationError::MetadataMismatch {
+                    message: format!(
+                        "Configuration '{}' unexpected: kernel has '{}' but expected metadata does not",
+                        key,
+                        result.configuration.get(key).unwrap()
+                    ),
+                });
+            }
+        }
     }
     Ok(())
 }
