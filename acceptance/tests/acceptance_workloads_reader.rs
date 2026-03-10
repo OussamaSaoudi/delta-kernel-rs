@@ -254,6 +254,22 @@ const EXPECTED_KERNEL_FAILURES: &[(&str, &[&str])] = &[
         "tt_blocked_beyond_retention/specs/tt_blocked_beyond_retention_error",
         "tt_after_vacuum/specs/tt_after_vacuum_error",
     ]),
+    // ── Harness limitations: predicate parser gaps ──
+    ("Harness: predicate parser doesn't support CAST expressions", &[
+        "pve_byte_partition/specs/pve_byte_partition_filter_",
+        "pve_float_partition/specs/pve_float_partition_filter_",
+        "pve_short_partition/specs/pve_short_partition_filter_",
+        "dpReadPartitionTimestamp/specs/dpReadPartitionTimestamp_filterTs",
+    ]),
+    ("Harness: predicate parser doesn't support DATE/TIMESTAMP typed literals", &[
+        "dsReadDateType/specs/dsReadDateType_readAfterJune",
+        "part_date_type/specs/part_date_type_filter_date",
+        "pve_timestamp_partition/specs/pve_timestamp_partition_filter_",
+        "pve_timestamp_ntz_partition/specs/pve_timestamp_ntz_partition_filter_",
+    ]),
+    ("Harness: predicate parser doesn't support LIKE operator", &[
+        "se_rename_pred/specs/se_rename_pred_pred_full_name_like",
+    ]),
     // ── Capture bugs ──
     ("Capture bug: clone table AddFile references absolute temp path", &[
         "ic_022_clone_basic/specs/ic_022_clone_basic_readAll",
