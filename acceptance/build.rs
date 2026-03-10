@@ -94,10 +94,12 @@ fn extract_acceptance_workloads() {
         return;
     }
 
-    let tarball_file = File::open(&tarball_path).expect("Failed to open acceptance_workloads tarball");
+    let tarball_file =
+        File::open(&tarball_path).expect("Failed to open acceptance_workloads tarball");
     let decoder = GzDecoder::new(BufReader::new(tarball_file));
     let mut archive = Archive::new(decoder);
-    std::fs::create_dir_all(&output_dir).expect("Failed to create acceptance_workloads output directory");
+    std::fs::create_dir_all(&output_dir)
+        .expect("Failed to create acceptance_workloads output directory");
     archive
         .unpack(&output_dir)
         .expect("Failed to unpack acceptance_workloads tarball");
