@@ -1025,3 +1025,29 @@ fn test_sql_where() {
     expect_eq!(null_filter.eval_sql_where(pred), Some(false), "{pred}");
     expect_eq!(empty_filter.eval_sql_where(pred), None, "{pred}");
 }
+
+/// Demonstrates bug: AND([NULL]) returns Some(false) instead of None under SQL WHERE semantics.
+///
+/// Partition-only predicates produce AND([NULL]) since partition columns have no stats.
+/// eval_sql_where treats NULL literal as FALSE, causing all row groups to be skipped.
+#[test]
+#[ignore = "Known bug: NULL literals in data skipping predicates evaluate to FALSE"]
+fn test_sql_where_and_null_literal_bug() {
+    use crate::expressions::JunctionPredicateOp;
+
+    let filter = DefaultKernelPredicateEvaluator::from(UnimplementedColumnResolver);
+
+    // Predicate produced by as_checkpoint_skipping_predicate for partition-only predicates
+    let null_literal = Pred::BooleanExpression(Expr::Literal(Scalar::Null(DataType::BOOLEAN)));
+    let pred = Pred::Junction(crate::expressions::JunctionPredicate {
+        op: JunctionPredicateOp::And,
+        preds: vec![null_literal],
+    });
+
+    // BUG: Returns Some(false), should return None (can't determine -> don't skip)
+    assert_eq!(
+        filter.eval_sql_where(&pred),
+        None,
+        "AND([NULL]) should return None, not Some(false)"
+    );
+}

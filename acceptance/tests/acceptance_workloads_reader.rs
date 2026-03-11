@@ -26,6 +26,7 @@ fn should_skip_test(test_path: &str) -> Option<&'static str> {
         ("dcscStructWithSpecialTypes/specs/dcscStructWithSpecialTypes_read_by_date", "Timestamp type: dcscStructWithSpecialTypes read has Timestamp(us, UTC) vs Timestamp(ns, None)"),
         ("dcscStructWithSpecialTypes/specs/dcscStructWithSpecialTypes_read_all", "Timestamp type: dcscStructWithSpecialTypes read has Timestamp(us, UTC) vs Timestamp(ns, None)"),
         ("dpReadPartitionTimestamp/specs/dpReadPartitionTimestamp_readAll", "Timestamp type: dpReadPartitionTimestamp read has Timestamp(us, UTC) vs Timestamp(ns, None)"),
+        ("dpReadPartitionTimestamp/specs/dpReadPartitionTimestamp_filterTs", "Timestamp type: dpReadPartitionTimestamp filter has Timestamp(us, UTC) vs session-timezone interpretation mismatch"),
         ("dsReadMultipleTypes/specs/dsReadMultipleTypes_readAll", "Timestamp type: dsReadMultipleTypes read has Timestamp(us, UTC) vs Timestamp(ns, None)"),
         ("dsReadTimestampType/specs/dsReadTimestampType_readAll", "Timestamp type: dsReadTimestampType read has Timestamp(us, UTC) vs Timestamp(ns, None)"),
         ("ds_datetime/specs/ds_datetime_hit_dt_eq", "Timestamp type: ds_datetime predicate hit has Timestamp(us, UTC) vs Timestamp(ns, None)"),
@@ -53,6 +54,8 @@ fn should_skip_test(test_path: &str) -> Option<&'static str> {
         ("ntz_mixed_tz_ntz/specs/ntz_mixed_tz_ntz_filter_ntz_col", "Timestamp type: ntz_mixed_tz_ntz filter has Timestamp(us, UTC) vs Timestamp(ns, None)"),
         ("ntz_mixed_tz_ntz/specs/ntz_mixed_tz_ntz_full_scan", "Timestamp type: ntz_mixed_tz_ntz read has Timestamp(us, UTC) vs Timestamp(ns, None)"),
         ("pve_timestamp_partition/specs/pve_timestamp_partition_read_all", "Timestamp type: pve_timestamp_partition read has Timestamp(us, UTC) vs Timestamp(ns, None)"),
+        ("pve_timestamp_partition/specs/pve_timestamp_partition_filter_", "Timestamp type: pve_timestamp_partition filter has session-timezone interpretation mismatch"),
+        ("pve_timestamp_ntz_partition/specs/pve_timestamp_ntz_partition_filter_", "Timestamp type: pve_timestamp_ntz_partition filter has session-timezone interpretation mismatch"),
         ("restoreCheckData/specs/restoreCheckData_filterBoolean", "Timestamp type: restoreCheckData filter has Timestamp(us, UTC) vs Timestamp(ns, None)"),
         ("restoreCheckData/specs/restoreCheckData_filterDecimal", "Timestamp type: restoreCheckData filter has Timestamp(us, UTC) vs Timestamp(ns, None)"),
         ("restoreCheckData/specs/restoreCheckData_readAll", "Timestamp type: restoreCheckData read has Timestamp(us, UTC) vs Timestamp(ns, None)"),
@@ -165,14 +168,17 @@ fn should_skip_test(test_path: &str) -> Option<&'static str> {
         ("cm_deeply_nested/specs/cm_deeply_nested_read_all", "Column mapping metadata on nested struct fields"),
         ("cm_deeply_nested/specs/cm_deeply_nested_project_data", "Column mapping metadata on nested struct fields"),
         ("cm_nested_columns/specs/cm_nested_columns_read_all", "Column mapping metadata on nested struct fields"),
+        ("cm_nested_columns/specs/cm_nested_columns_filter_nested", "Column mapping metadata on nested struct fields"),
         ("cm_nested_struct_id/specs/cm_nested_struct_id_project_info", "Column mapping metadata on nested struct fields"),
         ("cm_nested_struct_id/specs/cm_nested_struct_id_read_all", "Column mapping metadata on nested struct fields"),
         ("cm_nested_struct_name/specs/cm_nested_struct_name_project_struct_only", "Column mapping metadata on nested struct fields"),
         ("cm_nested_struct_name/specs/cm_nested_struct_name_read_all", "Column mapping metadata on nested struct fields"),
+        ("cm_nested_struct_name/specs/cm_nested_struct_name_filter_nested_field", "Column mapping metadata on nested struct fields"),
         ("cm_nested_rename_3_levels/specs/cm_nested_rename_3_levels_read_all", "Column mapping metadata on nested struct fields"),
         ("cm_projection_complex_types/specs/cm_projection_complex_types_read_all", "Column mapping metadata on nested struct fields"),
         ("cm_projection_complex_types/specs/cm_projection_complex_types_project_struct_only", "Column mapping metadata on nested struct fields"),
         ("ice_complex_types/specs/ice_complex_types_read_all", "Column mapping metadata on nested struct fields"),
+        ("ice_complex_types/specs/ice_complex_types_filter_id", "Column mapping metadata on nested struct fields"),
 
         // ── Kernel divergence: negative version handling ──
         // Kernel succeeds when reading at version -1, Spark returns DELTA_TABLE_RESTORE_VERSION_INVALID
@@ -371,22 +377,61 @@ const EXPECTED_KERNEL_FAILURES: &[(&str, &[&str])] = &[
         "Kernel: _metadata.file_path column projection not supported",
         &["DV-003/specs/DV-003_metadata_file_path"],
     ),
+    // ── Harness limitations: predicate parser gaps ──
+    (
+        "Harness: predicate parser doesn't support LIKE operator",
+        &["se_rename_pred/specs/se_rename_pred_pred_full_name_like"],
+    ),
+    // ── Kernel data skipping limitations ──
+    (
+        "Kernel: predicate references column not tracked in statistics",
+        &[
+            "cc_009_array_constraint/specs/cc_009_array_constraint_filter_array_size",
+            "ddefReadDefaultNested/specs/ddefReadDefaultNested_readNonNull",
+        ],
+    ),
+    // Partition-only predicates produce AND([NULL]) since partition columns have no stats.
+    // eval_sql_where treats NULL literal as FALSE, skipping all row groups.
+    // Test: kernel_predicates::tests::test_sql_where_and_null_literal_bug
+    (
+        "Kernel: partition-only predicates skip all checkpoint row groups",
+        &[
+            "cp_partitioned/specs/cp_partitioned_read_part_0",
+            "cp_partitioned/specs/cp_partitioned_read_part_3",
+            "ic_010_restore_partitioned/specs/ic_010_restore_partitioned_filter_partition_1",
+        ],
+    ),
+    // ── Capture bugs ──
+    (
+        "Capture bug: clone table AddFile references absolute temp path",
+        &[
+            "ic_022_clone_basic/specs/ic_022_clone_basic_readAll",
+            "ic_022_clone_basic/specs/ic_022_clone_basic_read_all",
+            "ic_023_clone_higher_watermark/specs/ic_023_clone_higher_watermark_readAll",
+            "ic_023_clone_higher_watermark/specs/ic_023_clone_higher_watermark_read_all",
+        ],
+    ),
+    (
+        "Capture bug: snapshot spec generated for invalid/broken table",
+        &[
+            "dsReadEmptyTable/specs/dsReadEmptyTable_snapshot",
+            "dsReadEmptyString/specs/dsReadEmptyString_snapshot",
+            "dsReadMissingCommitFile/specs/dsReadMissingCommitFile_snapshot",
+            "dsReadMissingDeltaLog/specs/dsReadMissingDeltaLog_snapshot",
+            "dsReadPathWithSpaces/specs/dsReadPathWithSpaces_snapshot",
+            "dsReadDuplicateColumns/specs/dsReadDuplicateColumns_snapshot",
+            "corrupt_checkpoint_corrupt_no_delta_files/specs/corrupt_checkpoint_corrupt_no_delta_files_snapshot",
+        ],
+    ),
 ];
 
 /// Check if workload type is unsupported by the harness.
 fn unsupported_workload_reason(spec: &Spec) -> Option<&'static str> {
     match spec {
-        Spec::Read(read_spec) => {
-            if read_spec.predicate.is_some() {
-                return Some("Predicates not yet supported");
-            }
-            match &read_spec.time_travel {
-                Some(TimeTravel::Timestamp { .. }) => {
-                    Some("Timestamp-based time travel not supported")
-                }
-                _ => None,
-            }
-        }
+        Spec::Read(read_spec) => match &read_spec.time_travel {
+            Some(TimeTravel::Timestamp { .. }) => Some("Timestamp-based time travel not supported"),
+            _ => None,
+        },
         Spec::Snapshot(snapshot_spec) => match &snapshot_spec.time_travel {
             Some(TimeTravel::Timestamp { .. }) => Some("Timestamp-based time travel not supported"),
             _ => None,

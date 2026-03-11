@@ -18,6 +18,8 @@
 //!       expected_data/
 //! ```
 
+pub mod opaque_ops;
+pub mod predicate_parser;
 pub mod validation;
 pub mod workload;
 

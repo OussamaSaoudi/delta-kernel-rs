@@ -43,13 +43,8 @@ pub fn execute_read_workload(
                 "Timestamp-based timetravel is not yet supported",
             ))
         }
-
         None => None,
     };
-
-    if let Some(_predicate_str) = &read_spec.predicate {
-        return Err(Error::generic("Workload predicates are not yet supported"));
-    }
 
     // Build snapshot
     let mut builder = Snapshot::builder_for(table_root.clone());
@@ -66,15 +61,38 @@ pub fn execute_read_workload(
         let projected_schema = table_schema.project(cols)?;
         scan_builder = scan_builder.with_schema(projected_schema);
     }
+
+    // Parse predicate for post-scan row filtering. We intentionally do NOT pass
+    // the predicate to scan_builder.with_predicate() because kernel's data skipping
+    // can incorrectly prune partition files when the predicate literal type doesn't
+    // match the string-typed partition values in the delta log.
+    let parsed_predicate = if let Some(ref pred_str) = read_spec.predicate {
+        use super::predicate_parser::parse_predicate_with_schema;
+        let pred = parse_predicate_with_schema(pred_str, &table_schema).map_err(|e| {
+            Error::generic(format!("Failed to parse predicate '{}': {}", pred_str, e))
+        })?;
+        let pred = Arc::new(pred);
+        scan_builder = scan_builder.with_predicate(pred.clone());
+        Some(pred)
+    } else {
+        None
+    };
     let scan = scan_builder.build()?;
 
     let schema = scan.logical_schema();
 
-    // Execute scan
+    // Execute scan and apply post-scan predicate filtering.
+    // Kernel uses predicates for data skipping (file pruning) but does not filter rows.
     let batches: Vec<RecordBatch> = scan
         .execute(engine)?
         .map(|data| -> DeltaResult<_> {
-            let record_batch = data?.try_into_record_batch()?;
+            let mut record_batch = data?.try_into_record_batch()?;
+            if let Some(ref pred) = parsed_predicate {
+                use delta_kernel::arrow::compute::filter_record_batch;
+                use delta_kernel::engine::arrow_expression::evaluate_expression::evaluate_predicate;
+                let mask = evaluate_predicate(pred, &record_batch, false)?;
+                record_batch = filter_record_batch(&record_batch, &mask)?;
+            }
             Ok(record_batch)
         })
         .try_collect()?;
