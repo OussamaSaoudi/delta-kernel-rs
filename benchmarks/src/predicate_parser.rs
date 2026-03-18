@@ -52,7 +52,6 @@ pub fn parse_predicate(
     convert_expr_to_predicate(&ctx, &expr)
 }
 
-
 ////////////////////////////////////////////////////////////////////////
 // Typed (bidirectional) conversion functions
 ////////////////////////////////////////////////////////////////////////
@@ -129,7 +128,9 @@ fn try_synthesize_expr(ctx: &TypeContext, expr: &Expr) -> Option<DataType> {
             // We only support pure dot-style access (case 1)
 
             // Check if this is pure dot-style access (no subscripts)
-            let has_subscripts = access_chain.iter().any(|access| !matches!(access, ast::AccessExpr::Dot(_)));
+            let has_subscripts = access_chain
+                .iter()
+                .any(|access| !matches!(access, ast::AccessExpr::Dot(_)));
             if has_subscripts {
                 return None; // Subscripts not supported
             }
@@ -287,9 +288,15 @@ fn parse_date_string(s: &str) -> Result<i32, Box<dyn std::error::Error>> {
         return Err(format!("Invalid date format: {}", s).into());
     }
 
-    let year: i32 = parts[0].parse().map_err(|_| format!("Invalid year: {}", parts[0]))?;
-    let month: u32 = parts[1].parse().map_err(|_| format!("Invalid month: {}", parts[1]))?;
-    let day: u32 = parts[2].parse().map_err(|_| format!("Invalid day: {}", parts[2]))?;
+    let year: i32 = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid year: {}", parts[0]))?;
+    let month: u32 = parts[1]
+        .parse()
+        .map_err(|_| format!("Invalid month: {}", parts[1]))?;
+    let day: u32 = parts[2]
+        .parse()
+        .map_err(|_| format!("Invalid day: {}", parts[2]))?;
 
     // Simple date to days calculation
     // Days since 1970-01-01
@@ -328,9 +335,15 @@ fn parse_time_string(s: &str) -> Result<i64, Box<dyn std::error::Error>> {
         return Err(format!("Invalid time format: {}", s).into());
     }
 
-    let hours: i64 = parts[0].parse().map_err(|_| format!("Invalid hours: {}", parts[0]))?;
-    let minutes: i64 = parts[1].parse().map_err(|_| format!("Invalid minutes: {}", parts[1]))?;
-    let seconds: i64 = parts[2].parse().map_err(|_| format!("Invalid seconds: {}", parts[2]))?;
+    let hours: i64 = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid hours: {}", parts[0]))?;
+    let minutes: i64 = parts[1]
+        .parse()
+        .map_err(|_| format!("Invalid minutes: {}", parts[1]))?;
+    let seconds: i64 = parts[2]
+        .parse()
+        .map_err(|_| format!("Invalid seconds: {}", parts[2]))?;
 
     Ok((hours * 3600 + minutes * 60 + seconds) * 1_000_000)
 }
@@ -441,7 +454,6 @@ fn check_literal(
         .into()),
     }
 }
-
 
 /// Checks if one type can be coerced to another.
 ///
@@ -758,33 +770,12 @@ fn convert_expr_to_expression(
 mod tests {
     use super::*;
     use delta_kernel::expressions::column_name;
-    use delta_kernel::schema::{StructField, StructType};
+    use delta_kernel::schema::{MapType, StructField, StructType};
+    use rstest::rstest;
 
     fn test_schema() -> StructType {
         StructType::new_unchecked(vec![
-            StructField::new("id", DataType::LONG, true),
-            StructField::new("value", DataType::LONG, true),
-            StructField::new("version_tag", DataType::STRING, true),
-            StructField::new("a", DataType::LONG, true),
-            StructField::new("b", DataType::LONG, true),
-            StructField::new("c", DataType::LONG, true),
-            StructField::new("full_name", DataType::STRING, true),
-            StructField::new("name", DataType::STRING, true),
-            StructField::new("age", DataType::LONG, true),
-            StructField::new("score", DataType::LONG, true),
-            StructField::new("status", DataType::STRING, true),
-            StructField::new("price", DataType::DOUBLE, true),
-            StructField::new("amount", DataType::DOUBLE, true),
-            StructField::new("distance", DataType::DOUBLE, true),
-            StructField::new("flag", DataType::BOOLEAN, true),
-            StructField::new("active", DataType::BOOLEAN, true),
-            StructField::new("dt", DataType::DATE, true),
-            StructField::new("date_col", DataType::DATE, true),
-            StructField::new("event_date", DataType::DATE, true),
-            StructField::new("start_date", DataType::DATE, true),
-            StructField::new("time_col", DataType::TIMESTAMP, true),
-            StructField::new("event_time", DataType::TIMESTAMP, true),
-            StructField::new("start_time", DataType::TIMESTAMP, true),
+            // Primitive types
             StructField::new("byte_col", DataType::BYTE, true),
             StructField::new("short_col", DataType::SHORT, true),
             StructField::new("int_col", DataType::INTEGER, true),
@@ -792,140 +783,127 @@ mod tests {
             StructField::new("float_col", DataType::FLOAT, true),
             StructField::new("double_col", DataType::DOUBLE, true),
             StructField::new("str_col", DataType::STRING, true),
-            StructField::new("c1", DataType::LONG, true),      // Used with integers in tests
-            StructField::new("c2", DataType::STRING, true),
-            StructField::new("c3", DataType::DOUBLE, true),    // Used with floats in tests
-            StructField::new("c4", DataType::DOUBLE, true),    // Used with floats in tests
-            StructField::new("c5", DataType::STRING, true),
-            StructField::new("c6", DataType::STRING, true),
-            StructField::new("c7", DataType::STRING, true),
-            StructField::new("c8", DataType::STRING, true),
-            StructField::new("c9", DataType::BOOLEAN, true),
-            StructField::new("c10", DataType::DOUBLE, true),   // Used with floats in tests
-            StructField::new("cc1", DataType::LONG, true),     // Used with integers in tests
-            StructField::new("cc2", DataType::STRING, true),
-            StructField::new("cc3", DataType::DOUBLE, true),   // Used with floats in tests
-            StructField::new("cc4", DataType::DOUBLE, true),   // Used with floats in tests
-            StructField::new("cc5", DataType::STRING, true),
-            StructField::new("cc6", DataType::STRING, true),
-            StructField::new("cc7", DataType::STRING, true),
-            StructField::new("cc8", DataType::STRING, true),
-            StructField::new("cc9", DataType::BOOLEAN, true),
-            StructField::new("cc10", DataType::DOUBLE, true),  // Used with floats in tests
-            StructField::new("part", DataType::LONG, true),  // Changed to LONG for partition columns
-            StructField::new("category", DataType::STRING, true),
-            StructField::new("date", DataType::DATE, true),
-            StructField::new("fruit", DataType::STRING, true),
-            StructField::new("code", DataType::STRING, true),
-            StructField::new("domain", DataType::STRING, true),
-            StructField::new("date_part", DataType::DATE, true),
-            StructField::new("wrapper", DataType::Struct(Box::new(StructType::new_unchecked(vec![
-                StructField::new("label", DataType::STRING, true),
-            ]))), true),
-            // Changed c1-c4 and cc1-cc4 to match the data types the tests expect
-            // Some appear to be numeric based on the test predicates
+            StructField::new("bool_col", DataType::BOOLEAN, true),
+            StructField::new("date_col", DataType::DATE, true),
+            StructField::new("ts_col", DataType::TIMESTAMP, true),
+            // Struct type
+            StructField::new(
+                "struct_col",
+                DataType::Struct(Box::new(StructType::new_unchecked(vec![
+                    StructField::new("inner_int", DataType::INTEGER, true),
+                    StructField::new("inner_str", DataType::STRING, true),
+                ]))),
+                true,
+            ),
+            // Array type
+            StructField::new(
+                "array_col",
+                DataType::Array(Box::new(ArrayType::new(DataType::LONG, true))),
+                true,
+            ),
+            // Map type
+            StructField::new(
+                "map_col",
+                DataType::Map(Box::new(MapType::new(
+                    DataType::STRING,
+                    DataType::LONG,
+                    true,
+                ))),
+                true,
+            ),
         ])
     }
 
-    #[test]
-    fn parse_simple_comparison() {
+    // Comparisons with typed scalars
+    #[rstest]
+    #[case("long_col < 500", Predicate::lt(column_name!("long_col"), Scalar::Long(500)))]
+    #[case("500 > long_col", Predicate::gt(Scalar::Long(500), column_name!("long_col")))]
+    #[case("long_col = 999", Predicate::eq(column_name!("long_col"), Scalar::Long(999)))]
+    #[case("int_col > 100", Predicate::gt(column_name!("int_col"), Scalar::Integer(100)))]
+    #[case("short_col < 50", Predicate::lt(column_name!("short_col"), Scalar::Short(50)))]
+    #[case("byte_col <= 127", Predicate::le(column_name!("byte_col"), Scalar::Byte(127)))]
+    #[case("double_col >= 3.5", Predicate::ge(column_name!("double_col"), Scalar::Double(3.5)))]
+    #[case("float_col < 1.5", Predicate::lt(column_name!("float_col"), Scalar::Float(1.5)))]
+    #[case("str_col = 'hello'", Predicate::eq(column_name!("str_col"), Scalar::from("hello".to_string())))]
+    #[case("bool_col = true", Predicate::eq(column_name!("bool_col"), Scalar::Boolean(true)))]
+    #[case("bool_col = false", Predicate::eq(column_name!("bool_col"), Scalar::Boolean(false)))]
+    #[case("long_col > -10", Predicate::gt(column_name!("long_col"), Scalar::Long(-10)))]
+    #[case("long_col IS NULL", Predicate::is_null(column_name!("long_col")))]
+    #[case("long_col IS NOT NULL", Predicate::is_not_null(column_name!("long_col")))]
+    #[case("str_col IS NOT NULL", Predicate::not(Predicate::is_null(column_name!("str_col"))))]
+    fn parse_comparison(#[case] sql: &str, #[case] expected: Predicate) {
         let schema = test_schema();
-        let pred = parse_predicate("id < 500", &schema).unwrap();
-        let expected = Predicate::lt(column_name!("id"), Scalar::Long(500));
+        let pred = parse_predicate(sql, &schema).unwrap();
         assert_eq!(pred, expected);
     }
 
-    #[test]
-    fn parse_and_predicate() {
+    // Logical operators
+    #[rstest]
+    #[case(
+        "long_col < 500 AND int_col > 10",
+        Predicate::and(
+            Predicate::lt(column_name!("long_col"), Scalar::Long(500)),
+            Predicate::gt(column_name!("int_col"), Scalar::Integer(10))
+        )
+    )]
+    #[case(
+        "long_col = 1 OR long_col = 2",
+        Predicate::or(
+            Predicate::eq(column_name!("long_col"), Scalar::Long(1)),
+            Predicate::eq(column_name!("long_col"), Scalar::Long(2))
+        )
+    )]
+    #[case(
+        "NOT long_col = 1",
+        Predicate::not(Predicate::eq(column_name!("long_col"), Scalar::Long(1)))
+    )]
+    #[case(
+        "(long_col < 500) AND (int_col > 10)",
+        Predicate::and(
+            Predicate::lt(column_name!("long_col"), Scalar::Long(500)),
+            Predicate::gt(column_name!("int_col"), Scalar::Integer(10))
+        )
+    )]
+    fn parse_logical(#[case] sql: &str, #[case] expected: Predicate) {
         let schema = test_schema();
-        let pred = parse_predicate("id < 500 AND value > 10", &schema).unwrap();
-        let expected = Predicate::and(
-            Predicate::lt(column_name!("id"), Scalar::Long(500)),
-            Predicate::gt(column_name!("value"), Scalar::Long(10)),
-        );
+        let pred = parse_predicate(sql, &schema).unwrap();
         assert_eq!(pred, expected);
     }
 
-    #[test]
-    fn parse_or_predicate() {
+    // BETWEEN
+    #[rstest]
+    #[case(
+        "long_col BETWEEN 10 AND 20",
+        Predicate::and(
+            Predicate::ge(column_name!("long_col"), Scalar::Long(10)),
+            Predicate::le(column_name!("long_col"), Scalar::Long(20))
+        )
+    )]
+    #[case(
+        "short_col BETWEEN 10 AND 20",
+        Predicate::and(
+            Predicate::ge(column_name!("short_col"), Scalar::Short(10)),
+            Predicate::le(column_name!("short_col"), Scalar::Short(20))
+        )
+    )]
+    #[case(
+        "int_col NOT BETWEEN 0 AND 10",
+        Predicate::not(Predicate::and(
+            Predicate::ge(column_name!("int_col"), Scalar::Integer(0)),
+            Predicate::le(column_name!("int_col"), Scalar::Integer(10))
+        ))
+    )]
+    fn parse_between(#[case] sql: &str, #[case] expected: Predicate) {
         let schema = test_schema();
-        let pred = parse_predicate("id = 1 OR id = 2", &schema).unwrap();
-        let expected = Predicate::or(
-            Predicate::eq(column_name!("id"), Scalar::Long(1)),
-            Predicate::eq(column_name!("id"), Scalar::Long(2)),
-        );
+        let pred = parse_predicate(sql, &schema).unwrap();
         assert_eq!(pred, expected);
     }
 
-    #[test]
-    fn parse_string_comparison() {
-        let schema = test_schema();
-        let pred = parse_predicate("version_tag = 'v0'", &schema).unwrap();
-        let expected = Predicate::eq(column_name!("version_tag"), Scalar::from("v0".to_string()));
-        assert_eq!(pred, expected);
-    }
-
-    #[test]
-    fn parse_not_predicate() {
-        let schema = test_schema();
-        let pred = parse_predicate("NOT id = 500", &schema).unwrap();
-        let expected = Predicate::not(Predicate::eq(column_name!("id"), Scalar::Long(500)));
-        assert_eq!(pred, expected);
-    }
-
-    #[test]
-    fn parse_is_null() {
-        let schema = test_schema();
-        let pred = parse_predicate("id IS NULL", &schema).unwrap();
-        let expected = Predicate::is_null(column_name!("id"));
-        assert_eq!(pred, expected);
-    }
-
-    #[test]
-    fn parse_is_not_null() {
-        let schema = test_schema();
-        let pred = parse_predicate("id IS NOT NULL", &schema).unwrap();
-        let expected = Predicate::is_not_null(column_name!("id"));
-        assert_eq!(pred, expected);
-    }
-
-    #[test]
-    fn parse_nested_expression() {
-        let schema = test_schema();
-        let pred = parse_predicate("(id < 500) AND (value > 10)", &schema).unwrap();
-        let expected = Predicate::and(
-            Predicate::lt(column_name!("id"), Scalar::Long(500)),
-            Predicate::gt(column_name!("value"), Scalar::Long(10)),
-        );
-        assert_eq!(pred, expected);
-    }
-
-    #[test]
-    fn parse_negative_number() {
-        let schema = test_schema();
-        let pred = parse_predicate("id > -100", &schema).unwrap();
-        let expected = Predicate::gt(column_name!("id"), Scalar::Long(-100));
-        assert_eq!(pred, expected);
-    }
-
-    #[test]
-    fn parse_complex_predicate() {
-        let schema = test_schema();
-        let pred = parse_predicate("id >= 0 AND id < 1000 AND version_tag = 'v0'", &schema).unwrap();
-        let expected = Predicate::and(
-            Predicate::and(
-                Predicate::ge(column_name!("id"), Scalar::Long(0)),
-                Predicate::lt(column_name!("id"), Scalar::Long(1000)),
-            ),
-            Predicate::eq(column_name!("version_tag"), Scalar::from("v0".to_string())),
-        );
-        assert_eq!(pred, expected);
-    }
-
+    // IN list
     #[test]
     fn parse_in_list() {
         let schema = test_schema();
-        let pred = parse_predicate("a in (1, 2, 3)", &schema).unwrap();
+        let pred = parse_predicate("long_col IN (1, 2, 3)", &schema).unwrap();
         let array = ArrayData::try_new(
             ArrayType::new(DataType::LONG, false),
             vec![Scalar::Long(1), Scalar::Long(2), Scalar::Long(3)],
@@ -933,7 +911,7 @@ mod tests {
         .unwrap();
         let expected = Predicate::binary(
             delta_kernel::expressions::BinaryPredicateOp::In,
-            column_name!("a"),
+            column_name!("long_col"),
             Expression::literal(Scalar::Array(array)),
         );
         assert_eq!(pred, expected);
@@ -942,7 +920,7 @@ mod tests {
     #[test]
     fn parse_not_in_list() {
         let schema = test_schema();
-        let pred = parse_predicate("a NOT IN (1, 2)", &schema).unwrap();
+        let pred = parse_predicate("long_col NOT IN (1, 2)", &schema).unwrap();
         let array = ArrayData::try_new(
             ArrayType::new(DataType::LONG, false),
             vec![Scalar::Long(1), Scalar::Long(2)],
@@ -950,554 +928,188 @@ mod tests {
         .unwrap();
         let expected = Predicate::not(Predicate::binary(
             delta_kernel::expressions::BinaryPredicateOp::In,
-            column_name!("a"),
+            column_name!("long_col"),
             Expression::literal(Scalar::Array(array)),
         ));
         assert_eq!(pred, expected);
     }
 
     #[test]
-    fn parse_between() {
+    fn parse_in_list_typed() {
         let schema = test_schema();
-        let pred = parse_predicate("id BETWEEN 10 AND 20", &schema).unwrap();
-        let expected = Predicate::and(
-            Predicate::ge(column_name!("id"), Scalar::Long(10)),
-            Predicate::le(column_name!("id"), Scalar::Long(20)),
+        let pred = parse_predicate("int_col IN (10, 20, 30)", &schema).unwrap();
+        let array = ArrayData::try_new(
+            ArrayType::new(DataType::INTEGER, false),
+            vec![
+                Scalar::Integer(10),
+                Scalar::Integer(20),
+                Scalar::Integer(30),
+            ],
+        )
+        .unwrap();
+        let expected = Predicate::binary(
+            delta_kernel::expressions::BinaryPredicateOp::In,
+            column_name!("int_col"),
+            Expression::literal(Scalar::Array(array)),
         );
         assert_eq!(pred, expected);
     }
 
-    #[test]
-    fn parse_null_safe_equals() {
+    // Null-safe equals
+    #[rstest]
+    #[case(
+        "long_col <=> 1",
+        Predicate::not(Predicate::distinct(column_name!("long_col"), Scalar::Long(1)))
+    )]
+    #[case(
+        "long_col <=> NULL",
+        Predicate::not(Predicate::distinct(column_name!("long_col"), Scalar::Null(DataType::LONG)))
+    )]
+    fn parse_null_safe_equals(#[case] sql: &str, #[case] expected: Predicate) {
         let schema = test_schema();
-        let pred = parse_predicate("a <=> 1", &schema).unwrap();
-        let expected = Predicate::not(Predicate::distinct(column_name!("a"), Scalar::Long(1)));
+        let pred = parse_predicate(sql, &schema).unwrap();
         assert_eq!(pred, expected);
     }
 
-    #[test]
-    fn parse_null_safe_equals_null() {
+    // Type errors
+    #[rstest]
+    #[case("long_col > 'CD'", "Type mismatch")]
+    #[case("long_col < 'AB'", "Type mismatch")]
+    #[case("long_col = false", "Type mismatch")]
+    #[case("long_col <= false", "Type mismatch")]
+    #[case("false = long_col", "Type mismatch")]
+    #[case("str_col = 123", "Type mismatch")]
+    #[case("short_col < 100000", "Cannot parse")]
+    fn type_error_rejected(#[case] sql: &str, #[case] error_contains: &str) {
         let schema = test_schema();
-        let pred = parse_predicate("a <=> NULL", &schema).unwrap();
-        let expected = Predicate::not(Predicate::distinct(
-            column_name!("a"),
-            Scalar::Null(DataType::LONG),
-        ));
-        assert_eq!(pred, expected);
-    }
-
-    /// Bulk test: predicates that the typed parser should handle successfully.
-    /// Column names indicate their types (e.g., long_col, str_col, double_col).
-    #[test]
-    fn parse_supported_predicates_with_types() {
-        let schema = test_schema();
-        let supported = [
-            // LONG column comparisons
-            "id < 5",
-            "id = 999",
-            "id >= 50 AND id < 80",
-            "id BETWEEN 10 AND 20",
-            "id BETWEEN -10 AND -1",
-            "value >= 100",
-            "long_col >= 900 AND long_col < 950",
-            "long_col <=> 1",
-            "long_col <> 1",
-            "long_col <= 1 AND long_col > -1",
-            "long_col > 0 AND long_col < 3",
-            "long_col IS NULL",
-            "long_col IS NOT NULL",
-            "NOT long_col = 1",
-            "NOT long_col <=> NULL",
-            "long_col = 1 OR long_col = 2",
-            "long_col >= 2 OR long_col < -1",
-            "long_col IN (1, 2, 3)",
-            "long_col NOT IN (1, 2)",
-            "value IN (100, 200, 300)",
-            "long_col <=> NULL",
-            "NOT (long_col <=> NULL)",
-            "NOT(long_col < 1 OR value > 20)",
-            "NOT(long_col >= 10 AND value <= 20)",
-            "part = 1",
-            "part = 0",
-            // INTEGER column comparisons
-            "int_col = 50",
-            "int_col IS NULL",
-            "int_col IS NOT NULL AND str_col IS NOT NULL",
-            // STRING column comparisons
-            "str_col = 'hello'",
-            "name = 'alice'",
-            "status = 'active'",
-            "category = 'A'",
-            "fruit = 'apple'",
-            "code = 'ABCDE'",
-            "domain = 'example.com'",
-            "name IS NOT NULL",
-            // DOUBLE column comparisons
-            "price > 100.0",
-            "amount > 250.0",
-            "distance = 5.0",
-            "double_col > 1400.0",
-            // BOOLEAN column comparisons
-            "flag = true",
-            "active = false",
-            // DATE column comparisons (accept string date literals)
-            "dt >= '2024-01-15'",
-            "date_col = '2024-01-15'",
-            "event_date = '2024-01-15'",
-            "start_date >= '2024-02-01'",
-            "date = '2024-01-01'",
-            "date_part = '2024-01-01'",
-            // TIMESTAMP column comparisons (accept string time literals)
-            "time_col >= '2024-01-01 10:00:00'",
-            "event_time >= '12:00:00'",
-            "start_time < '10:00:00'",
-            // Boolean literals
-            "TRUE",
-            "FALSE",
-            // Nested struct field
-            "wrapper.label = 'first'",
-        ];
-
-        let mut failures = Vec::new();
-        for sql in &supported {
-            if let Err(e) = parse_predicate(sql, &schema) {
-                failures.push(format!("  FAIL: {sql:?} -> {e}"));
-            }
-        }
+        let result = parse_predicate(sql, &schema);
+        assert!(result.is_err(), "Expected error for: {}", sql);
         assert!(
-            failures.is_empty(),
-            "Expected all predicates to parse successfully, but {} failed:\n{}",
-            failures.len(),
-            failures.join("\n")
+            result.unwrap_err().to_string().contains(error_contains),
+            "Error should contain '{}'",
+            error_contains
         );
     }
 
-    /// Tests that type errors are correctly detected and rejected.
-    /// Column names clearly indicate the type to make failures obvious.
+    // Unknown column falls back to untyped parsing
     #[test]
-    fn type_errors_are_rejected() {
+    fn unknown_column_falls_back_to_untyped() {
         let schema = test_schema();
-        let type_errors = [
-            // LONG column with non-date string literal
-            ("long_col > 'CD'", "comparing LONG column with non-date string"),
-            ("long_col < 'AB'", "comparing LONG column with non-date string"),
-            ("value = 'hello'", "comparing LONG column with string"),
-            // LONG column with boolean
-            ("long_col = false", "comparing LONG column with boolean"),
-            ("long_col <= false", "comparing LONG column with boolean"),
-            // LONG column with float (cannot parse as long)
-            ("value > 1.5", "comparing LONG column with float literal"),
-            // Boolean compared with LONG
-            ("false = long_col", "comparing boolean with LONG column"),
-            // LONG column (part) with string
-            ("part = '1'", "comparing LONG column with string"),
-        ];
-
-        for (sql, description) in &type_errors {
-            let result = parse_predicate(sql, &schema);
-            assert!(
-                result.is_err(),
-                "Expected type error for {}: {} - but it parsed successfully as {:?}",
-                description, sql, result.unwrap()
-            );
-        }
+        let pred = parse_predicate("unknown_col < 500", &schema).unwrap();
+        assert!(format!("{:?}", pred).contains("unknown_col"));
     }
 
-    /// Tests for the typed predicate parser with bidirectional type checking.
-    mod typed_parser_tests {
-        use super::*;
-        use delta_kernel::schema::{StructField, StructType};
-        use rstest::rstest;
-
-        fn test_schema() -> StructType {
-            StructType::try_new(vec![
-                StructField::new("id", DataType::LONG, false),
-                StructField::new("age", DataType::INTEGER, false),
-                StructField::new("score", DataType::SHORT, false),
-                StructField::new("rating", DataType::DOUBLE, false),
-                StructField::new("name", DataType::STRING, false),
-                StructField::new("active", DataType::BOOLEAN, false),
-            ])
-            .unwrap()
-        }
-
-        #[rstest]
-        #[case("id < 500", Predicate::lt(column_name!("id"), Scalar::Long(500)))]
-        #[case("500 > id", Predicate::gt(Scalar::Long(500), column_name!("id")))]
-        #[case("age > 100", Predicate::gt(column_name!("age"), Scalar::Integer(100)))]
-        #[case("score < 50", Predicate::lt(column_name!("score"), Scalar::Short(50)))]
-        #[case("rating >= 3.5", Predicate::ge(column_name!("rating"), Scalar::Double(3.5)))]
-        #[case("name = 'alice'", Predicate::eq(column_name!("name"), Scalar::from("alice".to_string())))]
-        #[case("active = true", Predicate::eq(column_name!("active"), Scalar::Boolean(true)))]
-        #[case("age > -10", Predicate::gt(column_name!("age"), Scalar::Integer(-10)))]
-        fn typed_parse_success(#[case] sql: &str, #[case] expected: Predicate) {
-            let schema = test_schema();
-            let pred = parse_predicate(sql, &schema).unwrap();
-            assert_eq!(pred, expected);
-        }
-
-        #[test]
-        fn typed_parse_in_list() {
-            let schema = test_schema();
-            let pred = parse_predicate("age IN (10, 20, 30)", &schema).unwrap();
-            let array = ArrayData::try_new(
-                ArrayType::new(DataType::INTEGER, false),
-                vec![
-                    Scalar::Integer(10),
-                    Scalar::Integer(20),
-                    Scalar::Integer(30),
-                ],
-            )
-            .unwrap();
-            let expected = Predicate::binary(
-                delta_kernel::expressions::BinaryPredicateOp::In,
-                column_name!("age"),
-                Expression::literal(Scalar::Array(array)),
-            );
-            assert_eq!(pred, expected);
-        }
-
-        #[test]
-        fn typed_parse_between() {
-            let schema = test_schema();
-            let pred = parse_predicate("score BETWEEN 10 AND 20", &schema).unwrap();
-            let expected = Predicate::and(
-                Predicate::ge(column_name!("score"), Scalar::Short(10)),
-                Predicate::le(column_name!("score"), Scalar::Short(20)),
-            );
-            assert_eq!(pred, expected);
-        }
-
-        #[test]
-        fn typed_parse_complex_predicate() {
-            let schema = test_schema();
-            let pred = parse_predicate("age >= 18 AND age < 65 AND name = 'alice'", &schema)
-                .unwrap();
-            let expected = Predicate::and(
-                Predicate::and(
-                    Predicate::ge(column_name!("age"), Scalar::Integer(18)),
-                    Predicate::lt(column_name!("age"), Scalar::Integer(65)),
-                ),
-                Predicate::eq(column_name!("name"), Scalar::from("alice".to_string())),
-            );
-            assert_eq!(pred, expected);
-        }
-
-        #[rstest]
-        #[case("id < 'abc'", "Type mismatch")]
-        #[case("name = 123", "Type mismatch")]
-        #[case("score < 100000", "Cannot parse")]
-        fn typed_parse_errors(#[case] sql: &str, #[case] error_contains: &str) {
-            let schema = test_schema();
-            let result = parse_predicate(sql, &schema);
-            assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains(error_contains));
-        }
-
-        #[test]
-        fn typed_unknown_column_falls_back() {
-            let schema = test_schema();
-            // Unknown columns fall back to untyped parsing
-            // The column reference is created, but without type information
-            // It will only error at evaluation time, not parse time
-            let result = parse_predicate("unknown_col < 500", &schema);
-            assert!(result.is_ok());
-        }
-
-        // Complex validation tests
-        mod complex_validation {
-            use super::*;
-
-            fn nested_schema() -> StructType {
-                StructType::try_new(vec![
-                    StructField::new("id", DataType::LONG, false),
-                    StructField::new(
-                        "user",
-                        DataType::try_struct_type(vec![
-                            StructField::new("age", DataType::INTEGER, false),
-                            StructField::new("name", DataType::STRING, false),
-                        ])
-                        .unwrap(),
-                        false,
-                    ),
-                ])
-                .unwrap()
-            }
-
-            #[test]
-            fn complex_nested_struct_navigation() {
-                let schema = nested_schema();
-
-                // First test: simple top-level column
-                let pred = parse_predicate("id > 1000", &schema).unwrap();
-                assert!(format!("{:?}", pred).contains("Long(1000)"));
-
-                // Test nested column reference: user.age
-                let pred = parse_predicate("user.age > 25", &schema).unwrap();
-                // Should have typed the literal as Integer (the type of user.age)
-                assert!(format!("{:?}", pred).contains("Integer(25)"));
-
-                // Test nested column reference: user.name
-                let pred = parse_predicate("user.name = 'alice'", &schema).unwrap();
-                assert!(format!("{:?}", pred).contains("alice"));
-
-                // Test mixing top-level and nested columns
-                let pred = parse_predicate("id > 1000 AND user.age < 50", &schema).unwrap();
-                assert!(format!("{:?}", pred).contains("Long(1000)"));
-                assert!(format!("{:?}", pred).contains("Integer(50)"));
-            }
-
-            #[test]
-            fn complex_nested_struct_in_operations() {
+    // Nested struct tests
+    #[rstest]
+    #[case("struct_col.inner_int > 25", Predicate::gt(column_name!("struct_col.inner_int"), Scalar::Integer(25)))]
+    #[case("struct_col.inner_str = 'alice'", Predicate::eq(column_name!("struct_col.inner_str"), Scalar::from("alice".to_string())))]
+    #[case("struct_col.inner_int IS NULL", Predicate::is_null(column_name!("struct_col.inner_int")))]
+    fn parse_nested_struct(#[case] sql: &str, #[case] expected: Predicate) {
         let schema = test_schema();
-                let schema = nested_schema();
-
-                // IN list with nested column
-                let pred = parse_predicate("user.age IN (18, 21, 25, 30)", &schema).unwrap();
-                assert!(format!("{:?}", pred).contains("Integer(18)"));
-
-                // BETWEEN with nested column
-                let pred = parse_predicate("user.age BETWEEN 18 AND 65", &schema).unwrap();
-                assert!(format!("{:?}", pred).contains("Integer(18)"));
-                assert!(format!("{:?}", pred).contains("Integer(65)"));
-            }
-
-            #[rstest]
-            #[case("id IS NULL", "simple column")]
-            #[case("user.age IS NULL", "nested struct field")]
-            #[case("user.name IS NOT NULL", "nested struct IS NOT NULL")]
-            fn complex_is_null_operations(#[case] sql: &str, #[case] _desc: &str) {
-                let schema = nested_schema();
-                // IS NULL and IS NOT NULL work on any expression including nested fields
-                // This demonstrates that kernel's Predicate::is_null accepts any Expression
-                let result = parse_predicate(sql, &schema);
-                assert!(result.is_ok(), "Failed: {}", sql);
-            }
-
-            #[rstest]
-            #[case("(id > 100 AND id < 200) OR id = 50", "complex OR with nested AND")]
-            #[case("(id < 50 OR id > 150) AND age > 25", "mixed AND/OR")]
-            fn complex_logical_predicates(#[case] sql: &str, #[case] _desc: &str) {
-                let schema = test_schema();
-                let result = parse_predicate(sql, &schema);
-                assert!(result.is_ok(), "Failed to parse: {}", sql);
-            }
-
-            #[rstest]
-            #[case("id BETWEEN 10 AND 20 AND age BETWEEN 30 AND 40", "multiple BETWEEN")]
-            #[case(
-                "(id > 10 AND age < 50) AND (name = 'alice' OR name = 'bob')",
-                "deeply nested"
-            )]
-            fn complex_mixed_operators(#[case] sql: &str, #[case] _desc: &str) {
-                let schema = test_schema();
-                let result = parse_predicate(sql, &schema);
-                assert!(result.is_ok(), "Failed to parse: {}", sql);
-            }
-
-            #[test]
-            fn complex_multiple_columns_different_types() {
-                let schema = test_schema();
-                // Mix different types in same predicate
-                let pred = parse_predicate(
-                    "id > 1000 AND age < 50 AND score >= 80 AND rating > 3.5 AND name = 'test' AND active = true",
-                    &schema,
-                ).unwrap();
-
-                // Verify all type coercions happened correctly by checking the predicate structure
-                assert!(format!("{:?}", pred).contains("1000"));
-                assert!(format!("{:?}", pred).contains("50"));
-                assert!(format!("{:?}", pred).contains("80"));
-                assert!(format!("{:?}", pred).contains("3.5"));
-                assert!(format!("{:?}", pred).contains("test"));
-                assert!(format!("{:?}", pred).contains("true"));
-            }
-
-            #[test]
-            fn complex_type_widening_in_comparisons() {
-        let schema = test_schema();
-                let schema = StructType::try_new(vec![
-                    StructField::new("byte_col", DataType::BYTE, false),
-                    StructField::new("short_col", DataType::SHORT, false),
-                    StructField::new("int_col", DataType::INTEGER, false),
-                    StructField::new("long_col", DataType::LONG, false),
-                ])
-                .unwrap();
-
-                // All these should work due to type widening
-                let cases = vec![
-                    ("byte_col < 100", Scalar::Byte(100)),
-                    ("short_col < 30000", Scalar::Short(30000)),
-                    ("int_col < 2000000", Scalar::Integer(2000000)),
-                    ("long_col < 9000000000", Scalar::Long(9000000000)),
-                ];
-
-                for (sql, expected_scalar) in cases {
-                    let pred = parse_predicate(sql, &schema).unwrap();
-                    // Verify scalar type is correct
-                    let pred_str = format!("{:?}", pred);
-                    let scalar_str = format!("{:?}", expected_scalar);
-                    assert!(
-                        pred_str.contains(&scalar_str),
-                        "Expected {} in predicate for '{}'",
-                        scalar_str,
-                        sql
-                    );
-                }
-            }
-
-            #[rstest]
-            #[case("age > -50", Scalar::Integer(-50), "negative Integer")]
-            #[case("rating > -99.5", Scalar::Double(-99.5), "negative Double")]
-            fn complex_negative_numbers(
-                #[case] sql: &str,
-                #[case] expected: Scalar,
-                #[case] _desc: &str,
-            ) {
-                let schema = test_schema();
-                let pred = parse_predicate(sql, &schema).unwrap();
-                let pred_str = format!("{:?}", pred);
-                let expected_str = format!("{:?}", expected);
-                assert!(pred_str.contains(&expected_str));
-            }
-
-            #[test]
-            fn complex_in_list_with_different_sizes() {
-                let schema = test_schema();
-
-                // Small list
-                let pred = parse_predicate("age IN (1, 2)", &schema).unwrap();
-                assert!(format!("{:?}", pred).contains("Integer(1)"));
-
-                // Medium list
-                let pred = parse_predicate("age IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)", &schema)
-                    .unwrap();
-                assert!(format!("{:?}", pred).contains("Integer(10)"));
-            }
-
-            #[test]
-            fn complex_between_with_negation() {
-                let schema = test_schema();
-
-                // Normal BETWEEN
-                let pred = parse_predicate("age BETWEEN 18 AND 65", &schema).unwrap();
-                assert!(format!("{:?}", pred).contains("Integer(18)"));
-                assert!(format!("{:?}", pred).contains("Integer(65)"));
-
-                // NOT BETWEEN
-                let pred = parse_predicate("age NOT BETWEEN 0 AND 10", &schema).unwrap();
-                assert!(format!("{:?}", pred).contains("Integer(0)"));
-                assert!(format!("{:?}", pred).contains("Integer(10)"));
-            }
-
-            #[rstest]
-            #[case("id = age", "comparing two Integer columns")]
-            fn complex_column_to_column_comparisons(#[case] sql: &str, #[case] _desc: &str) {
-                let schema = test_schema();
-                let result = parse_predicate(sql, &schema);
-                // Should succeed - columns can be compared
-                assert!(result.is_ok(), "Failed: {}", sql);
-            }
-
-            #[test]
-            fn complex_string_comparisons() {
-                let schema = test_schema();
-
-                let cases = vec!["name = 'alice'", "name >= 'a' AND name < 'n'"];
-
-                for sql in cases {
-                    let result = parse_predicate(sql, &schema);
-                    assert!(result.is_ok(), "Failed: {}", sql);
-                }
-            }
-
-            #[test]
-            fn complex_boolean_logic() {
-                let schema = test_schema();
-
-                let cases = vec!["active = true", "active = true AND age > 18"];
-
-                for sql in cases {
-                    let result = parse_predicate(sql, &schema);
-                    assert!(result.is_ok(), "Failed: {}", sql);
-                }
-            }
-
-            #[test]
-            fn complex_deeply_nested_predicates() {
-                let schema = test_schema();
-
-                let sql = "((id > 10 AND age < 50) OR (name = 'test' AND active = true)) AND \
-                          (score BETWEEN 70 AND 90 OR rating > 4.0)";
-                let result = parse_predicate(sql, &schema);
-                assert!(result.is_ok());
-            }
-        }
+        let pred = parse_predicate(sql, &schema).unwrap();
+        assert_eq!(pred, expected);
     }
 
-    /// Predicates that use SQL features not representable in kernel expressions.
-    /// These should fail gracefully with an error (not panic).
     #[test]
-    fn unsupported_predicates_fail_gracefully() {
+    fn parse_nested_struct_in_list() {
         let schema = test_schema();
-        let unsupported = [
-            // LIKE (no kernel support)
-            "a like 'C%'",
-            "a like 'A%'",
-            "a.b like '%'",
-            "a.b like 'mic%'",
-            "fruit like 'b%'",
-            "fruit like 'a%'",
-            "fruit like 'z%'",
-            "fruit like '%'",
-            "name LIKE 'b%'",
-            "a > 0 AND b like '2016-%'",
-            "a >= 2 AND b like '2017-08-%'",
-            "a >= 2 or b like '2016-08-%'",
-            "a < 2 or b like '2017-08-%'",
-            "a < 0 or b like '2016-%'",
-            // Function calls
-            "cc8 = HEX('1111')",
-            "cc8 = HEX('3333')",
-            "c8 = HEX('3333')",
-            "c8 = HEX('1111')",
-            "size(items) > 2",
-            "size(tags) > 2",
-            "length(s) < 4",
-            // Arithmetic expressions
-            "a % 100 < 10 OR b > 20",
-            "a % 100 < 10 AND b > 20",
-            "a < 10 OR b % 100 > 20",
-            "a % 100 < 10 AND b % 100 > 20",
-            "a < 10 AND b % 100 > 20",
-            // Typed literals (TIME keyword)
-            "time_col >= TIME '00:00:00'",
-            "time_col >= TIME '10:00:00' AND time_col < TIME '12:00:00'",
-            "time_col > TIME '12:00:00'",
-            "time_col < TIME '12:00:00'",
-            // IS NULL on complex expressions (not a column)
-            "(a < 0) IS NULL",
-            "(a > 0) IS NULL",
-            "(a > 1) IS NULL",
-            "NOT ((a > 0) IS NULL)",
-            "NOT ((a > 1) IS NULL)",
-            "(a > 0 OR b > 1) IS NULL",
-            "(a > 0 AND b > 1) IS NULL",
-            "(a > 1 AND a > 0) IS NULL",
-            "(b > 1 AND a > 0) IS NULL",
-            "(b > 1 OR a < 0) IS NULL",
-            "(a > 1 OR a < 0) IS NULL",
-            "(b > 0) IS NULL",
-            "(b < 0) IS NULL",
-        ];
+        let pred = parse_predicate("struct_col.inner_int IN (18, 21, 25)", &schema).unwrap();
+        let array = ArrayData::try_new(
+            ArrayType::new(DataType::INTEGER, false),
+            vec![
+                Scalar::Integer(18),
+                Scalar::Integer(21),
+                Scalar::Integer(25),
+            ],
+        )
+        .unwrap();
+        let expected = Predicate::binary(
+            delta_kernel::expressions::BinaryPredicateOp::In,
+            column_name!("struct_col.inner_int"),
+            Expression::literal(Scalar::Array(array)),
+        );
+        assert_eq!(pred, expected);
+    }
 
-        for sql in &unsupported {
-            let result = parse_predicate(sql, &schema);
-            assert!(
-                result.is_err(),
-                "Expected {sql:?} to fail, but it parsed as: {:?}",
-                result.unwrap()
-            );
-        }
+    #[rstest]
+    #[case(
+        "struct_col.inner_int BETWEEN 18 AND 65",
+        Predicate::and(
+            Predicate::ge(column_name!("struct_col.inner_int"), Scalar::Integer(18)),
+            Predicate::le(column_name!("struct_col.inner_int"), Scalar::Integer(65))
+        )
+    )]
+    fn parse_nested_struct_between(#[case] sql: &str, #[case] expected: Predicate) {
+        let schema = test_schema();
+        let pred = parse_predicate(sql, &schema).unwrap();
+        assert_eq!(pred, expected);
+    }
+
+    // LIKE is not supported
+    #[rstest]
+    #[case("str_col LIKE 'b%'")]
+    #[case("str_col like '%test%'")]
+    fn unsupported_like(#[case] sql: &str) {
+        let schema = test_schema();
+        let result = parse_predicate(sql, &schema);
+        assert!(result.is_err(), "LIKE should not be supported: {}", sql);
+    }
+
+    // Function calls are not supported
+    #[rstest]
+    #[case("str_col = HEX('1111')")]
+    #[case("size(array_col) > 2")]
+    #[case("length(str_col) < 4")]
+    fn unsupported_function_calls(#[case] sql: &str) {
+        let schema = test_schema();
+        let result = parse_predicate(sql, &schema);
+        assert!(
+            result.is_err(),
+            "Function calls should not be supported: {}",
+            sql
+        );
+    }
+
+    // Arithmetic expressions are not supported
+    #[rstest]
+    #[case("long_col % 100 < 10")]
+    #[case("long_col + int_col > 10")]
+    #[case("long_col * 2 = 10")]
+    fn unsupported_arithmetic(#[case] sql: &str) {
+        let schema = test_schema();
+        let result = parse_predicate(sql, &schema);
+        assert!(
+            result.is_err(),
+            "Arithmetic should not be supported: {}",
+            sql
+        );
+    }
+
+    // Typed literals (TIME keyword) are not supported
+    #[rstest]
+    #[case("ts_col >= TIME '00:00:00'")]
+    #[case("ts_col > TIME '12:00:00'")]
+    fn unsupported_typed_literals(#[case] sql: &str) {
+        let schema = test_schema();
+        let result = parse_predicate(sql, &schema);
+        assert!(
+            result.is_err(),
+            "Typed literals should not be supported: {}",
+            sql
+        );
+    }
+
+    // IS NULL on complex expressions (not a column) is not supported
+    #[rstest]
+    #[case("(long_col < 0) IS NULL")]
+    #[case("(long_col > 0 AND int_col > 1) IS NULL")]
+    fn unsupported_is_null_on_expr(#[case] sql: &str) {
+        let schema = test_schema();
+        let result = parse_predicate(sql, &schema);
+        assert!(
+            result.is_err(),
+            "IS NULL on expressions should not be supported: {}",
+            sql
+        );
     }
 }
