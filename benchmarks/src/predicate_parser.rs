@@ -59,7 +59,7 @@ pub fn parse_predicate(
 // Typed (bidirectional) conversion functions
 ////////////////////////////////////////////////////////////////////////
 
-/// Tries to inferesize an expression, returning both the Expression and its DataType.
+/// Tries to infer an expression, returning both the Expression and its DataType.
 ///
 /// Returns `Some((Expression, DataType))` for:
 /// - Column references: look up type in schema, return column expression
@@ -84,10 +84,6 @@ fn infer_expr(ctx: &TypeContext, expr: &Expr) -> Option<(Expression, DataType)> 
             _ => None, // Numeric, string, null need type context
         },
         Expr::Nested(inner) => infer_expr(ctx, inner),
-        Expr::UnaryOp {
-            op: ast::UnaryOperator::Minus | ast::UnaryOperator::Plus,
-            expr: inner,
-        } => infer_expr(ctx, inner),
         Expr::BinaryOp { left, op, right } => {
             let (l, r, ty) = infer_binary_exprs(ctx, left, right).ok()?;
             let expr = match op {
@@ -133,7 +129,7 @@ fn check_expr(
         }
         Expr::Nested(inner) => check_expr(ctx, expected_ty, inner),
         _ => {
-            // For non-literals, inferesize and verify compatibility
+            // For non-literals, infer and verify compatibility
             let (e, actual_ty) = infer_expr(ctx, expr)
                 .ok_or_else(|| format!("Cannot determine type for: {expr}"))?;
             if can_coerce(&actual_ty, expected_ty) {
@@ -261,8 +257,8 @@ fn expr_to_predicate(
             expr,
         } => Ok(Predicate::not(expr_to_predicate(ctx, expr)?)),
         Expr::IsNull(e) | Expr::IsNotNull(e) => {
-            let (col_expr, _) =
-                infer_expr(ctx, e).ok_or_else(|| format!("IS NULL requires a column, got: {e}"))?;
+            let (col_expr, _) = infer_expr(ctx, e)
+                .ok_or_else(|| format!("Cannot infer type for IS NULL operand: {e}"))?;
             if matches!(expr, Expr::IsNull(_)) {
                 Ok(Predicate::is_null(col_expr))
             } else {
@@ -309,17 +305,18 @@ fn binary_op_to_predicate(
         | ast::BinaryOperator::Gt
         | ast::BinaryOperator::GtEq
         | ast::BinaryOperator::Spaceship => {
+            use ast::BinaryOperator::*;
             let (l, r, _) = infer_binary_exprs(ctx, left, right)?;
-            match op {
-                ast::BinaryOperator::Eq => Ok(Predicate::eq(l, r)),
-                ast::BinaryOperator::NotEq => Ok(Predicate::ne(l, r)),
-                ast::BinaryOperator::Lt => Ok(Predicate::lt(l, r)),
-                ast::BinaryOperator::LtEq => Ok(Predicate::le(l, r)),
-                ast::BinaryOperator::Gt => Ok(Predicate::gt(l, r)),
-                ast::BinaryOperator::GtEq => Ok(Predicate::ge(l, r)),
-                ast::BinaryOperator::Spaceship => Ok(Predicate::not(Predicate::distinct(l, r))),
+            Ok(match op {
+                Eq => Predicate::eq(l, r),
+                NotEq => Predicate::ne(l, r),
+                Lt => Predicate::lt(l, r),
+                LtEq => Predicate::le(l, r),
+                Gt => Predicate::gt(l, r),
+                GtEq => Predicate::ge(l, r),
+                Spaceship => Predicate::not(Predicate::distinct(l, r)),
                 _ => unreachable!(),
-            }
+            })
         }
         ast::BinaryOperator::And => {
             let l = expr_to_predicate(ctx, left)?;
@@ -444,7 +441,7 @@ mod tests {
     #[case("long_col > -10", Pred::gt(col!("long_col"), Long(-10)))]
     #[case("long_col IS NULL", Pred::is_null(col!("long_col")))]
     #[case("long_col IS NOT NULL", Pred::is_not_null(col!("long_col")))]
-    #[case("str_col IS NOT NULL", Pred::not(Pred::is_null(col!("str_col"))))]
+    #[case("str_col IS NOT NULL", Pred::is_not_null(col!("str_col")))]
     fn parse_comparison(#[case] sql: &str, #[case] expected: Predicate) {
         let schema = test_schema();
         let pred = parse_predicate(sql, &schema).unwrap();
@@ -513,55 +510,34 @@ mod tests {
         assert_eq!(pred, expected);
     }
 
+    /// Helper to build an IN list predicate
+    fn in_list_pred(
+        col: impl Into<Expression>,
+        element_type: DataType,
+        values: Vec<Scalar>,
+        negated: bool,
+    ) -> Predicate {
+        let array = ArrayData::try_new(ArrayType::new(element_type, false), values).unwrap();
+        let pred = Pred::binary(
+            delta_kernel::expressions::BinaryPredicateOp::In,
+            col.into(),
+            Expression::literal(Array(array)),
+        );
+        if negated {
+            Pred::not(pred)
+        } else {
+            pred
+        }
+    }
+
     // IN list
-    #[test]
-    fn parse_in_list() {
+    #[rstest]
+    #[case("long_col IN (1, 2, 3)", in_list_pred(col!("long_col"), DataType::LONG, vec![Long(1), Long(2), Long(3)], false))]
+    #[case("long_col NOT IN (1, 2)", in_list_pred(col!("long_col"), DataType::LONG, vec![Long(1), Long(2)], true))]
+    #[case("int_col IN (10, 20, 30)", in_list_pred(col!("int_col"), DataType::INTEGER, vec![Integer(10), Integer(20), Integer(30)], false))]
+    fn parse_in_list(#[case] sql: &str, #[case] expected: Predicate) {
         let schema = test_schema();
-        let pred = parse_predicate("long_col IN (1, 2, 3)", &schema).unwrap();
-        let array = ArrayData::try_new(
-            ArrayType::new(DataType::LONG, false),
-            vec![Long(1), Long(2), Long(3)],
-        )
-        .unwrap();
-        let expected = Pred::binary(
-            delta_kernel::expressions::BinaryPredicateOp::In,
-            col!("long_col"),
-            Expression::literal(Array(array)),
-        );
-        assert_eq!(pred, expected);
-    }
-
-    #[test]
-    fn parse_not_in_list() {
-        let schema = test_schema();
-        let pred = parse_predicate("long_col NOT IN (1, 2)", &schema).unwrap();
-        let array = ArrayData::try_new(
-            ArrayType::new(DataType::LONG, false),
-            vec![Long(1), Long(2)],
-        )
-        .unwrap();
-        let expected = Pred::not(Pred::binary(
-            delta_kernel::expressions::BinaryPredicateOp::In,
-            col!("long_col"),
-            Expression::literal(Array(array)),
-        ));
-        assert_eq!(pred, expected);
-    }
-
-    #[test]
-    fn parse_in_list_typed() {
-        let schema = test_schema();
-        let pred = parse_predicate("int_col IN (10, 20, 30)", &schema).unwrap();
-        let array = ArrayData::try_new(
-            ArrayType::new(DataType::INTEGER, false),
-            vec![Integer(10), Integer(20), Integer(30)],
-        )
-        .unwrap();
-        let expected = Pred::binary(
-            delta_kernel::expressions::BinaryPredicateOp::In,
-            col!("int_col"),
-            Expression::literal(Array(array)),
-        );
+        let pred = parse_predicate(sql, &schema).unwrap();
         assert_eq!(pred, expected);
     }
 
@@ -628,15 +604,11 @@ mod tests {
     fn parse_nested_struct_in_list() {
         let schema = test_schema();
         let pred = parse_predicate("struct_col.inner_int IN (18, 21, 25)", &schema).unwrap();
-        let array = ArrayData::try_new(
-            ArrayType::new(DataType::INTEGER, false),
-            vec![Integer(18), Integer(21), Integer(25)],
-        )
-        .unwrap();
-        let expected = Pred::binary(
-            delta_kernel::expressions::BinaryPredicateOp::In,
+        let expected = in_list_pred(
             col!("struct_col.inner_int"),
-            Expression::literal(Array(array)),
+            DataType::INTEGER,
+            vec![Integer(18), Integer(21), Integer(25)],
+            false,
         );
         assert_eq!(pred, expected);
     }
