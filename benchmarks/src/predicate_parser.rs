@@ -4,15 +4,18 @@
 //! - Binary comparisons: `=`, `!=`, `<>`, `<`, `>`, `<=`, `>=`
 //! - Null-safe equals: `<=>`
 //! - Logical operators: `AND`, `OR`, `NOT`
+//! - Arithmetic operators: `+`, `-`, `*`, `/`, `%`
 //! - `IS NULL`, `IS NOT NULL`
 //! - `IN (...)`, `NOT IN (...)`
 //! - `BETWEEN ... AND ...`
 //! - Column references and literal values (integers, floats, strings, booleans)
 //!
 //! Unsupported (returns error): `LIKE`, function calls (`HEX`, `size`, `length`),
-//! arithmetic expressions (`a % 100`), typed literals (`TIME '...'`).
+//! typed literals (`TIME '...'`).
 
-use delta_kernel::expressions::{ArrayData, ColumnName, Expression, Predicate, Scalar};
+use delta_kernel::expressions::{
+    ArrayData, BinaryExpressionOp, ColumnName, Expression, Predicate, Scalar,
+};
 use delta_kernel::schema::{ArrayType, DataType, PrimitiveType, Schema};
 
 use sqlparser::ast::{self, Expr, UnaryOperator, Value};
@@ -49,399 +52,139 @@ pub fn parse_predicate(
         .parse_expr()
         .map_err(|e| format!("Failed to parse predicate: {e}"))?;
     let ctx = TypeContext { schema };
-    convert_expr_to_predicate(&ctx, &expr)
+    expr_to_predicate(&ctx, &expr)
 }
 
 ////////////////////////////////////////////////////////////////////////
 // Typed (bidirectional) conversion functions
 ////////////////////////////////////////////////////////////////////////
 
-/// Navigates through nested struct fields to find the type of a compound identifier.
+/// Tries to inferesize an expression, returning both the Expression and its DataType.
 ///
-/// For example, given schema with a struct field "user" containing "age",
-/// this can look up ["user", "age"] to get the type of "user.age".
-fn find_nested_field_type(schema: &Schema, field_path: &[&str]) -> Option<DataType> {
-    if field_path.is_empty() {
-        return None;
-    }
-
-    // Start with the root schema
-    let mut current_type: &DataType = schema.field(field_path[0])?.data_type();
-
-    // Navigate through remaining path parts
-    for (i, &field_name) in field_path.iter().enumerate().skip(1) {
-        // Extract the struct type from current_type
-        let current_struct = match current_type {
-            DataType::Struct(s) => s.as_ref(),
-            _ => return None, // Can't navigate into non-struct
-        };
-
-        // Find the field in this struct
-        let field = current_struct.fields().find(|f| f.name() == field_name)?;
-
-        // If this is the last field in the path, return its type
-        if i == field_path.len() - 1 {
-            return Some(field.data_type().clone());
-        }
-
-        // Otherwise, continue navigating
-        current_type = field.data_type();
-    }
-
-    // If we only had one field in the path, return its type
-    if field_path.len() == 1 {
-        return Some(current_type.clone());
-    }
-
-    None
-}
-
-/// Tries to synthesize a type for an expression.
+/// Returns `Some((Expression, DataType))` for:
+/// - Column references: look up type in schema, return column expression
+/// - Boolean literals: return literal expression with BOOLEAN type
 ///
-/// Returns `Some(DataType)` if the expression has a definitive type without context:
-/// - Column references: look up type in schema (supports nested structs)
-/// - String literals: always String
-/// - Boolean literals: always Boolean
-///
-/// Returns `None` if the expression needs context to determine its type:
-/// - Numeric literals: ambiguous (could be Long, Integer, Short, Byte, Float, Double)
-/// - NULL: could be any type
-fn try_synthesize_expr(ctx: &TypeContext, expr: &Expr) -> Option<DataType> {
+/// Returns `None` if the expression needs type context (numeric literals, strings, NULL).
+fn infer_expr(ctx: &TypeContext, expr: &Expr) -> Option<(Expression, DataType)> {
     match expr {
         Expr::Identifier(ident) => {
-            // Look up column in schema (simple field name)
-            ctx.schema
-                .field(ident.value.as_str())
-                .map(|f| f.data_type().clone())
+            let ty = ctx.schema.field(ident.value.as_str())?.data_type().clone();
+            let expr = Expression::column([ident.value.clone()]);
+            Some((expr, ty))
         }
         Expr::CompoundIdentifier(parts) => {
-            // Navigate through nested structs for compound identifiers like "user.age"
-            let field_names: Vec<&str> = parts.iter().map(|p| p.value.as_str()).collect();
-            find_nested_field_type(ctx.schema, &field_names)
+            let col_name = ColumnName::new(parts.iter().map(|p| p.value.clone()));
+            let ty = ctx.schema.resolve_column(&col_name)?.data_type().clone();
+            let expr = Expression::column(parts.iter().map(|p| p.value.clone()));
+            Some((expr, ty))
         }
-        Expr::CompoundFieldAccess { root, access_chain } => {
-            // CompoundFieldAccess is used for:
-            // 1. Dot-style field access: user.age (sqlparser quirk - also uses this instead of CompoundIdentifier)
-            // 2. Subscript operations: a[1], a['field'] (not supported in kernel predicates)
-            // 3. Mixed: a[1].field (not supported in kernel predicates)
-            //
-            // We only support pure dot-style access (case 1)
-
-            // Check if this is pure dot-style access (no subscripts)
-            let has_subscripts = access_chain
-                .iter()
-                .any(|access| !matches!(access, ast::AccessExpr::Dot(_)));
-            if has_subscripts {
-                return None; // Subscripts not supported
-            }
-
-            // Extract field path from root and access chain
-            let mut parts: Vec<&str> = Vec::new();
-            if let Expr::Function(func) = root.as_ref() {
-                // sqlparser parses "user.age" with root as a Function node
-                for part in &func.name.0 {
-                    if let Some(ident) = part.as_ident() {
-                        parts.push(&ident.value);
-                    }
-                }
-            } else if let Expr::Identifier(ident) = root.as_ref() {
-                parts.push(&ident.value);
-            }
-
-            // Extract remaining parts from access chain
-            for access in access_chain {
-                if let ast::AccessExpr::Dot(Expr::Identifier(ident)) = access {
-                    parts.push(&ident.value);
-                }
-            }
-
-            find_nested_field_type(ctx.schema, &parts)
-        }
-        Expr::Value(value_with_span) => match &value_with_span.value {
-            // String literals are polymorphic - they can be coerced to dates, timestamps, etc.
-            // So don't synthesize a type - let them be checked bidirectionally
-            Value::SingleQuotedString(_) | Value::DoubleQuotedString(_) => None,
-            // Boolean literals synthesize to BOOLEAN
-            Value::Boolean(_) => Some(DataType::BOOLEAN),
-            // Numeric literals are ambiguous - could be any numeric type
-            Value::Number(_, _) => None,
-            // NULL is ambiguous - could be any type
-            Value::Null => None,
-            _ => None,
+        Expr::Value(v) => match &v.value {
+            Value::Boolean(b) => Some((Scalar::Boolean(*b).into(), DataType::BOOLEAN)),
+            _ => None, // Numeric, string, null need type context
         },
-        Expr::Nested(inner) => try_synthesize_expr(ctx, inner),
-        Expr::UnaryOp { op, expr } => {
-            if matches!(op, ast::UnaryOperator::Minus | ast::UnaryOperator::Plus) {
-                // Unary +/- preserves the type of the inner expression
-                try_synthesize_expr(ctx, expr)
-            } else {
-                None
-            }
-        }
+        Expr::Nested(inner) => infer_expr(ctx, inner),
+        Expr::UnaryOp {
+            op: ast::UnaryOperator::Minus | ast::UnaryOperator::Plus,
+            expr: inner,
+        } => infer_expr(ctx, inner),
         Expr::BinaryOp { left, op, right } => {
-            use ast::BinaryOperator::*;
-            match op {
-                // Arithmetic operators - return wider of the two numeric types
-                Plus | Minus | Multiply | Divide | Modulo => {
-                    let left_ty = try_synthesize_expr(ctx, left)?;
-                    let right_ty = try_synthesize_expr(ctx, right)?;
-                    synthesize_arithmetic_result_type(&left_ty, &right_ty)
+            let (l, r, ty) = infer_binary_exprs(ctx, left, right).ok()?;
+            let expr = match op {
+                ast::BinaryOperator::Plus => Expression::binary(BinaryExpressionOp::Plus, l, r),
+                ast::BinaryOperator::Minus => Expression::binary(BinaryExpressionOp::Minus, l, r),
+                ast::BinaryOperator::Multiply => {
+                    Expression::binary(BinaryExpressionOp::Multiply, l, r)
                 }
-                // Comparison and logical operators return boolean, but they're handled as predicates
-                _ => None,
-            }
+                ast::BinaryOperator::Divide => Expression::binary(BinaryExpressionOp::Divide, l, r),
+                // a % b = a - (b * (a / b))
+                ast::BinaryOperator::Modulo => {
+                    let a_div_b =
+                        Expression::binary(BinaryExpressionOp::Divide, l.clone(), r.clone());
+                    let b_times_quotient =
+                        Expression::binary(BinaryExpressionOp::Multiply, r, a_div_b);
+                    Expression::binary(BinaryExpressionOp::Minus, l, b_times_quotient)
+                }
+                _ => return None,
+            };
+            Some((expr, ty))
         }
         _ => None,
     }
 }
 
-/// Get the numeric rank of a primitive type for widening purposes.
-/// Higher rank = wider type. Returns None for non-numeric types.
-fn numeric_rank(ty: &PrimitiveType) -> Option<u8> {
-    use PrimitiveType::*;
-    match ty {
-        Byte => Some(1),
-        Short => Some(2),
-        Integer => Some(3),
-        Long => Some(4),
-        Float => Some(5),
-        Double => Some(6),
-        _ => None,
-    }
-}
-
-/// Convert a numeric rank back to a DataType.
-fn rank_to_type(rank: u8) -> DataType {
-    match rank {
-        1 => DataType::BYTE,
-        2 => DataType::SHORT,
-        3 => DataType::INTEGER,
-        4 => DataType::LONG,
-        5 => DataType::FLOAT,
-        6 => DataType::DOUBLE,
-        _ => unreachable!("Invalid numeric rank"),
-    }
-}
-
-/// Synthesize the result type of an arithmetic operation.
-/// Returns the wider of the two numeric types following Delta's type widening rules:
-/// - Integer widening: byte → short → int → long
-/// - Float widening: float → double
-/// - Mixed integer/float: result is the float type
-fn synthesize_arithmetic_result_type(left: &DataType, right: &DataType) -> Option<DataType> {
-    match (left, right) {
-        (DataType::Primitive(l), DataType::Primitive(r)) => {
-            let left_rank = numeric_rank(l)?;
-            let right_rank = numeric_rank(r)?;
-            Some(rank_to_type(left_rank.max(right_rank)))
-        }
-        _ => None,
-    }
-}
-
-/// Checks that an expression can be coerced to the expected type.
-///
-/// For literals, attempts to parse them as the expected type.
-/// For other expressions, synthesizes their type and verifies compatibility.
+/// Checks that an expression has the expected type, returning the typed Expression.
 fn check_expr(
     ctx: &TypeContext,
     expected_ty: &DataType,
     expr: &Expr,
 ) -> Result<Expression, Box<dyn std::error::Error>> {
     match expr {
-        Expr::Value(value_with_span) => check_literal(expected_ty, &value_with_span.value, false),
+        Expr::Value(v) => check_literal(expected_ty, &v.value, false),
         Expr::UnaryOp {
             op: UnaryOperator::Minus,
             expr: inner,
         } => {
-            if let Expr::Value(value_with_span) = inner.as_ref() {
-                check_literal(expected_ty, &value_with_span.value, true)
+            if let Expr::Value(v) = inner.as_ref() {
+                check_literal(expected_ty, &v.value, true)
             } else {
                 Err(format!("Unsupported unary minus on: {expr}").into())
             }
         }
         Expr::Nested(inner) => check_expr(ctx, expected_ty, inner),
         _ => {
-            // For non-literals, try to synthesize the type and verify compatibility
-            if let Some(actual_ty) = try_synthesize_expr(ctx, expr) {
-                if can_coerce(&actual_ty, expected_ty) {
-                    convert_expr_to_expression(ctx, expr)
-                } else {
-                    Err(format!(
-                        "Type mismatch: expected {:?}, got {:?}",
-                        expected_ty, actual_ty
-                    )
-                    .into())
-                }
+            // For non-literals, inferesize and verify compatibility
+            let (e, actual_ty) = infer_expr(ctx, expr)
+                .ok_or_else(|| format!("Cannot determine type for: {expr}"))?;
+            if can_coerce(&actual_ty, expected_ty) {
+                Ok(e)
             } else {
-                // Cannot synthesize type - this shouldn't happen in well-formed predicates
-                Err(format!("Cannot determine type for expression: {expr}").into())
+                Err(format!(
+                    "Type mismatch: expected {:?}, got {:?}",
+                    expected_ty, actual_ty
+                )
+                .into())
             }
         }
     }
 }
 
-/// Parse a date string in YYYY-MM-DD format to days since Unix epoch.
-fn parse_date_string(s: &str) -> Result<i32, Box<dyn std::error::Error>> {
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 3 {
-        return Err(format!("Invalid date format: {}", s).into());
-    }
-
-    let year: i32 = parts[0]
-        .parse()
-        .map_err(|_| format!("Invalid year: {}", parts[0]))?;
-    let month: u32 = parts[1]
-        .parse()
-        .map_err(|_| format!("Invalid month: {}", parts[1]))?;
-    let day: u32 = parts[2]
-        .parse()
-        .map_err(|_| format!("Invalid day: {}", parts[2]))?;
-
-    // Simple date to days calculation
-    // Days since 1970-01-01
-    let days_per_year = 365;
-    let days_per_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-    let mut days = (year - 1970) * days_per_year;
-
-    // Add leap days
-    for y in 1970..year {
-        if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
-            days += 1;
-        }
-    }
-
-    // Add days for months
-    for m in 1..month {
-        days += days_per_month[(m - 1) as usize];
-    }
-
-    // Add leap day for current year if needed
-    if month > 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
-        days += 1;
-    }
-
-    // Add days in month
-    days += day as i32 - 1;
-
-    Ok(days)
-}
-
-/// Parse a time string in HH:MM:SS format to microseconds.
-fn parse_time_string(s: &str) -> Result<i64, Box<dyn std::error::Error>> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 3 {
-        return Err(format!("Invalid time format: {}", s).into());
-    }
-
-    let hours: i64 = parts[0]
-        .parse()
-        .map_err(|_| format!("Invalid hours: {}", parts[0]))?;
-    let minutes: i64 = parts[1]
-        .parse()
-        .map_err(|_| format!("Invalid minutes: {}", parts[1]))?;
-    let seconds: i64 = parts[2]
-        .parse()
-        .map_err(|_| format!("Invalid seconds: {}", parts[2]))?;
-
-    Ok((hours * 3600 + minutes * 60 + seconds) * 1_000_000)
-}
-
-/// Parse a timestamp string (YYYY-MM-DD HH:MM:SS or just HH:MM:SS) to microseconds since Unix epoch.
-fn parse_timestamp_string(s: &str) -> Result<i64, Box<dyn std::error::Error>> {
-    if s.contains(' ') {
-        // Full timestamp: YYYY-MM-DD HH:MM:SS
-        let parts: Vec<&str> = s.split(' ').collect();
-        if parts.len() != 2 {
-            return Err(format!("Invalid timestamp format: {}", s).into());
-        }
-
-        let days = parse_date_string(parts[0])?;
-        let time_micros = parse_time_string(parts[1])?;
-
-        Ok(days as i64 * 24 * 3600 * 1_000_000 + time_micros)
-    } else {
-        // Just time: HH:MM:SS (assume day 0)
-        parse_time_string(s)
-    }
-}
-
 /// Checks a literal value against an expected type and converts it to that type.
-/// Handles both positive and negative numeric literals.
+/// Uses kernel's `PrimitiveType::parse_scalar` for parsing.
 fn check_literal(
     expected_ty: &DataType,
     value: &Value,
     is_negative: bool,
 ) -> Result<Expression, Box<dyn std::error::Error>> {
+    use PrimitiveType::*;
     match (expected_ty, value) {
-        // Numeric types
-        (DataType::Primitive(PrimitiveType::Long), Value::Number(n, _)) => {
-            let val = n
-                .parse::<i64>()
-                .map_err(|_| format!("Cannot parse '{}' as Long (i64)", n))?;
-            Ok(Scalar::Long(if is_negative { -val } else { val }).into())
-        }
-        (DataType::Primitive(PrimitiveType::Integer), Value::Number(n, _)) => {
-            let val = n
-                .parse::<i32>()
-                .map_err(|_| format!("Cannot parse '{}' as Integer (i32)", n))?;
-            Ok(Scalar::Integer(if is_negative { -val } else { val }).into())
-        }
-        (DataType::Primitive(PrimitiveType::Short), Value::Number(n, _)) => {
-            let val = n
-                .parse::<i16>()
-                .map_err(|_| format!("Cannot parse '{}' as Short (i16)", n))?;
-            Ok(Scalar::Short(if is_negative { -val } else { val }).into())
-        }
-        (DataType::Primitive(PrimitiveType::Byte), Value::Number(n, _)) => {
-            let val = n
-                .parse::<i8>()
-                .map_err(|_| format!("Cannot parse '{}' as Byte (i8)", n))?;
-            Ok(Scalar::Byte(if is_negative { -val } else { val }).into())
-        }
-        (DataType::Primitive(PrimitiveType::Float), Value::Number(n, _)) => {
-            let val = n
-                .parse::<f32>()
-                .map_err(|_| format!("Cannot parse '{}' as Float (f32)", n))?;
-            Ok(Scalar::Float(if is_negative { -val } else { val }).into())
-        }
-        (DataType::Primitive(PrimitiveType::Double), Value::Number(n, _)) => {
-            let val = n
-                .parse::<f64>()
-                .map_err(|_| format!("Cannot parse '{}' as Double (f64)", n))?;
-            Ok(Scalar::Double(if is_negative { -val } else { val }).into())
+        // Numeric literals - only for numeric primitive types
+        (
+            DataType::Primitive(
+                prim @ (Byte | Short | Integer | Long | Float | Double | Decimal(_)),
+            ),
+            Value::Number(n, _),
+        ) => {
+            let raw = if is_negative {
+                format!("-{}", n)
+            } else {
+                n.clone()
+            };
+            let scalar = prim.parse_scalar(&raw).map_err(|e| e.to_string())?;
+            Ok(scalar.into())
         }
 
-        // String type
-        (DataType::Primitive(PrimitiveType::String), Value::SingleQuotedString(s))
-        | (DataType::Primitive(PrimitiveType::String), Value::DoubleQuotedString(s)) => {
-            Ok(Scalar::from(s.clone()).into())
+        // String literals - use parse_scalar (handles String, Date, Timestamp, etc.)
+        (
+            DataType::Primitive(prim),
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s),
+        ) => {
+            let scalar = prim.parse_scalar(s).map_err(|e| e.to_string())?;
+            Ok(scalar.into())
         }
 
-        // Boolean type
-        (DataType::Primitive(PrimitiveType::Boolean), Value::Boolean(b)) => {
-            Ok(Scalar::Boolean(*b).into())
-        }
-
-        // Date/Time types from string literals
-        (DataType::Primitive(PrimitiveType::Date), Value::SingleQuotedString(s))
-        | (DataType::Primitive(PrimitiveType::Date), Value::DoubleQuotedString(s)) => {
-            // Parse date string (YYYY-MM-DD format)
-            let days = parse_date_string(s)?;
-            Ok(Scalar::Date(days).into())
-        }
-        (DataType::Primitive(PrimitiveType::Timestamp), Value::SingleQuotedString(s))
-        | (DataType::Primitive(PrimitiveType::Timestamp), Value::DoubleQuotedString(s)) => {
-            // Parse timestamp string (time portion can be HH:MM:SS format for just times)
-            let micros = parse_timestamp_string(s)?;
-            Ok(Scalar::Timestamp(micros).into())
-        }
-        (DataType::Primitive(PrimitiveType::TimestampNtz), Value::SingleQuotedString(s))
-        | (DataType::Primitive(PrimitiveType::TimestampNtz), Value::DoubleQuotedString(s)) => {
-            let micros = parse_timestamp_string(s)?;
-            Ok(Scalar::TimestampNtz(micros).into())
-        }
+        // Boolean literals
+        (DataType::Primitive(Boolean), Value::Boolean(b)) => Ok(Scalar::Boolean(*b).into()),
 
         // NULL can be any type
         (ty, Value::Null) => Ok(Scalar::Null(ty.clone()).into()),
@@ -455,85 +198,104 @@ fn check_literal(
     }
 }
 
-/// Checks if one type can be coerced to another.
-///
-/// Supports primitive type widening:
-/// - Integer widening: byte → short → int → long
-/// - Float widening: float → double
-/// - Timestamp equivalence: Timestamp ↔ TimestampNtz
+/// Checks if one type can be coerced to another using kernel's type widening rules.
 fn can_coerce(from: &DataType, to: &DataType) -> bool {
-    use PrimitiveType::*;
     match (from, to) {
-        (DataType::Primitive(f), DataType::Primitive(t)) => {
-            f == t
-                || matches!(
-                    (f, t),
-                    (Byte, Short | Integer | Long)
-                        | (Short, Integer | Long)
-                        | (Integer, Long)
-                        | (Float, Double)
-                        | (Timestamp, TimestampNtz)
-                        | (TimestampNtz, Timestamp)
-                )
-        }
+        (DataType::Primitive(f), DataType::Primitive(t)) => f == t || f.can_widen_to(t),
         _ => from == to,
     }
 }
 
+/// Synthesizes both operands of a binary operation and checks them against the widest common type.
+/// Returns `Ok((left_expr, right_expr, common_type))` on success.
+fn infer_binary_exprs(
+    ctx: &TypeContext,
+    left: &Expr,
+    right: &Expr,
+) -> Result<(Expression, Expression, DataType), Box<dyn std::error::Error>> {
+    let l_infer = infer_expr(ctx, left);
+    let r_infer = infer_expr(ctx, right);
+
+    // Find widest common type
+    let common_ty = match (&l_infer, &r_infer) {
+        (Some((_, l_ty)), Some((_, r_ty))) => {
+            if l_ty == r_ty {
+                l_ty.clone()
+            } else if can_coerce(l_ty, r_ty) {
+                r_ty.clone()
+            } else if can_coerce(r_ty, l_ty) {
+                l_ty.clone()
+            } else {
+                return Err(
+                    format!("Type mismatch: cannot compare {:?} with {:?}", l_ty, r_ty).into(),
+                );
+            }
+        }
+        (Some((_, ty)), None) | (None, Some((_, ty))) => ty.clone(),
+        (None, None) => {
+            return Err(format!("Cannot determine types for: {} and {}", left, right).into())
+        }
+    };
+
+    let l = match l_infer {
+        Some((e, _)) => e,
+        None => check_expr(ctx, &common_ty, left)?,
+    };
+    let r = match r_infer {
+        Some((e, _)) => e,
+        None => check_expr(ctx, &common_ty, right)?,
+    };
+
+    Ok((l, r, common_ty))
+}
+
 /// Converts a sqlparser AST expression into a kernel [`Predicate`] with type checking.
-fn convert_expr_to_predicate(
+fn expr_to_predicate(
     ctx: &TypeContext,
     expr: &Expr,
 ) -> Result<Predicate, Box<dyn std::error::Error>> {
     match expr {
-        Expr::BinaryOp { left, op, right } => convert_binary_op(ctx, left, op, right),
+        Expr::BinaryOp { left, op, right } => binary_op_to_predicate(ctx, left, op, right),
         Expr::UnaryOp {
             op: UnaryOperator::Not,
             expr,
-        } => {
-            let inner = convert_expr_to_predicate(ctx, expr)?;
-            Ok(Predicate::not(inner))
+        } => Ok(Predicate::not(expr_to_predicate(ctx, expr)?)),
+        Expr::IsNull(e) | Expr::IsNotNull(e) => {
+            let (col_expr, _) =
+                infer_expr(ctx, e).ok_or_else(|| format!("IS NULL requires a column, got: {e}"))?;
+            if matches!(expr, Expr::IsNull(_)) {
+                Ok(Predicate::is_null(col_expr))
+            } else {
+                Ok(Predicate::is_not_null(col_expr))
+            }
         }
-        Expr::IsNull(expr) => {
-            let inner = convert_expr_to_expression(ctx, expr)?;
-            Ok(Predicate::is_null(inner))
-        }
-        Expr::IsNotNull(expr) => {
-            let inner = convert_expr_to_expression(ctx, expr)?;
-            Ok(Predicate::is_not_null(inner))
-        }
-        Expr::Nested(inner) => convert_expr_to_predicate(ctx, inner),
-        Expr::Value(value) => match &value.value {
+        Expr::Nested(inner) => expr_to_predicate(ctx, inner),
+        Expr::Value(v) => match &v.value {
             Value::Boolean(b) => Ok(Predicate::literal(*b)),
-            _ => Err(format!("Unsupported literal in predicate position: {value}").into()),
+            _ => Err(format!("Unsupported literal in predicate position: {v}").into()),
         },
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
-            let col_expr = convert_expr_to_expression(ctx, expr)?;
+            let (col_expr, _) =
+                infer_expr(ctx, expr).ok_or_else(|| format!("Unknown column: {expr}"))?;
             Ok(Predicate::from_expr(col_expr))
         }
         Expr::InList {
             expr,
             list,
             negated,
-        } => convert_in_list(ctx, expr, list, *negated),
+        } => in_list_to_predicate(ctx, expr, list, *negated),
         Expr::Between {
             expr,
             negated,
             low,
             high,
-        } => convert_between(ctx, expr, *negated, low, high),
-        _ => Err(format!("Unsupported expression type: {expr}").into()),
+        } => between_to_predicate(ctx, expr, *negated, low, high),
+        _ => Err(format!("Unsupported expression: {expr}").into()),
     }
 }
 
-/// Converts a binary operation into a kernel [`Predicate`] with type checking.
-///
-/// Uses bidirectional type checking:
-/// - If left side has a type (e.g., column), check right against it
-/// - If right side has a type (e.g., column), check left against it
-/// - If both have types, verify they're compatible
-/// - If neither has a type, fall back to inference
-fn convert_binary_op(
+/// Converts a binary comparison into a kernel [`Predicate`] with bidirectional type checking.
+fn binary_op_to_predicate(
     ctx: &TypeContext,
     left: &Expr,
     op: &ast::BinaryOperator,
@@ -547,43 +309,7 @@ fn convert_binary_op(
         | ast::BinaryOperator::Gt
         | ast::BinaryOperator::GtEq
         | ast::BinaryOperator::Spaceship => {
-            let left_synth = try_synthesize_expr(ctx, left);
-            let right_synth = try_synthesize_expr(ctx, right);
-
-            let (l, r) = match (left_synth, right_synth) {
-                // Both sides have types - verify compatibility
-                (Some(left_ty), Some(right_ty)) => {
-                    if !can_coerce(&left_ty, &right_ty) && !can_coerce(&right_ty, &left_ty) {
-                        return Err(format!(
-                            "Type mismatch: cannot compare {:?} with {:?}",
-                            left_ty, right_ty
-                        )
-                        .into());
-                    }
-                    (
-                        convert_expr_to_expression(ctx, left)?,
-                        convert_expr_to_expression(ctx, right)?,
-                    )
-                }
-                // Left has type, check right against it
-                (Some(left_ty), None) => {
-                    let l = convert_expr_to_expression(ctx, left)?;
-                    let r = check_expr(ctx, &left_ty, right)?;
-                    (l, r)
-                }
-                // Right has type, check left against it
-                (None, Some(right_ty)) => {
-                    let l = check_expr(ctx, &right_ty, left)?;
-                    let r = convert_expr_to_expression(ctx, right)?;
-                    (l, r)
-                }
-                // Neither has type - fall back to inference
-                (None, None) => (
-                    convert_expr_to_expression(ctx, left)?,
-                    convert_expr_to_expression(ctx, right)?,
-                ),
-            };
-
+            let (l, r, _) = infer_binary_exprs(ctx, left, right)?;
             match op {
                 ast::BinaryOperator::Eq => Ok(Predicate::eq(l, r)),
                 ast::BinaryOperator::NotEq => Ok(Predicate::ne(l, r)),
@@ -596,13 +322,13 @@ fn convert_binary_op(
             }
         }
         ast::BinaryOperator::And => {
-            let l = convert_expr_to_predicate(ctx, left)?;
-            let r = convert_expr_to_predicate(ctx, right)?;
+            let l = expr_to_predicate(ctx, left)?;
+            let r = expr_to_predicate(ctx, right)?;
             Ok(Predicate::and(l, r))
         }
         ast::BinaryOperator::Or => {
-            let l = convert_expr_to_predicate(ctx, left)?;
-            let r = convert_expr_to_predicate(ctx, right)?;
+            let l = expr_to_predicate(ctx, left)?;
+            let r = expr_to_predicate(ctx, right)?;
             Ok(Predicate::or(l, r))
         }
         _ => Err(format!("Unsupported binary operator: {op}").into()),
@@ -610,160 +336,48 @@ fn convert_binary_op(
 }
 
 /// Converts an IN/NOT IN list into a kernel [`Predicate`] with type checking.
-fn convert_in_list(
+fn in_list_to_predicate(
     ctx: &TypeContext,
     expr: &Expr,
     list: &[Expr],
     negated: bool,
 ) -> Result<Predicate, Box<dyn std::error::Error>> {
-    // Synthesize the column type
-    let col_ty = try_synthesize_expr(ctx, expr).ok_or_else(|| {
-        format!(
-            "IN expression requires a column reference on the left side, got: {}",
-            expr
-        )
-    })?;
+    let (col_expr, col_ty) =
+        infer_expr(ctx, expr).ok_or_else(|| format!("IN requires a column, got: {expr}"))?;
 
-    // Check each list element against the column type
     let scalars: Vec<Scalar> = list
         .iter()
-        .map(|e| {
-            let expr = check_expr(ctx, &col_ty, e)?;
-            match expr {
-                Expression::Literal(s) => Ok(s),
-                _ => Err(format!("IN list elements must be literals, got: {e}").into()),
-            }
+        .map(|e| match check_expr(ctx, &col_ty, e)? {
+            Expression::Literal(s) => Ok(s),
+            _ => Err(format!("IN list elements must be literals, got: {e}").into()),
         })
         .collect::<Result<_, Box<dyn std::error::Error>>>()?;
 
     let array_data = ArrayData::try_new(ArrayType::new(col_ty, false), scalars)?;
-    let array_expr = Expression::literal(Scalar::Array(array_data));
-    let col_expr = convert_expr_to_expression(ctx, expr)?;
-
     let pred = Predicate::binary(
         delta_kernel::expressions::BinaryPredicateOp::In,
         col_expr,
-        array_expr,
+        Expression::literal(Scalar::Array(array_data)),
     );
-    if negated {
-        Ok(Predicate::not(pred))
-    } else {
-        Ok(pred)
-    }
+    Ok(if negated { Predicate::not(pred) } else { pred })
 }
 
 /// Converts BETWEEN into `col >= low AND col <= high` with type checking.
-fn convert_between(
+fn between_to_predicate(
     ctx: &TypeContext,
     expr: &Expr,
     negated: bool,
     low: &Expr,
     high: &Expr,
 ) -> Result<Predicate, Box<dyn std::error::Error>> {
-    // Synthesize the column type
-    let col_ty = try_synthesize_expr(ctx, expr).ok_or_else(|| {
-        format!(
-            "BETWEEN expression requires a column reference, got: {}",
-            expr
-        )
-    })?;
-
-    let col = convert_expr_to_expression(ctx, expr)?;
-    let low_expr = check_expr(ctx, &col_ty, low)?;
-    let high_expr = check_expr(ctx, &col_ty, high)?;
+    let (expr_checked, low_checked, common_ty) = infer_binary_exprs(ctx, expr, low)?;
+    let high_checked = check_expr(ctx, &common_ty, high)?;
 
     let pred = Predicate::and(
-        Predicate::ge(col.clone(), low_expr),
-        Predicate::le(col, high_expr),
+        Predicate::ge(expr_checked.clone(), low_checked),
+        Predicate::le(expr_checked, high_checked),
     );
-    if negated {
-        Ok(Predicate::not(pred))
-    } else {
-        Ok(pred)
-    }
-}
-
-/// Converts a sqlparser AST expression into a kernel [`Expression`] with type checking.
-fn convert_expr_to_expression(
-    _ctx: &TypeContext,
-    expr: &Expr,
-) -> Result<Expression, Box<dyn std::error::Error>> {
-    // Type checking already happened at this point, so we just convert to Expression.
-    match expr {
-        Expr::Identifier(ident) => {
-            let name = ColumnName::new([ident.value.clone()]);
-            Ok(name.into())
-        }
-        Expr::CompoundIdentifier(parts) => {
-            let names: Vec<String> = parts.iter().map(|p| p.value.clone()).collect();
-            Ok(Expression::column(names))
-        }
-        Expr::CompoundFieldAccess { root, access_chain } => {
-            // Handle compound field access like "user.age"
-            let mut parts = Vec::new();
-            if let Expr::Function(func) = root.as_ref() {
-                for part in &func.name.0 {
-                    if let Some(ident) = part.as_ident() {
-                        parts.push(ident.value.clone());
-                    }
-                }
-            } else if let Expr::Identifier(ident) = root.as_ref() {
-                parts.push(ident.value.clone());
-            }
-
-            for access in access_chain {
-                if let ast::AccessExpr::Dot(Expr::Identifier(ident)) = access {
-                    parts.push(ident.value.clone());
-                }
-            }
-
-            Ok(Expression::column(parts))
-        }
-        Expr::Value(value) => {
-            // Convert value to expression (untyped - for compatibility)
-            match &value.value {
-                Value::Number(n, _) => {
-                    if let Ok(i) = n.parse::<i64>() {
-                        Ok(Scalar::Long(i).into())
-                    } else if let Ok(f) = n.parse::<f64>() {
-                        Ok(Scalar::Double(f).into())
-                    } else {
-                        Err(format!("Cannot parse number: {n}").into())
-                    }
-                }
-                Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-                    Ok(Scalar::from(s.clone()).into())
-                }
-                Value::Boolean(b) => Ok(Scalar::Boolean(*b).into()),
-                Value::Null => Ok(Scalar::Null(DataType::LONG).into()),
-                _ => Err(format!("Unsupported value: {value}").into()),
-            }
-        }
-        Expr::UnaryOp {
-            op: UnaryOperator::Minus,
-            expr: inner,
-        } => {
-            if let Expr::Value(value) = inner.as_ref() {
-                // Handle negative numbers
-                match &value.value {
-                    Value::Number(n, _) => {
-                        if let Ok(i) = n.parse::<i64>() {
-                            Ok(Scalar::Long(-i).into())
-                        } else if let Ok(f) = n.parse::<f64>() {
-                            Ok(Scalar::Double(-f).into())
-                        } else {
-                            Err(format!("Cannot parse negative number: {n}").into())
-                        }
-                    }
-                    _ => Err("Unsupported negative value".to_string().into()),
-                }
-            } else {
-                Err(format!("Unsupported unary minus on: {expr}").into())
-            }
-        }
-        Expr::Nested(inner) => convert_expr_to_expression(_ctx, inner),
-        _ => Err(format!("Unsupported expression: {expr}").into()),
-    }
+    Ok(if negated { Predicate::not(pred) } else { pred })
 }
 
 #[cfg(test)]
@@ -969,13 +583,13 @@ mod tests {
 
     // Type errors
     #[rstest]
-    #[case("long_col > 'CD'", "Type mismatch")]
-    #[case("long_col < 'AB'", "Type mismatch")]
-    #[case("long_col = false", "Type mismatch")]
-    #[case("long_col <= false", "Type mismatch")]
-    #[case("false = long_col", "Type mismatch")]
-    #[case("str_col = 123", "Type mismatch")]
-    #[case("short_col < 100000", "Cannot parse")]
+    #[case("long_col > 'CD'", "Failed to parse")] // String literal for Long column
+    #[case("long_col < 'AB'", "Failed to parse")] // String literal for Long column
+    #[case("long_col = false", "Type mismatch")] // Boolean vs Long
+    #[case("long_col <= false", "Type mismatch")] // Boolean vs Long
+    #[case("false = long_col", "Type mismatch")] // Boolean vs Long
+    #[case("str_col = 123", "Type mismatch")] // Number literal for String column
+    #[case("short_col < 100000", "Failed to parse")] // Overflow: 100000 > i16::MAX
     fn type_error_rejected(#[case] sql: &str, #[case] error_contains: &str) {
         let schema = test_schema();
         let result = parse_predicate(sql, &schema);
@@ -987,12 +601,16 @@ mod tests {
         );
     }
 
-    // Unknown column falls back to untyped parsing
+    // Unknown column produces an error
     #[test]
-    fn unknown_column_falls_back_to_untyped() {
+    fn unknown_column_produces_error() {
         let schema = test_schema();
-        let pred = parse_predicate("unknown_col < 500", &schema).unwrap();
-        assert!(format!("{:?}", pred).contains("unknown_col"));
+        let result = parse_predicate("unknown_col < 500", &schema);
+        assert!(result.is_err(), "Unknown columns should produce an error");
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot determine type"));
     }
 
     // Nested struct tests
@@ -1062,19 +680,55 @@ mod tests {
         );
     }
 
-    // Arithmetic expressions are not supported
+    // Arithmetic expressions
     #[rstest]
-    #[case("long_col % 100 < 10")]
-    #[case("long_col + int_col > 10")]
-    #[case("long_col * 2 = 10")]
-    fn unsupported_arithmetic(#[case] sql: &str) {
+    #[case(
+        "long_col + 10 > 100",
+        Pred::gt(
+            Expression::binary(BinaryExpressionOp::Plus, col!("long_col"), Long(10)),
+            Long(100)
+        )
+    )]
+    #[case(
+        "long_col * 2 = 10",
+        Pred::eq(
+            Expression::binary(BinaryExpressionOp::Multiply, col!("long_col"), Long(2)),
+            Long(10)
+        )
+    )]
+    #[case(
+        "int_col - 5 < 0",
+        Pred::lt(
+            Expression::binary(BinaryExpressionOp::Minus, col!("int_col"), Integer(5)),
+            Integer(0)
+        )
+    )]
+    #[case(
+        "double_col / 2.0 >= 1.5",
+        Pred::ge(
+            Expression::binary(BinaryExpressionOp::Divide, col!("double_col"), Double(2.0)),
+            Double(1.5)
+        )
+    )]
+    fn parse_arithmetic(#[case] sql: &str, #[case] expected: Predicate) {
         let schema = test_schema();
-        let result = parse_predicate(sql, &schema);
-        assert!(
-            result.is_err(),
-            "Arithmetic should not be supported: {}",
-            sql
-        );
+        let pred = parse_predicate(sql, &schema).unwrap();
+        assert_eq!(pred, expected);
+    }
+
+    // Modulo is transformed to a - (b * (a / b))
+    #[test]
+    fn parse_modulo() {
+        let schema = test_schema();
+        let pred = parse_predicate("long_col % 100 < 10", &schema).unwrap();
+        // long_col % 100 = long_col - (100 * (long_col / 100))
+        let a = col!("long_col");
+        let b: Expression = Long(100).into();
+        let a_div_b = Expression::binary(BinaryExpressionOp::Divide, a.clone(), b.clone());
+        let b_times_quotient = Expression::binary(BinaryExpressionOp::Multiply, b, a_div_b);
+        let modulo = Expression::binary(BinaryExpressionOp::Minus, a, b_times_quotient);
+        let expected = Pred::lt(modulo, Long(10));
+        assert_eq!(pred, expected);
     }
 
     // Typed literals (TIME keyword) are not supported
