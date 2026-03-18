@@ -769,7 +769,7 @@ fn convert_expr_to_expression(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use delta_kernel::expressions::column_name;
+    use delta_kernel::expressions::{column_name as col, Predicate as Pred, Scalar::*};
     use delta_kernel::schema::{MapType, StructField, StructType};
     use rstest::rstest;
 
@@ -816,21 +816,21 @@ mod tests {
 
     // Comparisons with typed scalars
     #[rstest]
-    #[case("long_col < 500", Predicate::lt(column_name!("long_col"), Scalar::Long(500)))]
-    #[case("500 > long_col", Predicate::gt(Scalar::Long(500), column_name!("long_col")))]
-    #[case("long_col = 999", Predicate::eq(column_name!("long_col"), Scalar::Long(999)))]
-    #[case("int_col > 100", Predicate::gt(column_name!("int_col"), Scalar::Integer(100)))]
-    #[case("short_col < 50", Predicate::lt(column_name!("short_col"), Scalar::Short(50)))]
-    #[case("byte_col <= 127", Predicate::le(column_name!("byte_col"), Scalar::Byte(127)))]
-    #[case("double_col >= 3.5", Predicate::ge(column_name!("double_col"), Scalar::Double(3.5)))]
-    #[case("float_col < 1.5", Predicate::lt(column_name!("float_col"), Scalar::Float(1.5)))]
-    #[case("str_col = 'hello'", Predicate::eq(column_name!("str_col"), Scalar::from("hello".to_string())))]
-    #[case("bool_col = true", Predicate::eq(column_name!("bool_col"), Scalar::Boolean(true)))]
-    #[case("bool_col = false", Predicate::eq(column_name!("bool_col"), Scalar::Boolean(false)))]
-    #[case("long_col > -10", Predicate::gt(column_name!("long_col"), Scalar::Long(-10)))]
-    #[case("long_col IS NULL", Predicate::is_null(column_name!("long_col")))]
-    #[case("long_col IS NOT NULL", Predicate::is_not_null(column_name!("long_col")))]
-    #[case("str_col IS NOT NULL", Predicate::not(Predicate::is_null(column_name!("str_col"))))]
+    #[case("long_col < 500", Pred::lt(col!("long_col"), Long(500)))]
+    #[case("500 > long_col", Pred::gt(Long(500), col!("long_col")))]
+    #[case("long_col = 999", Pred::eq(col!("long_col"), Long(999)))]
+    #[case("int_col > 100", Pred::gt(col!("int_col"), Integer(100)))]
+    #[case("short_col < 50", Pred::lt(col!("short_col"), Short(50)))]
+    #[case("byte_col <= 127", Pred::le(col!("byte_col"), Byte(127)))]
+    #[case("double_col >= 3.5", Pred::ge(col!("double_col"), Double(3.5)))]
+    #[case("float_col < 1.5", Pred::lt(col!("float_col"), Float(1.5)))]
+    #[case("str_col = 'hello'", Pred::eq(col!("str_col"), String("hello".to_string())))]
+    #[case("bool_col = true", Pred::eq(col!("bool_col"), Boolean(true)))]
+    #[case("bool_col = false", Pred::eq(col!("bool_col"), Boolean(false)))]
+    #[case("long_col > -10", Pred::gt(col!("long_col"), Long(-10)))]
+    #[case("long_col IS NULL", Pred::is_null(col!("long_col")))]
+    #[case("long_col IS NOT NULL", Pred::is_not_null(col!("long_col")))]
+    #[case("str_col IS NOT NULL", Pred::not(Pred::is_null(col!("str_col"))))]
     fn parse_comparison(#[case] sql: &str, #[case] expected: Predicate) {
         let schema = test_schema();
         let pred = parse_predicate(sql, &schema).unwrap();
@@ -841,27 +841,27 @@ mod tests {
     #[rstest]
     #[case(
         "long_col < 500 AND int_col > 10",
-        Predicate::and(
-            Predicate::lt(column_name!("long_col"), Scalar::Long(500)),
-            Predicate::gt(column_name!("int_col"), Scalar::Integer(10))
+        Pred::and(
+            Pred::lt(col!("long_col"), Long(500)),
+            Pred::gt(col!("int_col"), Integer(10))
         )
     )]
     #[case(
         "long_col = 1 OR long_col = 2",
-        Predicate::or(
-            Predicate::eq(column_name!("long_col"), Scalar::Long(1)),
-            Predicate::eq(column_name!("long_col"), Scalar::Long(2))
+        Pred::or(
+            Pred::eq(col!("long_col"), Long(1)),
+            Pred::eq(col!("long_col"), Long(2))
         )
     )]
     #[case(
         "NOT long_col = 1",
-        Predicate::not(Predicate::eq(column_name!("long_col"), Scalar::Long(1)))
+        Pred::not(Pred::eq(col!("long_col"), Long(1)))
     )]
     #[case(
         "(long_col < 500) AND (int_col > 10)",
-        Predicate::and(
-            Predicate::lt(column_name!("long_col"), Scalar::Long(500)),
-            Predicate::gt(column_name!("int_col"), Scalar::Integer(10))
+        Pred::and(
+            Pred::lt(col!("long_col"), Long(500)),
+            Pred::gt(col!("int_col"), Integer(10))
         )
     )]
     fn parse_logical(#[case] sql: &str, #[case] expected: Predicate) {
@@ -874,23 +874,23 @@ mod tests {
     #[rstest]
     #[case(
         "long_col BETWEEN 10 AND 20",
-        Predicate::and(
-            Predicate::ge(column_name!("long_col"), Scalar::Long(10)),
-            Predicate::le(column_name!("long_col"), Scalar::Long(20))
+        Pred::and(
+            Pred::ge(col!("long_col"), Long(10)),
+            Pred::le(col!("long_col"), Long(20))
         )
     )]
     #[case(
         "short_col BETWEEN 10 AND 20",
-        Predicate::and(
-            Predicate::ge(column_name!("short_col"), Scalar::Short(10)),
-            Predicate::le(column_name!("short_col"), Scalar::Short(20))
+        Pred::and(
+            Pred::ge(col!("short_col"), Short(10)),
+            Pred::le(col!("short_col"), Short(20))
         )
     )]
     #[case(
         "int_col NOT BETWEEN 0 AND 10",
-        Predicate::not(Predicate::and(
-            Predicate::ge(column_name!("int_col"), Scalar::Integer(0)),
-            Predicate::le(column_name!("int_col"), Scalar::Integer(10))
+        Pred::not(Pred::and(
+            Pred::ge(col!("int_col"), Integer(0)),
+            Pred::le(col!("int_col"), Integer(10))
         ))
     )]
     fn parse_between(#[case] sql: &str, #[case] expected: Predicate) {
@@ -906,13 +906,13 @@ mod tests {
         let pred = parse_predicate("long_col IN (1, 2, 3)", &schema).unwrap();
         let array = ArrayData::try_new(
             ArrayType::new(DataType::LONG, false),
-            vec![Scalar::Long(1), Scalar::Long(2), Scalar::Long(3)],
+            vec![Long(1), Long(2), Long(3)],
         )
         .unwrap();
-        let expected = Predicate::binary(
+        let expected = Pred::binary(
             delta_kernel::expressions::BinaryPredicateOp::In,
-            column_name!("long_col"),
-            Expression::literal(Scalar::Array(array)),
+            col!("long_col"),
+            Expression::literal(Array(array)),
         );
         assert_eq!(pred, expected);
     }
@@ -923,13 +923,13 @@ mod tests {
         let pred = parse_predicate("long_col NOT IN (1, 2)", &schema).unwrap();
         let array = ArrayData::try_new(
             ArrayType::new(DataType::LONG, false),
-            vec![Scalar::Long(1), Scalar::Long(2)],
+            vec![Long(1), Long(2)],
         )
         .unwrap();
-        let expected = Predicate::not(Predicate::binary(
+        let expected = Pred::not(Pred::binary(
             delta_kernel::expressions::BinaryPredicateOp::In,
-            column_name!("long_col"),
-            Expression::literal(Scalar::Array(array)),
+            col!("long_col"),
+            Expression::literal(Array(array)),
         ));
         assert_eq!(pred, expected);
     }
@@ -940,17 +940,13 @@ mod tests {
         let pred = parse_predicate("int_col IN (10, 20, 30)", &schema).unwrap();
         let array = ArrayData::try_new(
             ArrayType::new(DataType::INTEGER, false),
-            vec![
-                Scalar::Integer(10),
-                Scalar::Integer(20),
-                Scalar::Integer(30),
-            ],
+            vec![Integer(10), Integer(20), Integer(30)],
         )
         .unwrap();
-        let expected = Predicate::binary(
+        let expected = Pred::binary(
             delta_kernel::expressions::BinaryPredicateOp::In,
-            column_name!("int_col"),
-            Expression::literal(Scalar::Array(array)),
+            col!("int_col"),
+            Expression::literal(Array(array)),
         );
         assert_eq!(pred, expected);
     }
@@ -959,11 +955,11 @@ mod tests {
     #[rstest]
     #[case(
         "long_col <=> 1",
-        Predicate::not(Predicate::distinct(column_name!("long_col"), Scalar::Long(1)))
+        Pred::not(Pred::distinct(col!("long_col"), Long(1)))
     )]
     #[case(
         "long_col <=> NULL",
-        Predicate::not(Predicate::distinct(column_name!("long_col"), Scalar::Null(DataType::LONG)))
+        Pred::not(Pred::distinct(col!("long_col"), Null(DataType::LONG)))
     )]
     fn parse_null_safe_equals(#[case] sql: &str, #[case] expected: Predicate) {
         let schema = test_schema();
@@ -1001,9 +997,9 @@ mod tests {
 
     // Nested struct tests
     #[rstest]
-    #[case("struct_col.inner_int > 25", Predicate::gt(column_name!("struct_col.inner_int"), Scalar::Integer(25)))]
-    #[case("struct_col.inner_str = 'alice'", Predicate::eq(column_name!("struct_col.inner_str"), Scalar::from("alice".to_string())))]
-    #[case("struct_col.inner_int IS NULL", Predicate::is_null(column_name!("struct_col.inner_int")))]
+    #[case("struct_col.inner_int > 25", Pred::gt(col!("struct_col.inner_int"), Integer(25)))]
+    #[case("struct_col.inner_str = 'alice'", Pred::eq(col!("struct_col.inner_str"), String("alice".to_string())))]
+    #[case("struct_col.inner_int IS NULL", Pred::is_null(col!("struct_col.inner_int")))]
     fn parse_nested_struct(#[case] sql: &str, #[case] expected: Predicate) {
         let schema = test_schema();
         let pred = parse_predicate(sql, &schema).unwrap();
@@ -1016,17 +1012,13 @@ mod tests {
         let pred = parse_predicate("struct_col.inner_int IN (18, 21, 25)", &schema).unwrap();
         let array = ArrayData::try_new(
             ArrayType::new(DataType::INTEGER, false),
-            vec![
-                Scalar::Integer(18),
-                Scalar::Integer(21),
-                Scalar::Integer(25),
-            ],
+            vec![Integer(18), Integer(21), Integer(25)],
         )
         .unwrap();
-        let expected = Predicate::binary(
+        let expected = Pred::binary(
             delta_kernel::expressions::BinaryPredicateOp::In,
-            column_name!("struct_col.inner_int"),
-            Expression::literal(Scalar::Array(array)),
+            col!("struct_col.inner_int"),
+            Expression::literal(Array(array)),
         );
         assert_eq!(pred, expected);
     }
@@ -1034,9 +1026,9 @@ mod tests {
     #[rstest]
     #[case(
         "struct_col.inner_int BETWEEN 18 AND 65",
-        Predicate::and(
-            Predicate::ge(column_name!("struct_col.inner_int"), Scalar::Integer(18)),
-            Predicate::le(column_name!("struct_col.inner_int"), Scalar::Integer(65))
+        Pred::and(
+            Pred::ge(col!("struct_col.inner_int"), Integer(18)),
+            Pred::le(col!("struct_col.inner_int"), Integer(65))
         )
     )]
     fn parse_nested_struct_between(#[case] sql: &str, #[case] expected: Predicate) {

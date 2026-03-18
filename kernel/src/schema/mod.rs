@@ -772,6 +772,18 @@ impl StructType {
         Ok(fields)
     }
 
+    /// Resolves a column path through nested structs, returning a reference to the leaf field.
+    ///
+    /// This is a convenience wrapper around [`Self::walk_column_fields`] that returns only the
+    /// final field in the path.
+    ///
+    /// Returns `None` if the column path is empty, a field is not found, or an intermediate
+    /// field is not a struct type.
+    #[internal_api]
+    pub(crate) fn resolve_column(&self, col: &ColumnName) -> Option<&StructField> {
+        self.walk_column_fields(col).ok()?.into_iter().last()
+    }
+
     /// Gets the field with the given name and its index.
     pub fn field_with_index(&self, name: impl AsRef<str>) -> Option<(usize, &StructField)> {
         self.fields
@@ -1460,11 +1472,12 @@ impl PrimitiveType {
     /// Returns `true` if this primitive type can be widened to the `target` type.
     ///
     /// Widening rules (based on Parquet reader behavior):
-    /// - Integer widening: byte → short → int → long
-    /// - Float widening: float → double
+    /// - Integer widening: byte -> short -> int -> long
+    /// - Float widening: float -> double
     ///
     /// Note: These widening rules assume the parquet reader supports reading narrower types
     /// as wider types. This should be documented as a requirement in the `ParquetHandler` trait.
+    #[internal_api]
     pub(crate) fn can_widen_to(&self, target: &Self) -> bool {
         use PrimitiveType::*;
         matches!(
