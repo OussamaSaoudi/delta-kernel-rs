@@ -46,6 +46,8 @@ jobs:
         with:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - uses: boa-dev/criterion-compare-action@v3
+        env:
+          BENCH_TAGS: base
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branchName: ${{ steps.pr.outputs.base_ref }}

@@ -1,0 +1,151 @@
+syntax = "proto3";
+package delta.kernel;
+
+option java_package = "kernel.proto";
+option java_outer_classname = "SchemaProtos";
+
+// =============================================================================
+// Schema Types
+// =============================================================================
+
+message Schema {
+  repeated StructField fields = 1;
+}
+
+message StructField {
+  string name = 1;
+  DataType data_type = 2;
+  bool nullable = 3;
+  map<string, string> metadata = 4;
+}
+
+message DataType {
+  oneof type {
+    PrimitiveType primitive = 1;
+    StructType struct = 2;
+    ArrayType array = 3;
+    MapType map = 4;
+  }
+}
+
+enum PrimitiveType {
+  PRIMITIVE_UNSPECIFIED = 0;
+  BOOLEAN = 1;
+  BYTE = 2;
+  SHORT = 3;
+  INTEGER = 4;
+  LONG = 5;
+  FLOAT = 6;
+  DOUBLE = 7;
+  STRING = 8;
+  BINARY = 9;
+  DATE = 10;
+  TIMESTAMP = 11;
+  TIMESTAMP_NTZ = 12;
+  DECIMAL = 13;
+}
+
+message StructType {
+  repeated StructField fields = 1;
+}
+
+message ArrayType {
+  DataType element_type = 1;
+  bool contains_null = 2;
+}
+
+message MapType {
+  DataType key_type = 1;
+  DataType value_type = 2;
+  bool value_contains_null = 3;
+}
+
+// =============================================================================
+// Expression Types
+// =============================================================================
+
+message Expression {
+  oneof expr {
+    Literal literal = 1;
+    Column column = 2;
+    BinaryOp binary_op = 3;
+    UnaryOp unary_op = 4;
+    StructExpr struct_expr = 5;
+    ScalarFunction scalar_function = 6;
+  }
+}
+
+message Literal {
+  oneof value {
+    bool bool_value = 1;
+    int32 int_value = 2;
+    int64 long_value = 3;
+    float float_value = 4;
+    double double_value = 5;
+    string string_value = 6;
+    bytes binary_value = 7;
+    NullValue null_value = 8;
+    DecimalValue decimal_value = 9;
+  }
+}
+
+message NullValue {
+  DataType data_type = 1;
+}
+
+message DecimalValue {
+  bytes value = 1;  // Big-endian two's complement
+  int32 precision = 2;
+  int32 scale = 3;
+}
+
+message Column {
+  repeated string name_parts = 1;  // e.g., ["add", "path"] for add.path
+}
+
+message BinaryOp {
+  enum OpType {
+    OP_UNSPECIFIED = 0;
+    // Comparison
+    EQ = 1;
+    NE = 2;
+    LT = 3;
+    LE = 4;
+    GT = 5;
+    GE = 6;
+    // Logical
+    AND = 10;
+    OR = 11;
+    // Arithmetic
+    ADD = 20;
+    SUB = 21;
+    MUL = 22;
+    DIV = 23;
+    // String
+    DISTINCT = 30;
+  }
+  OpType op = 1;
+  Expression left = 2;
+  Expression right = 3;
+}
+
+message UnaryOp {
+  enum OpType {
+    OP_UNSPECIFIED = 0;
+    NOT = 1;
+    IS_NULL = 2;
+    NEGATE = 3;
+  }
+  OpType op = 1;
+  Expression child = 2;
+}
+
+message StructExpr {
+  repeated Expression fields = 1;
+}
+
+message ScalarFunction {
+  string name = 1;
+  repeated Expression args = 2;
+}
+

@@ -1645,19 +1645,24 @@ async fn test_set_domain_metadata_errors() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+/// Test that domain metadata operations fail when the writer feature is not supported.
+/// The `is_set` parameter controls whether we test set (true) or remove (false) operations.
+#[rstest::rstest]
+#[case::set_domain_metadata(true)]
+#[case::remove_domain_metadata(false)]
 #[tokio::test]
-async fn test_set_domain_metadata_unsupported_writer_feature(
+async fn test_domain_metadata_unsupported_writer_feature(
+    #[case] is_set: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let schema = get_simple_int_schema();
-
     let table_name = "test_domain_metadata_unsupported";
 
     // Create table WITHOUT domain metadata writer feature support
     let (store, engine, table_location) = engine_store_setup(table_name, None);
     let table_url = create_table(
-        store.clone(),
+        store,
         table_location,
         schema.clone(),
         &[],
@@ -1668,45 +1673,20 @@ async fn test_set_domain_metadata_unsupported_writer_feature(
     .await?;
 
     let snapshot = Snapshot::builder_for(table_url.clone()).build(&engine)?;
-    let res = snapshot
-        .transaction(Box::new(FileSystemCommitter::new()), &engine)?
-        .with_domain_metadata("app.config".to_string(), "test_config".to_string())
-        .commit(&engine);
+    let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), &engine)?;
 
-    assert_result_error_with_message(res, "Domain metadata operations require writer version 7 and the 'domainMetadata' writer feature");
+    let res = if is_set {
+        txn.with_domain_metadata("app.config".to_string(), "test_config".to_string())
+            .commit(&engine)
+    } else {
+        txn.with_domain_metadata_removed("app.config".to_string())
+            .commit(&engine)
+    };
 
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_remove_domain_metadata_unsupported_writer_feature(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = tracing_subscriber::fmt::try_init();
-
-    let schema = get_simple_int_schema();
-
-    let table_name = "test_remove_domain_metadata_unsupported";
-
-    // Create table WITHOUT domain metadata writer feature support
-    let (store, engine, table_location) = engine_store_setup(table_name, None);
-    let table_url = create_table(
-        store.clone(),
-        table_location,
-        schema.clone(),
-        &[],
-        true,
-        vec![],
-        vec![],
-    )
-    .await?;
-
-    let snapshot = Snapshot::builder_for(table_url.clone()).build(&engine)?;
-    let res = snapshot
-        .transaction(Box::new(FileSystemCommitter::new()), &engine)?
-        .with_domain_metadata_removed("app.config".to_string())
-        .commit(&engine);
-
-    assert_result_error_with_message(res, "Domain metadata operations require writer version 7 and the 'domainMetadata' writer feature");
+    assert_result_error_with_message(
+        res,
+        "Domain metadata operations require writer version 7 and the 'domainMetadata' writer feature",
+    );
 
     Ok(())
 }
@@ -1766,13 +1746,29 @@ async fn test_remove_domain_metadata_non_existent_domain() -> Result<(), Box<dyn
     Ok(())
 }
 
+/// Domain metadata conflict test case type
+enum DomainMetadataConflict {
+    SetThenRemove,      // set then try to remove same domain
+    RemoveThenSet,      // remove then try to set same domain
+    RemoveTwice,        // remove same domain twice
+    RemoveSystemDomain, // try to remove a system domain (delta.*)
+}
+
+/// Test various domain metadata conflict scenarios using rstest.
+#[rstest::rstest]
+#[case::set_then_remove(DomainMetadataConflict::SetThenRemove, "already specified in this transaction")]
+#[case::remove_then_set(DomainMetadataConflict::RemoveThenSet, "already specified in this transaction")]
+#[case::remove_twice(DomainMetadataConflict::RemoveTwice, "already specified in this transaction")]
+#[case::remove_system_domain(DomainMetadataConflict::RemoveSystemDomain, "Cannot modify domains that start with 'delta.'")]
 #[tokio::test]
-async fn test_domain_metadata_set_remove_conflicts() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_domain_metadata_conflicts(
+    #[case] conflict_type: DomainMetadataConflict,
+    #[case] expected_error: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let schema = get_simple_int_schema();
-
-    let table_name = "test_domain_metadata_unsupported";
+    let table_name = "test_domain_metadata_conflicts";
 
     let (store, engine, table_location) = engine_store_setup(table_name, None);
     let table_url = create_table(
@@ -1787,57 +1783,36 @@ async fn test_domain_metadata_set_remove_conflicts() -> Result<(), Box<dyn std::
     .await?;
 
     let snapshot = Snapshot::builder_for(table_url.clone()).build(&engine)?;
+    let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), &engine)?;
 
-    // set then remove same domain
-    let txn = snapshot
-        .clone()
-        .transaction(Box::new(FileSystemCommitter::new()), &engine)?;
-    let err = txn
-        .with_domain_metadata("app.config".to_string(), "v1".to_string())
-        .with_domain_metadata_removed("app.config".to_string())
-        .commit(&engine)
-        .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("already specified in this transaction"));
+    let err = match conflict_type {
+        DomainMetadataConflict::SetThenRemove => txn
+            .with_domain_metadata("app.config".to_string(), "v1".to_string())
+            .with_domain_metadata_removed("app.config".to_string())
+            .commit(&engine)
+            .unwrap_err(),
+        DomainMetadataConflict::RemoveThenSet => txn
+            .with_domain_metadata_removed("test.domain".to_string())
+            .with_domain_metadata("test.domain".to_string(), "v1".to_string())
+            .commit(&engine)
+            .unwrap_err(),
+        DomainMetadataConflict::RemoveTwice => txn
+            .with_domain_metadata_removed("another.domain".to_string())
+            .with_domain_metadata_removed("another.domain".to_string())
+            .commit(&engine)
+            .unwrap_err(),
+        DomainMetadataConflict::RemoveSystemDomain => txn
+            .with_domain_metadata_removed("delta.system".to_string())
+            .commit(&engine)
+            .unwrap_err(),
+    };
 
-    // remove then set same domain
-    let txn2 = snapshot
-        .clone()
-        .transaction(Box::new(FileSystemCommitter::new()), &engine)?;
-    let err = txn2
-        .with_domain_metadata_removed("test.domain".to_string())
-        .with_domain_metadata("test.domain".to_string(), "v1".to_string())
-        .commit(&engine)
-        .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("already specified in this transaction"));
-
-    // remove same domain twice
-    let txn3 = snapshot
-        .clone()
-        .transaction(Box::new(FileSystemCommitter::new()), &engine)?;
-    let err = txn3
-        .with_domain_metadata_removed("another.domain".to_string())
-        .with_domain_metadata_removed("another.domain".to_string())
-        .commit(&engine)
-        .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("already specified in this transaction"));
-
-    // remove system domain
-    let txn4 = snapshot
-        .clone()
-        .transaction(Box::new(FileSystemCommitter::new()), &engine)?;
-    let err = txn4
-        .with_domain_metadata_removed("delta.system".to_string())
-        .commit(&engine)
-        .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("Cannot modify domains that start with 'delta.' as those are system controlled"));
+    assert!(
+        err.to_string().contains(expected_error),
+        "Expected error containing '{}', got: {}",
+        expected_error,
+        err
+    );
 
     Ok(())
 }
@@ -3052,28 +3027,34 @@ async fn test_cdf_write_all_removes_succeeds() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+/// Test CDF behavior with mixed add+remove transactions.
+/// When data_change=false, mixed operations are allowed (e.g., compaction).
+/// When data_change=true, mixed operations fail because CDC files would be required.
+#[rstest::rstest]
+#[case::no_data_change_succeeds(false, true)]
+#[case::with_data_change_fails(true, false)]
 #[tokio::test]
-async fn test_cdf_write_mixed_no_data_change_succeeds() -> Result<(), Box<dyn std::error::Error>> {
-    // This test verifies that mixed add+remove transactions work when dataChange=false.
-    // It's allowed because the transaction does not contain any logical data changes.
-    // This can happen when a table is being optimized/compacted.
+async fn test_cdf_write_mixed_operations(
+    #[case] data_change: bool,
+    #[case] should_succeed: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let schema = get_simple_int_schema();
 
     let (table_url, engine, _tmp_dir) =
-        create_cdf_table("test_cdf_mixed_no_data_change", schema.clone()).await?;
+        create_cdf_table("test_cdf_mixed", schema.clone()).await?;
 
     // First, add some data
     write_data_to_table(&table_url, &engine, schema.clone(), vec![1, 2, 3]).await?;
 
-    // Now create a transaction with both add AND remove files, but dataChange=false
+    // Create a transaction with both add AND remove files
     let snapshot = Snapshot::builder_for(table_url.clone()).build(engine.as_ref())?;
     let mut txn = snapshot
         .clone()
         .transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?
         .with_engine_info("cdf mixed test")
-        .with_data_change(false); // dataChange=false is key here
+        .with_data_change(data_change);
 
     // Add new files
     add_files_to_transaction(&mut txn, &engine, schema, vec![4, 5, 6]).await?;
@@ -3084,55 +3065,21 @@ async fn test_cdf_write_mixed_no_data_change_succeeds() -> Result<(), Box<dyn st
     let (data, selection_vector) = scan_metadata.scan_files.into_parts();
     txn.remove_files(FilteredEngineData::try_new(data, selection_vector)?);
 
-    // This should succeed - mixed operations are allowed when dataChange=false
-    let result = txn.commit(engine.as_ref())?;
-    match result {
-        CommitResult::CommittedTransaction(committed) => {
-            assert_eq!(committed.commit_version(), 2);
+    let result = txn.commit(engine.as_ref());
+
+    if should_succeed {
+        match result? {
+            CommitResult::CommittedTransaction(committed) => {
+                assert_eq!(committed.commit_version(), 2);
+            }
+            _ => panic!("Transaction should be committed"),
         }
-        _ => panic!("Transaction should be committed"),
+    } else {
+        assert_result_error_with_message(
+            result,
+            "Cannot add and remove data in the same transaction when Change Data Feed is enabled",
+        );
     }
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_cdf_write_mixed_with_data_change_fails() -> Result<(), Box<dyn std::error::Error>> {
-    // This test verifies that mixed add+remove transactions fail with helpful error when dataChange=true
-    let _ = tracing_subscriber::fmt::try_init();
-
-    let schema = get_simple_int_schema();
-
-    let (table_url, engine, _tmp_dir) =
-        create_cdf_table("test_cdf_mixed_with_data_change", schema.clone()).await?;
-
-    // First, add some data
-    write_data_to_table(&table_url, &engine, schema.clone(), vec![1, 2, 3]).await?;
-
-    // Now create a transaction with both add AND remove files with dataChange=true
-    let snapshot = Snapshot::builder_for(table_url.clone()).build(engine.as_ref())?;
-    let mut txn = snapshot
-        .clone()
-        .transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?
-        .with_engine_info("cdf mixed fail test")
-        .with_data_change(true); // dataChange=true - this should fail
-
-    // Add new files
-    add_files_to_transaction(&mut txn, &engine, schema, vec![4, 5, 6]).await?;
-
-    // Also remove existing files
-    let scan = snapshot.scan_builder().build()?;
-    let scan_metadata = scan.scan_metadata(engine.as_ref())?.next().unwrap()?;
-    let (data, selection_vector) = scan_metadata.scan_files.into_parts();
-    txn.remove_files(FilteredEngineData::try_new(data, selection_vector)?);
-
-    // This should fail with our new error message
-    assert_result_error_with_message(
-        txn.commit(engine.as_ref()),
-        "Cannot add and remove data in the same transaction when Change Data Feed is enabled (delta.enableChangeDataFeed = true). \
-         This would require writing CDC files for DML operations, which is not yet supported. \
-         Consider using separate transactions: one to add files, another to remove files."
-    );
 
     Ok(())
 }

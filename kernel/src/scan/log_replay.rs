@@ -637,6 +637,23 @@ fn scan_row_schema_with_parsed_columns(
     Arc::new(StructType::new_unchecked(fields))
 }
 
+/// Build the scan row schema with optional `stats_parsed` column only.
+///
+/// When `stats_schema` is provided, adds a `stats_parsed` struct column with that schema.
+pub(crate) fn scan_row_schema_with_stats_parsed(stats_schema: Option<SchemaRef>) -> SchemaRef {
+    match stats_schema {
+        Some(schema) => {
+            let mut fields: Vec<StructField> = SCAN_ROW_SCHEMA.fields().cloned().collect();
+            fields.push(StructField::nullable(
+                "stats_parsed",
+                schema.as_ref().clone(),
+            ));
+            Arc::new(StructType::new_unchecked(fields))
+        }
+        None => SCAN_ROW_SCHEMA.clone(),
+    }
+}
+
 /// Build the add transform expression with optional stats and partition value parsing.
 ///
 /// # Parameters
@@ -652,10 +669,41 @@ fn scan_row_schema_with_parsed_columns(
 /// The transform includes `stats_parsed` only when `physical_stats_schema` is Some,
 /// and `partitionValues_parsed` only when `partition_schema` is Some.
 /// Stats are output using physical column names.
-fn get_add_transform_expr(
+pub(crate) fn get_add_transform_expr(
     physical_stats_schema: Option<SchemaRef>,
     has_stats_parsed: bool,
     skip_stats: bool,
+    partition_schema: Option<SchemaRef>,
+    has_partition_values_parsed: bool,
+) -> ExpressionRef {
+    get_add_transform_expr_impl(
+        physical_stats_schema,
+        has_stats_parsed,
+        skip_stats,
+        false,
+        partition_schema,
+        has_partition_values_parsed,
+    )
+}
+
+/// Like [`get_add_transform_expr`], but with an option for stats_parsed at root level.
+///
+/// # Parameters
+/// - `stats_parsed_at_root`: When true, reads stats_parsed from root level instead of `add.stats_parsed`.
+///   This is used in declarative plan execution where `ParseJsonNode` adds stats_parsed at the root level
+///   before this transform is applied.
+pub(crate) fn get_add_transform_expr_with_root_stats(
+    physical_stats_schema: Option<SchemaRef>,
+    skip_stats: bool,
+) -> ExpressionRef {
+    get_add_transform_expr_impl(physical_stats_schema, true, skip_stats, true, None, false)
+}
+
+fn get_add_transform_expr_impl(
+    physical_stats_schema: Option<SchemaRef>,
+    has_stats_parsed: bool,
+    skip_stats: bool,
+    stats_parsed_at_root: bool,
     partition_schema: Option<SchemaRef>,
     has_partition_values_parsed: bool,
 ) -> ExpressionRef {
@@ -680,13 +728,16 @@ fn get_add_transform_expr(
     ];
 
     // Add stats_parsed when stats output is requested (using physical column names)
-    if let Some(stats_schema) = physical_stats_schema {
-        let stats_parsed_expr = if has_stats_parsed {
-            // Checkpoint has stats_parsed column - read directly
+    if physical_stats_schema.is_some() {
+        let stats_parsed_expr = if stats_parsed_at_root {
+            // stats_parsed is at root level (added by ParseJsonNode in declarative plan)
+            column_expr!("stats_parsed")
+        } else if has_stats_parsed {
+            // Checkpoint has stats_parsed column nested under add
             column_expr!("add.stats_parsed")
         } else {
             // No stats_parsed available (JSON log files) - parse JSON
-            Expression::parse_json(column_expr!("add.stats"), stats_schema)
+            Expression::parse_json(column_expr!("add.stats"), physical_stats_schema.unwrap())
         };
         fields.push(Arc::new(stats_parsed_expr));
     }

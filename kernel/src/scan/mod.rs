@@ -46,6 +46,7 @@ pub(crate) mod metrics;
 pub mod state;
 pub(crate) mod state_info;
 pub(crate) mod transform_spec;
+pub mod transform;
 
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -454,6 +455,25 @@ pub(crate) fn restored_add_schema() -> &'static SchemaRef {
 /// utility method making it easy to get a transform for a particular row. If the requested row is
 /// outside the range of the passed slice returns `None`, otherwise returns the element at the index
 /// of the specified row
+
+#[cfg(feature = "arrow")]
+use crate::plans::state_machines::ScanStateMachine;
+#[cfg(feature = "arrow")]
+use self::transform::TransformComputer;
+
+/// State required for executing a scan, combining the state machine and transform computer.
+///
+/// This struct packages together everything needed to drive a scan:
+/// - `state_machine`: Drives the scan plan execution phases
+/// - `transform_computer`: Computes row-level transforms for each batch
+#[cfg(feature = "arrow")]
+pub struct ScanState {
+    /// The state machine that drives scan execution through its phases
+    pub state_machine: ScanStateMachine,
+    /// Computes transform expressions for each row in scan batches
+    pub transform_computer: TransformComputer,
+}
+
 pub fn get_transform_for_row(
     row: usize,
     transforms: &[Option<ExpressionRef>],
@@ -492,6 +512,17 @@ impl ScanMetadata {
         Ok(Self {
             scan_files: FilteredEngineData::try_new(data, selection_vector)?,
             scan_file_transforms,
+        })
+    }
+
+    /// Create ScanMetadata from filtered engine data and transforms.
+    pub fn from_filtered_with_transforms(
+        filtered: FilteredEngineData,
+        transforms: Vec<Option<ExpressionRef>>,
+    ) -> DeltaResult<Self> {
+        Ok(Self {
+            scan_files: filtered,
+            scan_file_transforms: transforms,
         })
     }
 }
@@ -543,6 +574,7 @@ impl Scan {
         &self.snapshot
     }
 
+
     /// Get a shared reference to the logical [`Schema`] of the scan (i.e. the output schema of the
     /// scan). Note that the logical schema can differ from the physical schema due to e.g.
     /// partition columns which are present in the logical schema but not in the physical schema.
@@ -567,6 +599,25 @@ impl Scan {
         } else {
             None
         }
+    }
+
+    /// Convert this Scan into a ScanState for state machine-based execution.
+    ///
+    /// This creates a `ScanStateMachine` and `TransformComputer` from the scan,
+    /// packaging them together for streaming async execution.
+    #[cfg(feature = "arrow")]
+    pub fn into_scan_state(&self) -> DeltaResult<ScanState> {
+        let state_machine = ScanStateMachine::from_scan(self)?;
+        let transform_computer = TransformComputer::new(self.state_info.clone());
+        Ok(ScanState {
+            state_machine,
+            transform_computer,
+        })
+    }
+
+    /// Get the state info for this scan. This is crate-internal.
+    pub(crate) fn state_info(&self) -> Arc<state_info::StateInfo> {
+        self.state_info.clone()
     }
 
     /// Get an iterator of [`ScanMetadata`]s that should be used to facilitate a scan. This handles

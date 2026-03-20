@@ -6,6 +6,7 @@ members = [
     "ffi",
     "kernel",
     "kernel/examples/*",
+    "kernel-datafusion",
     "test-utils",
     "feature-tests",
     "mem-test",
@@ -29,3 +30,11 @@ repository = "https://github.com/delta-io/delta-kernel-rs"
 readme = "README.md"
 rust-version = "1.85"
 version = "0.20.0"
+
+# Enable debug symbols in benchmark builds for profiling with samply
+[profile.bench]
+debug = true
+
+# Also enable for release profile (used as base for bench)
+[profile.release]
+debug = true

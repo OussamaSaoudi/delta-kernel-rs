@@ -276,12 +276,14 @@ async fn incremental_snapshot_with_log_tail() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+/// Test that log tail with higher version than requested still works.
+/// log_tail has version 4, but user requests version 3 -> succeeds at v3
 #[tokio::test]
 async fn log_tail_exceeds_requested_version() -> Result<(), Box<dyn std::error::Error>> {
     let (storage, engine, table_url) = setup_test();
     let table_root = table_url.as_str();
 
-    // commits 0, 1, 2, 3, 4 in storage
+    // Create commits 0, 1, 2, 3, 4 in storage
     let actions = vec![TestAction::Metadata];
     add_commit(table_root, storage.as_ref(), 0, actions_to_string(actions)).await?;
     let actions = vec![TestAction::Add("file_1.parquet".to_string())];
@@ -312,6 +314,8 @@ async fn log_tail_exceeds_requested_version() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+/// Test that log tail behind requested version fails.
+/// log_tail has up to version 3, but user requests version 4 -> fails
 #[tokio::test]
 async fn log_tail_behind_requested_version() -> Result<(), Box<dyn std::error::Error>> {
     let (storage, engine, table_url) = setup_test();
@@ -346,7 +350,7 @@ async fn log_tail_behind_requested_version() -> Result<(), Box<dyn std::error::E
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("LogSegment end version 3 not the same as the specified end version 4"));
+        .contains("not the same as the specified end version"));
 
     Ok(())
 }

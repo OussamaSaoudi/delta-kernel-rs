@@ -1,0 +1,219 @@
+syntax = "proto3";
+package delta.kernel;
+
+option java_package = "kernel.proto";
+option java_outer_classname = "StateMachineProtos";
+
+import "plan.proto";
+import "schema.proto";
+
+// =============================================================================
+// COMPOSITE PLAN STRUCTS (Compile-time typed)
+// =============================================================================
+
+// Data skipping optimization plan
+message DataSkippingPlan {
+  ParseJsonNode parse_json = 1;           // Parse stats JSON
+  FilterByExpressionNode filter = 2;      // Filter based on min/max
+}
+
+// Plan for processing commit files (JSON log files)
+message CommitPhasePlan {
+  ScanNode scan = 1;                              // Scan commit JSON files
+  optional DataSkippingPlan data_skipping = 2;   // Optional stats-based filtering
+  FilterByKDF dedup_filter = 3;                   // AddRemoveDedup KDF filter
+  SelectNode project = 4;                         // Project to output schema
+  SinkNode sink = 5;                              // Terminal sink (default: Results)
+  optional FilterByKDF partition_prune_filter = 6; // Optional partition pruning KDF filter
+}
+
+// Plan for reading checkpoint manifest (for v2 checkpoints)
+message CheckpointManifestPlan {
+  ScanNode scan = 1;                      // Scan manifest parquet
+  SelectNode project = 2;                 // Project sidecar paths
+  SinkNode sink = 3;                      // Terminal sink (default: Drop)
+}
+
+// Plan for reading checkpoint leaf files
+message CheckpointLeafPlan {
+  ScanNode scan = 1;                      // Scan checkpoint parquet files
+  FilterByKDF dedup_filter = 2;           // Dedup KDF for checkpoint
+  SelectNode project = 3;                 // Project to output schema
+  SinkNode sink = 4;                      // Terminal sink (default: Results)
+  optional FilterByKDF partition_prune_filter = 5; // Optional partition pruning KDF filter
+}
+
+// Plan for listing log files
+// Includes a consumer KDF to build LogSegment from listing results
+message FileListingPhasePlan {
+  FileListingNode listing = 1;            // List files from _delta_log
+  ConsumeByKDF log_segment_builder = 2;   // Consumer to build LogSegment
+  SinkNode sink = 3;                      // Terminal sink (default: Drop)
+}
+
+// Plan for loading table metadata (protocol and metadata actions)
+// Uses a consumer KDF to extract first non-null protocol/metadata
+message MetadataLoadPlan {
+  ScanNode scan = 1;                      // Scan protocol/metadata files
+  ConsumeByKDF metadata_reader = 2;       // Consumer to extract protocol/metadata
+  SinkNode sink = 3;                      // Terminal sink (default: Drop)
+}
+
+// Plan for reading checkpoint hint file (_last_checkpoint)
+// Includes a consumer KDF to extract checkpoint hint from scan results
+message CheckpointHintPlan {
+  ScanNode scan = 1;                      // Scan _last_checkpoint JSON file
+  ConsumeByKDF hint_reader = 2;           // Consumer to extract checkpoint hint
+  SinkNode sink = 3;                      // Terminal sink (default: Drop)
+}
+
+// Plan for querying checkpoint schema to detect V2 checkpoints
+// Uses SchemaStoreState to capture the parquet footer schema
+// No sink - produces no data, just reads footer schema
+message SchemaQueryPhasePlan {
+  SchemaQueryNode schema_query = 1;       // Query parquet file schema (footer only)
+}
+
+// =============================================================================
+// PHASE DATA (Dual Representation: struct + tree)
+// =============================================================================
+
+// Wrapper providing both typed plan and tree representation
+message CommitPhaseData {
+  CommitPhasePlan plan = 1;               // Struct-based (compile-time typed)
+  DeclarativePlanNode query_plan = 2;     // Tree-based (runtime interpreter)
+}
+
+message CheckpointManifestData {
+  CheckpointManifestPlan plan = 1;
+  DeclarativePlanNode query_plan = 2;
+}
+
+message CheckpointLeafData {
+  CheckpointLeafPlan plan = 1;
+  DeclarativePlanNode query_plan = 2;
+}
+
+message FileListingPhaseData {
+  FileListingPhasePlan plan = 1;
+  DeclarativePlanNode query_plan = 2;
+}
+
+message MetadataLoadData {
+  MetadataLoadPlan plan = 1;
+  DeclarativePlanNode query_plan = 2;
+}
+
+message CheckpointHintData {
+  CheckpointHintPlan plan = 1;
+  DeclarativePlanNode query_plan = 2;
+}
+
+message SchemaQueryPhaseData {
+  SchemaQueryPhasePlan plan = 1;
+  DeclarativePlanNode query_plan = 2;
+}
+
+// =============================================================================
+// STATE MACHINE ENUMS (Per-operation)
+// =============================================================================
+
+// Log replay state machine phases
+message LogReplayPhase {
+  oneof phase {
+    CommitPhaseData commit = 1;
+    SchemaQueryPhaseData schema_query = 2;
+    CheckpointManifestData checkpoint_manifest = 3;
+    CheckpointLeafData checkpoint_leaf = 4;
+    LogReplayComplete complete = 5;
+  }
+}
+
+message LogReplayComplete {
+  // Terminal state - no more phases
+}
+
+// Snapshot building state machine phases
+message SnapshotBuildPhase {
+  oneof phase {
+    CheckpointHintData checkpoint_hint = 1;
+    FileListingPhaseData list_files = 2;
+    MetadataLoadData load_metadata = 3;
+    SnapshotReady ready = 4;
+  }
+}
+
+// Terminal state with snapshot data
+message SnapshotReady {
+  int64 version = 1;
+  Schema table_schema = 2;
+  // Additional snapshot metadata as needed
+}
+
+// =============================================================================
+// DECLARATIVE PHASE (Abstract/Runtime Representation)
+// =============================================================================
+
+// Operation type for state machines
+enum OperationType {
+  OPERATION_TYPE_UNSPECIFIED = 0;
+  LOG_REPLAY = 1;
+  SNAPSHOT_BUILD = 2;
+  SCAN = 3;
+}
+
+// Phase type within an operation
+enum PhaseType {
+  PHASE_TYPE_UNSPECIFIED = 0;
+  COMMIT = 1;
+  SCHEMA_QUERY = 2;
+  CHECKPOINT_MANIFEST = 3;
+  CHECKPOINT_LEAF = 4;
+  LIST_FILES = 5;
+  LOAD_METADATA = 6;
+  COMPLETE = 7;
+  READY = 8;
+  CHECKPOINT_HINT = 9;
+}
+
+// Abstract representation of any state machine phase
+// Allows runtime interpretation without knowing the specific typed state machine
+message DeclarativePhase {
+  OperationType operation = 1;
+  PhaseType phase_type = 2;
+  optional DeclarativePlanNode query_plan = 3;  // None if terminal
+  optional TerminalData terminal_data = 4;      // Set if terminal
+}
+
+// Data returned when a state machine reaches a terminal state
+message TerminalData {
+  oneof data {
+    LogReplayComplete log_replay_complete = 1;
+    SnapshotReady snapshot_ready = 2;
+  }
+}
+
+// =============================================================================
+// PHASE RESULT (Engine -> Kernel)
+// =============================================================================
+
+// Result sent back to kernel after executing a phase
+message PhaseResult {
+  oneof result {
+    // Successful execution - data was processed
+    PhaseSuccess success = 1;
+    // Error during execution
+    PhaseError error = 2;
+  }
+}
+
+message PhaseSuccess {
+  int64 rows_processed = 1;
+  // Additional metrics as needed
+}
+
+message PhaseError {
+  string message = 1;
+  string error_type = 2;
+}
+
