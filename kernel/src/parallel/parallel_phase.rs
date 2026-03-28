@@ -12,7 +12,6 @@ use delta_kernel_derive::internal_api;
 
 use crate::log_replay::ActionsBatch;
 use crate::log_replay::ParallelLogReplayProcessor;
-use crate::metrics::MetricId;
 use crate::scan::CHECKPOINT_READ_SCHEMA;
 use crate::schema::SchemaRef;
 use crate::EngineData;
@@ -424,12 +423,7 @@ mod tests {
                 let final_state = if with_serde {
                     // Serialize and then deserialize to test the serde path
                     let serialized_bytes = state.into_bytes()?;
-                    Arc::new(ParallelState::from_bytes(
-                        engine.as_ref(),
-                        &serialized_bytes,
-                        MetricId::new(),
-                        None,
-                    )?)
+                    Arc::new(ParallelState::from_bytes(engine.as_ref(), &serialized_bytes)?)
                 } else {
                     // Non-serde: just use the state directly
                     Arc::new(*state)
