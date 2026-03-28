@@ -579,7 +579,7 @@ impl Scan {
     /// log-replay, reconciling Add and Remove actions, and applying data skipping (if possible).
     ///
     /// Reports metrics: [`MetricEvent::ScanMetadataCompleted`] when the returned iterator is
-    /// fully exhausted. If dropped early, a warning is logged but no metrics are emitted.
+    /// fully exhausted. If dropped early, no completion metrics are emitted.
     ///
     /// [`MetricEvent::ScanMetadataCompleted`]: crate::metrics::MetricEvent::ScanMetadataCompleted
     ///
@@ -871,6 +871,12 @@ impl Scan {
     /// checkpoint manifests sequentially. After exhausting this iterator, call `finish()`
     /// to determine if a distributed phase is needed.
     ///
+    /// Metrics behavior:
+    /// - `SequentialPhase` completion metrics emit once from `finish()`.
+    /// - `ParallelPhase` completion metrics emit when [`ParallelState::report_metrics`] is called.
+    ///   This is explicit by design so distributed engines can report at their chosen completion
+    ///   boundary.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -917,6 +923,10 @@ impl Scan {
     ///                 // Process scan metadata...
     ///             }
     ///         }
+    ///
+    ///         // Report phase-2 completion metrics once the chosen parallel boundary completes.
+    ///         // For distributed execution, workers can deserialize state and report per worker.
+    ///         state.report_metrics();
     ///     }
     /// }
     /// # Ok(())
