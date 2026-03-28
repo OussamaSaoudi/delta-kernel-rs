@@ -78,7 +78,10 @@ impl SequentialScanMetadata {
                 }
                 Ok(AfterSequentialScanMetadata::Done)
             }
-            AfterSequential::Parallel { processor, files } => {
+            AfterSequential::Parallel {
+                mut processor,
+                files,
+            } => {
                 let event = processor.get_metrics().to_event(
                     operation_id,
                     ScanType::SequentialPhase,
@@ -88,7 +91,7 @@ impl SequentialScanMetadata {
                 if let Some(r) = &reporter {
                     r.report(event);
                 }
-                processor.get_metrics().reset_counters();
+                processor.start_parallel_phase(operation_id);
 
                 Ok(AfterSequentialScanMetadata::Parallel {
                     state: Box::new(ParallelState {
@@ -135,8 +138,11 @@ impl ParallelLogReplayProcessor for Arc<ParallelState> {
 impl ParallelState {
     /// Report the accumulated metrics from parallel processing.
     ///
-    /// Call this after all parallel workers complete. The metrics will be logged
-    /// and reported via the metrics reporter.
+    /// Call this after all parallel workers complete for the boundary you want to report.
+    /// The metrics are logged and reported via the configured metrics reporter.
+    ///
+    /// For distributed execution, each worker may call this once for its shard boundary.
+    /// Use `operation_id` to correlate all shard reports from the same scan operation.
     ///
     /// # Example
     ///
@@ -191,22 +197,19 @@ impl ParallelState {
     /// # Parameters
     /// - `engine`: Engine for creating evaluators and filters
     /// - `state`: The serialized state from a previous `into_serializable_state()` call
-    /// - `operation_id`: The operation ID to use for metrics correlation
-    /// - `reporter`: Optional metrics reporter
     #[internal_api]
     #[allow(unused)]
     pub(crate) fn from_serializable_state(
         engine: &dyn Engine,
         state: SerializableScanState,
-        operation_id: MetricId,
-        reporter: Option<Arc<dyn MetricsReporter>>,
     ) -> DeltaResult<Self> {
         let inner = ScanLogReplayProcessor::from_serializable_state(engine, state)?;
+        let operation_id = inner.operation_id();
         Ok(Self {
             inner,
             operation_id,
             start: Instant::now(),
-            reporter,
+            reporter: engine.get_metrics_reporter(),
         })
     }
 
@@ -233,18 +236,14 @@ impl ParallelState {
     /// # Parameters
     /// - `engine`: Engine for creating evaluators and filters
     /// - `bytes`: The serialized bytes from a previous `into_bytes()` call
-    /// - `operation_id`: The operation ID to use for metrics correlation
-    /// - `reporter`: Optional metrics reporter
+    ///
+    /// The reconstructed state preserves the same operation id, so parallel worker metrics can be
+    /// correlated with phase-1 metrics from the same scan operation.
     #[allow(unused)]
-    pub fn from_bytes(
-        engine: &dyn Engine,
-        bytes: &[u8],
-        operation_id: MetricId,
-        reporter: Option<Arc<dyn MetricsReporter>>,
-    ) -> DeltaResult<Self> {
+    pub fn from_bytes(engine: &dyn Engine, bytes: &[u8]) -> DeltaResult<Self> {
         let state: SerializableScanState =
             serde_json::from_slice(bytes).map_err(Error::MalformedJson)?;
-        Self::from_serializable_state(engine, state, operation_id, reporter)
+        Self::from_serializable_state(engine, state)
     }
 }
 
@@ -288,6 +287,8 @@ impl Iterator for ParallelScanMetadata {
     type Item = DeltaResult<ScanMetadata>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Completion metrics are intentionally not emitted from iterator exhaustion. Report via
+        // `ParallelState::report_metrics()` at an explicit boundary chosen by the caller.
         let _operation_id = self.operation_id;
         let _guard = self.span.enter();
         self.processor.next()
