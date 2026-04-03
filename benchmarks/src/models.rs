@@ -192,7 +192,7 @@ impl TimeTravel {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Spec {
     Read(ReadSpec),
-    #[serde(alias = "snapshot_construction")]
+    #[serde(alias = "snapshot_construction", alias = "snapshot")]
     SnapshotConstruction(Box<SnapshotConstructionSpec>),
     Write(WriteSpec),
 }

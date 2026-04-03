@@ -29,6 +29,7 @@ delta_kernel = { path = "../kernel", features = [
 delta_kernel_benchmarks = { path = "../benchmarks" }
 futures = "0.3"
 itertools = "0.14"
+parquet = "57"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
