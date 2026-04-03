@@ -1,0 +1,7 @@
+{
+  "testName" : "Read partitioned table after appending new partition values",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaPartitionSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dpReadPartitionAfterAppend"
+}

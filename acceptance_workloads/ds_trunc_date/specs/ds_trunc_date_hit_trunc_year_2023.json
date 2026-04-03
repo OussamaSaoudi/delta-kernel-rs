@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "trunc(dt, 'YEAR') = '2023-01-01'",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 2,
+    "filesSkipped" : 0
+  }
+}

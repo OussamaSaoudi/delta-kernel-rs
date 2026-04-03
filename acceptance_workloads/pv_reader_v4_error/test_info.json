@@ -1,0 +1,7 @@
+{
+  "testName" : "Unsupported reader version 4",
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "protocol spec",
+  "isErrorTest" : true,
+  "testId" : "pv_reader_v4_error"
+}

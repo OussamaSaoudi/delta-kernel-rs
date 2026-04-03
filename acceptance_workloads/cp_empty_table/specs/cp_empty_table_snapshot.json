@@ -1,0 +1,26 @@
+{
+  "type" : "snapshot",
+  "version" : 1,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors" ],
+      "writerFeatures" : [ "deletionVectors", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"a\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}",
+      "description" : "A table comment",
+      "createdTime" : 1773115122961,
+      "id" : "85852659-a666-4375-bdd9-0b49c4e60d6b",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

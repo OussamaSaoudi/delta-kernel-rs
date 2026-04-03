@@ -1,0 +1,7 @@
+{
+  "testName" : "NOT with OR (De Morgan's Law)",
+  "workloadCount" : 2,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "381-396",
+  "testId" : "ds_not_or"
+}

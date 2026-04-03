@@ -1,0 +1,70 @@
+{
+  "name" : "cm_nested_struct_id",
+  "description" : "Column mapping with nested struct (id mode)",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-6c7e781b-cdca-4429-9db8-9a0de85a84a2"
+      }
+    }, {
+      "name" : "info",
+      "type" : {
+        "type" : "struct",
+        "fields" : [ {
+          "name" : "name",
+          "type" : "string",
+          "nullable" : true,
+          "metadata" : {
+            "delta.columnMapping.id" : 3,
+            "delta.columnMapping.physicalName" : "col-b35dff96-4733-4cbd-8fe9-a264ba35f243"
+          }
+        }, {
+          "name" : "age",
+          "type" : "integer",
+          "nullable" : true,
+          "metadata" : {
+            "delta.columnMapping.id" : 4,
+            "delta.columnMapping.physicalName" : "col-4e38e0c1-904b-4b26-bc5b-a76757422fa6"
+          }
+        } ]
+      },
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-bda3de1e-25cc-426d-a05a-bd785702d2ee"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "changeDataFeed", "checkConstraints", "columnMapping", "deletionVectors", "generatedColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 4088,
+    "numCommits" : 3,
+    "numActions" : 7,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 2,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.mode" : "id",
+    "delta.columnMapping.maxColumnId" : "4"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "columnMapping", "columnMappingId", "nestedStruct" ]
+}

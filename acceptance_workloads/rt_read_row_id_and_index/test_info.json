@@ -1,0 +1,7 @@
+{
+  "testName" : "Read both row id and row index",
+  "workloadCount" : 4,
+  "sourceFile" : "RowTrackingSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "rt_read_row_id_and_index"
+}

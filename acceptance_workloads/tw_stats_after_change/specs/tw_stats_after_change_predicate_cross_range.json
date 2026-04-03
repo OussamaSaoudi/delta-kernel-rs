@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "metric >= 200 AND metric <= 50000",
+  "expected" : {
+    "rowCount" : 4,
+    "fileCount" : 2,
+    "filesSkipped" : 0
+  }
+}

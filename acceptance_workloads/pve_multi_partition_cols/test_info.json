@@ -1,0 +1,7 @@
+{
+  "testName" : "Partition value encoding: 3 partition cols of different types",
+  "workloadCount" : 6,
+  "sourceFile" : "PartitionSuiteCapture.scala",
+  "sourceLines" : "protocol-spec",
+  "testId" : "pve_multi_partition_cols"
+}

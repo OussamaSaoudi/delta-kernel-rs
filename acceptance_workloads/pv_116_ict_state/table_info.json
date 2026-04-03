@@ -1,0 +1,39 @@
+{
+  "name" : "pv_116_ict_state",
+  "description" : "Table with ICT for ICT removal testing",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "inCommitTimestamp", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 4,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 2030,
+    "numCommits" : 3,
+    "numActions" : 9,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 2,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableInCommitTimestamps" : "true",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "evolvability" ]
+}

@@ -1,0 +1,26 @@
+{
+  "type" : "snapshot",
+  "version" : 2,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors" ],
+      "writerFeatures" : [ "deletionVectors", "inCommitTimestamp", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}}]}",
+      "createdTime" : 1773117499786,
+      "id" : "43cc905e-1f6e-44d5-85c3-f0eeaeea679b",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableInCommitTimestamps" : "true",
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

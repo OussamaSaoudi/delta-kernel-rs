@@ -1,0 +1,7 @@
+{
+  "testName" : "Table with writer-only feature (appendOnly)",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "1328-1346",
+  "testId" : "pv_036_create_writer_only_feature"
+}

@@ -1,0 +1,8 @@
+{
+  "type" : "cdf",
+  "startVersion" : 3,
+  "endVersion" : 5,
+  "expected" : {
+    "rowCount" : 2
+  }
+}

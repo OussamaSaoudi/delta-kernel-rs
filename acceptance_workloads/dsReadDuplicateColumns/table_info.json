@@ -1,0 +1,40 @@
+{
+  "name" : "dsReadDuplicateColumns",
+  "description" : "Error: schema with duplicate column names",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "id",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 1,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 479,
+    "numCommits" : 2,
+    "numActions" : 6,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 0,
+    "numParallelCheckpointFiles" : 0
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "error", "schema" ]
+}

@@ -1,0 +1,8 @@
+{
+  "testName" : "Table state with DVs for DV removal testing",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "3718-3750",
+  "hasSchemaEvolution" : true,
+  "testId" : "pv_115_dv_removal_state"
+}

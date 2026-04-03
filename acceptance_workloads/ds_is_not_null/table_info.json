@@ -1,0 +1,43 @@
+{
+  "name" : "ds_is_not_null",
+  "description" : "IS NOT NULL predicate pushdown",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "value",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 2074,
+    "numCommits" : 4,
+    "numActions" : 9,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 3,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "data-skipping", "null-predicate" ]
+}

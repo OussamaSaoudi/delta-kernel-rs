@@ -1,0 +1,7 @@
+{
+  "testName" : "ByteType MIN/MAX values",
+  "workloadCount" : 1,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cr_byte_boundaries"
+}

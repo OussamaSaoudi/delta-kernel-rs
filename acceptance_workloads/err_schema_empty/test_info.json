@@ -1,0 +1,7 @@
+{
+  "testName" : "metaData has empty schemaString",
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-21",
+  "isErrorTest" : true,
+  "testId" : "err_schema_empty"
+}

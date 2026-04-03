@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple app transactions - app-2",
+  "sourceFile" : "DeltaIncrementalSetTransactionsSuite.scala",
+  "sourceLines" : "143-157",
+  "testId" : "txn_multiple_apps_2",
+  "isTxnTest" : true
+}

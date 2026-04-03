@@ -1,0 +1,9 @@
+{
+  "type" : "snapshot",
+  "version" : 99,
+  "name" : "dsReadNonExistentVersion",
+  "error" : {
+    "errorCode" : "DELTA_VERSION_NOT_FOUND",
+    "errorMessage" : "[DELTA_VERSION_NOT_FOUND] Cannot time travel Delta table to version 99. Available versions: [0, 0]."
+  }
+}

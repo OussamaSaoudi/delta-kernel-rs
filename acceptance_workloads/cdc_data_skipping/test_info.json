@@ -1,0 +1,7 @@
+{
+  "testName" : "CDC with data skipping",
+  "workloadCount" : 7,
+  "sourceFile" : "CDCSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cdc_data_skipping"
+}

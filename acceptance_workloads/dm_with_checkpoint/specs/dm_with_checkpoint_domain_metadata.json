@@ -1,0 +1,10 @@
+{
+  "type" : "domain_metadata",
+  "expected" : {
+    "domain" : "testDomain1",
+    "configuration" : "",
+    "removed" : false
+  },
+  "name" : "dm_with_checkpoint_domain_metadata",
+  "description" : "Domain metadata survives checkpoint reconstruction"
+}

@@ -1,0 +1,10 @@
+{
+  "type" : "read",
+  "version" : 2,
+  "predicate" : "id > 2",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

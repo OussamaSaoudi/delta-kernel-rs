@@ -1,0 +1,7 @@
+{
+  "testName" : "NullType added via schema evolution",
+  "workloadCount" : 1,
+  "sourceFile" : "VoidTypeSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "void_005_void_schema_evolution"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "CDC with MERGE including all clauses",
+  "workloadCount" : 5,
+  "sourceFile" : "CDCSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cdc_merge_delete"
+}

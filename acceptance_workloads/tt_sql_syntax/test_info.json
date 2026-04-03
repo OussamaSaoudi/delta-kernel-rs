@@ -1,0 +1,7 @@
+{
+  "testName" : "time travel support in SQL - underlying reads",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "817-871",
+  "testId" : "tt_sql_syntax"
+}

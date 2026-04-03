@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with conditional UPDATE and DELETE",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-006",
+  "testId" : "mergeUpdateDelete"
+}

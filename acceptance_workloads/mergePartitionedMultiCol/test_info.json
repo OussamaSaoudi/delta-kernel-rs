@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with multiple partition columns",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-017",
+  "testId" : "mergePartitionedMultiCol"
+}

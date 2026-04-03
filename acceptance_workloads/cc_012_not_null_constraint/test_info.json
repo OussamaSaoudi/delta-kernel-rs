@@ -1,0 +1,7 @@
+{
+  "testName" : "Read with NOT NULL-like constraint",
+  "workloadCount" : 1,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "IS NOT NULL constraint pattern",
+  "testId" : "cc_012_not_null_constraint"
+}

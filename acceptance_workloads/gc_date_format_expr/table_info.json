@@ -1,0 +1,45 @@
+{
+  "name" : "gc_date_format_expr",
+  "description" : "Generated column with DATE_FORMAT expression",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "event_date",
+      "type" : "date",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "formatted_date",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : {
+        "delta.generationExpression" : "DATE_FORMAT(event_date, 'yyyy-MM')"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "generatedColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 1,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 828,
+    "numCommits" : 2,
+    "numActions" : 5,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "generatedColumns" ]
+}

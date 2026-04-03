@@ -1,0 +1,26 @@
+{
+  "type" : "snapshot",
+  "version" : 3,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors" ],
+      "writerFeatures" : [ "deletionVectors", "checkConstraints", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"value\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}]}",
+      "createdTime" : 1773114945871,
+      "id" : "bad7bb97-3f72-4e5a-b358-dd86b69ca70c",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.constraints.positive_id" : "id > 0",
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

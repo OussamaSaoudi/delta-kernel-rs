@@ -1,0 +1,7 @@
+{
+  "testName" : "Identity column with column mapping",
+  "workloadCount" : 2,
+  "sourceFile" : "IdentityColumnSuite.scala",
+  "sourceLines" : "IdentityColumnSQLNameColumnMappingSuite",
+  "testId" : "ic_013_column_mapping"
+}

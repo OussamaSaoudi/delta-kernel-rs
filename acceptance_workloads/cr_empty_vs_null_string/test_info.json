@@ -1,0 +1,7 @@
+{
+  "testName" : "Empty string vs NULL distinction",
+  "workloadCount" : 2,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "P0-cr_empty_vs_null_string",
+  "testId" : "cr_empty_vs_null_string"
+}

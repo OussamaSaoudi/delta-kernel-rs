@@ -1,0 +1,7 @@
+{
+  "testName" : "Empty table checkpoint",
+  "workloadCount" : 1,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "160-194",
+  "testId" : "cp_empty_table"
+}

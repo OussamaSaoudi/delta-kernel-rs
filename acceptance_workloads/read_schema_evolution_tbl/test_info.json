@@ -1,0 +1,5 @@
+{
+  "test_id" : "read_schema_evolution_tbl",
+  "test_name" : "read_schema_evolution — tbl",
+  "workload_count" : 2
+}

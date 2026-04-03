@@ -1,0 +1,28 @@
+{
+  "type" : "snapshot",
+  "version" : 1,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors", "timestampNtz", "columnMapping" ],
+      "writerFeatures" : [ "deletionVectors", "checkConstraints", "generatedColumns", "timestampNtz", "invariants", "changeDataFeed", "appendOnly", "columnMapping" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"c1\",\"type\":\"long\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":1,\"delta.columnMapping.physicalName\":\"col-c4592e3d-2e89-4300-960f-da52151e4078\"}},{\"name\":\"c3\",\"type\":\"float\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":3,\"delta.columnMapping.physicalName\":\"col-3ce37e70-85cf-47c8-92e3-302a1b28c0f2\"}},{\"name\":\"c4\",\"type\":\"double\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":4,\"delta.columnMapping.physicalName\":\"col-81a295cc-f732-4735-a9c3-1b7770fe6b17\"}},{\"name\":\"c5\",\"type\":\"timestamp\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":5,\"delta.columnMapping.physicalName\":\"col-be8d06b0-8e69-4a62-93af-0c09ec78eb8d\"}},{\"name\":\"c6\",\"type\":\"timestamp_ntz\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":6,\"delta.columnMapping.physicalName\":\"col-cc696947-2609-4caf-9ee4-1379bd45d662\"}},{\"name\":\"c7\",\"type\":\"date\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":7,\"delta.columnMapping.physicalName\":\"col-964c7409-9f0a-4dc8-b621-ad11f17dfa36\"}},{\"name\":\"c8\",\"type\":\"binary\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":8,\"delta.columnMapping.physicalName\":\"col-0cd07f8c-5e0b-4c7e-a426-1f78be2e2a4a\"}},{\"name\":\"c9\",\"type\":\"boolean\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":9,\"delta.columnMapping.physicalName\":\"col-729ef79b-f1fa-44aa-8104-68ba1bd94f2b\"}},{\"name\":\"c10\",\"type\":\"decimal(3,2)\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":10,\"delta.columnMapping.physicalName\":\"col-7c3fd43f-419e-4db4-ab35-19a21616b7c4\"}}]}",
+      "createdTime" : 1773116339027,
+      "id" : "4a4e9115-609c-4f69-acde-276632863c96",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableDeletionVectors" : "true",
+        "delta.columnMapping.mode" : "name",
+        "delta.dataSkippingStatsColumns" : "c1,c3,c4,c5,c6,c7,c10",
+        "delta.columnMapping.maxColumnId" : "10"
+      }
+    }
+  }
+}

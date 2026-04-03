@@ -1,0 +1,5 @@
+{
+  "test_id" : "read_empty_partition_tbl",
+  "test_name" : "read_empty_partition — tbl",
+  "workload_count" : 3
+}

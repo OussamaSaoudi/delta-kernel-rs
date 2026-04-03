@@ -1,0 +1,7 @@
+{
+  "testName" : "Last checkpoint with schema information",
+  "workloadCount" : 2,
+  "sourceFile" : "LastCheckpointInfoSuite.scala",
+  "sourceLines" : "custom",
+  "testId" : "lc_with_schema"
+}

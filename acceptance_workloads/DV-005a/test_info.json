@@ -1,0 +1,7 @@
+{
+  "testName" : "read Delta tables with DVs in subqueries - table1 count",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "182-205",
+  "testId" : "DV-005a"
+}

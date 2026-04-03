@@ -1,0 +1,7 @@
+{
+  "testName" : "Merge adds new struct field, existing rows get null for new field",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoStructEvolutionNullnessSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "mergeStructEvoNullNewField"
+}

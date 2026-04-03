@@ -1,0 +1,7 @@
+{
+  "testName" : "ICT with DML operations",
+  "workloadCount" : 2,
+  "sourceFile" : "InCommitTimestampSuite.scala",
+  "sourceLines" : "custom",
+  "testId" : "ict_dml"
+}

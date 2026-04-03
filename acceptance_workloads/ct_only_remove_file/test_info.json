@@ -1,0 +1,7 @@
+{
+  "testName" : "Commit with only RemoveFile action",
+  "workloadCount" : 1,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "corrupt-table-gaps",
+  "testId" : "ct_only_remove_file"
+}

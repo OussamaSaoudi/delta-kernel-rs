@@ -1,0 +1,74 @@
+{
+  "name" : "cm_array_of_structs",
+  "description" : "Column mapping with array of structs",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-4a79f88f-977f-4a72-bb19-ed35c1373657"
+      }
+    }, {
+      "name" : "items",
+      "type" : {
+        "type" : "array",
+        "elementType" : {
+          "type" : "struct",
+          "fields" : [ {
+            "name" : "name",
+            "type" : "string",
+            "nullable" : true,
+            "metadata" : {
+              "delta.columnMapping.id" : 3,
+              "delta.columnMapping.physicalName" : "col-b99bcf52-7196-49b7-a51e-242ddd0ff3ea"
+            }
+          }, {
+            "name" : "qty",
+            "type" : "integer",
+            "nullable" : true,
+            "metadata" : {
+              "delta.columnMapping.id" : 4,
+              "delta.columnMapping.physicalName" : "col-9e2d40f4-1967-4296-a284-258a6c45a473"
+            }
+          } ]
+        },
+        "containsNull" : true
+      },
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-00f91791-59a5-44fe-893b-f20553f3a677"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "changeDataFeed", "checkConstraints", "columnMapping", "deletionVectors", "generatedColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 4397,
+    "numCommits" : 3,
+    "numActions" : 7,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 2,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.mode" : "name",
+    "delta.columnMapping.maxColumnId" : "4"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "columnMapping", "columnMappingName", "complexTypes" ]
+}

@@ -1,0 +1,8 @@
+{
+  "testName" : "ID mode rename + column projection",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic id mode rename projection test",
+  "hasSchemaEvolution" : true,
+  "testId" : "cm_id_mode_rename_projection"
+}

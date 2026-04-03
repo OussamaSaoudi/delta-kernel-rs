@@ -1,0 +1,7 @@
+{
+  "testName" : "non-nulls only in file",
+  "workloadCount" : 5,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "851-866",
+  "testId" : "ds_nulls_nonnulls_only"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE on string key columns",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-011",
+  "testId" : "mergeStringKeys"
+}

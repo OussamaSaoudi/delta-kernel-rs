@@ -1,0 +1,7 @@
+{
+  "testName" : "Table with 100+ columns",
+  "workloadCount" : 1,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cr_wide_schema"
+}

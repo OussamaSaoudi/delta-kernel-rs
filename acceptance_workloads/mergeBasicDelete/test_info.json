@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with only DELETE clause",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-003",
+  "testId" : "mergeBasicDelete"
+}

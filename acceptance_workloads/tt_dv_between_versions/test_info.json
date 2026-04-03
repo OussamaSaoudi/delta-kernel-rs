@@ -1,0 +1,7 @@
+{
+  "testName" : "Time travel with DV changes between versions",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "synthetic DV time travel test",
+  "testId" : "tt_dv_between_versions"
+}

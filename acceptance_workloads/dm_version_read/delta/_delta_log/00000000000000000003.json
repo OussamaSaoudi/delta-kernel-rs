@@ -1,0 +1,2 @@
+{"commitInfo":{"timestamp":1773116981959,"operation":"TRUNCATE","operationParameters":{},"readVersion":2,"isolationLevel":"WriteSerializable","isBlindAppend":true,"operationMetrics":{},"tags":{"restoresDeletedRows":"false"},"engineInfo":"Databricks-Runtime/<unknown>","txnId":"4ff1c795-ee9f-40d6-a882-bf36a6b9e657"}}
+{"domainMetadata":{"domain":"domain_v3","configuration":"{\"version\":\"v3\"}","removed":false}}

@@ -1,0 +1,9 @@
+{
+  "type" : "snapshot",
+  "timestamp" : "2026-03-09 22:00:02.289",
+  "name" : "tt_timestamp_before_retention_error",
+  "error" : {
+    "errorCode" : "DELTA_TIMESTAMP_EARLIER_THAN_COMMIT_RETENTION",
+    "errorMessage" : "[DELTA_TIMESTAMP_EARLIER_THAN_COMMIT_RETENTION] The provided timestamp (2026-03-09 22:00:02.289) is before the earliest version available to\nthis table (2026-03-09 22:00:03.505). Please use a timestamp after 2026-03-09 22:00:03."
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Read unchanged table after SaveMode.ErrorIfExists failure",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dsReadSaveModeErrorIfExists"
+}

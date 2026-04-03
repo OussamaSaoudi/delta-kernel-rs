@@ -1,0 +1,7 @@
+{
+  "testName" : "Table after upgrade attempt without features (no-op)",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "228-241",
+  "testId" : "pv_004_upgrade_no_feature"
+}

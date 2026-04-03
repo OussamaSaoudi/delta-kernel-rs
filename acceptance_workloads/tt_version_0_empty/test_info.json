@@ -1,0 +1,7 @@
+{
+  "testName" : "Time travel to version 0 of empty table",
+  "workloadCount" : 1,
+  "sourceFile" : "TimeTravelSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "tt_version_0_empty"
+}

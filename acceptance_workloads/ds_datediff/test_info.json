@@ -1,0 +1,7 @@
+{
+  "testName" : "datediff() predicate",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "new coverage",
+  "testId" : "ds_datediff"
+}

@@ -1,0 +1,8 @@
+{
+  "testName" : "Predicate on dropped+re-added column",
+  "workloadCount" : 3,
+  "sourceFile" : "ColumnMappingSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "hasSchemaEvolution" : true,
+  "testId" : "cm_predicate_on_readded"
+}

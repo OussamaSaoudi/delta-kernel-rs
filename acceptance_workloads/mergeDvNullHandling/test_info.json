@@ -1,0 +1,7 @@
+{
+  "testName" : "Merge with null values on DV table",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoLowShuffleDvSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "mergeDvNullHandling"
+}

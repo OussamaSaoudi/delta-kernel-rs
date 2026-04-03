@@ -1,0 +1,8 @@
+{
+  "testName" : "Table after protocol upgrade to current version",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "188-197",
+  "hasSchemaEvolution" : true,
+  "testId" : "pv_002_upgrade_to_current"
+}

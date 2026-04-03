@@ -1,0 +1,7 @@
+{
+  "testName" : "Table after overwrite with session defaults",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "383-401",
+  "testId" : "pv_012_overwrite_session_defaults"
+}

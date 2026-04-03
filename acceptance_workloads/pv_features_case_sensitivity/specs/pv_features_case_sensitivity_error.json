@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "pv_features_case_sensitivity",
+  "error" : {
+    "errorCode" : "DELTA_UNSUPPORTED_FEATURES_FOR_READ",
+    "errorMessage" : "[DELTA_UNSUPPORTED_FEATURES_FOR_READ] Unsupported Delta read feature: table \"file:/tmp/spark%dir%prefix-b87e6a87-0147-487b-bd35-e53ff4db997a\" requires reader table feature(s) that are unsupported by this version of Databricks: DeletionVectors. Please refer to https://docs.databricks.com/delta/feature-compatibility.html for more information on Delta Lake feature compatibility."
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE cross-partition row movement",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-018",
+  "testId" : "mergePartitionedCrossPartition"
+}

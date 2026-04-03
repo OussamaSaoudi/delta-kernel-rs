@@ -1,0 +1,38 @@
+{
+  "name" : "read_special_chars_tbl",
+  "description" : "read_special_chars — tbl",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "category",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 1,
+    "minWriterVersion" : 2
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 1356,
+    "numCommits" : 2,
+    "numActions" : 7,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numCheckpointFiles" : 0
+  },
+  "properties" : { },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 1,
+    "numDistinctPartitions" : 0
+  }
+}

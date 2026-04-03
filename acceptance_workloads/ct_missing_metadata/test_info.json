@@ -1,0 +1,7 @@
+{
+  "testName" : "Commit 0 missing Metadata action",
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "corrupt-table-gaps",
+  "isErrorTest" : true,
+  "testId" : "ct_missing_metadata"
+}

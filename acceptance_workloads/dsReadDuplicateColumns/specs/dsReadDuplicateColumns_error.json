@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "dsReadDuplicateColumns",
+  "error" : {
+    "errorCode" : "COLUMN_ALREADY_EXISTS",
+    "errorMessage" : "[COLUMN_ALREADY_EXISTS] The column `id` already exists. Choose another name or rename the existing column. SQLSTATE: 42711"
+  }
+}

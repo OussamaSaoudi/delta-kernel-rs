@@ -1,0 +1,7 @@
+{
+  "testName" : "DV in table with special characters in path",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "new coverage",
+  "testId" : "dv_special_path_chars"
+}

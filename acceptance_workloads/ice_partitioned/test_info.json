@@ -1,0 +1,7 @@
+{
+  "testName" : "IcebergCompat with partition columns",
+  "workloadCount" : 4,
+  "sourceFile" : "IcebergCompatSuite.scala",
+  "sourceLines" : "521-587",
+  "testId" : "ice_partitioned"
+}

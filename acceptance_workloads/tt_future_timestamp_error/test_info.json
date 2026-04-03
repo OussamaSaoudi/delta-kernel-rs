@@ -1,0 +1,7 @@
+{
+  "testName" : "as of exact timestamp after last commit should fail",
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "566-608",
+  "isErrorTest" : true,
+  "testId" : "tt_future_timestamp_error"
+}

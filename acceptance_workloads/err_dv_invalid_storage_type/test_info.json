@@ -1,0 +1,7 @@
+{
+  "testName" : "DV with unknown storageType",
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-23",
+  "isErrorTest" : true,
+  "testId" : "err_dv_invalid_storage_type"
+}

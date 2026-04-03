@@ -1,0 +1,1 @@
+{"commitInfo":{"timestamp":1773118812241,"operation":"VACUUM END","operationParameters":{"status":"COMPLETED"},"readVersion":2,"isolationLevel":"SnapshotIsolation","isBlindAppend":true,"operationMetrics":{"numDeletedFiles":"2","numVacuumedDirectories":"1"},"engineInfo":"Databricks-Runtime/<unknown>","txnId":"8f208c44-f77c-46e8-bb8a-5e3f17d89552"}}

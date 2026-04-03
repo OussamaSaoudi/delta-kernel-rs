@@ -1,0 +1,59 @@
+{
+  "name" : "cm_special_chars",
+  "description" : "Column names with spaces, dots, backticks",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-03050c40-e545-497f-bb9d-f49bbb528385"
+      }
+    }, {
+      "name" : "col with spaces",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-3bb58c97-d265-4b7d-94d6-eff292a916c0"
+      }
+    }, {
+      "name" : "col.with.dots",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 3,
+        "delta.columnMapping.physicalName" : "col-11e637dc-9147-406d-8adf-71aac2f5c891"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "changeDataFeed", "checkConstraints", "columnMapping", "deletionVectors", "generatedColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 3464,
+    "numCommits" : 3,
+    "numActions" : 7,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 2,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.mode" : "name",
+    "delta.columnMapping.maxColumnId" : "3"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "columnMapping", "columnMappingName", "specialChars" ]
+}

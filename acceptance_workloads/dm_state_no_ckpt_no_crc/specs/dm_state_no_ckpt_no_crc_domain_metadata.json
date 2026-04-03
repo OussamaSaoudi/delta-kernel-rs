@@ -1,0 +1,10 @@
+{
+  "type" : "domain_metadata",
+  "expected" : {
+    "domain" : "testDomain1",
+    "configuration" : "",
+    "removed" : false
+  },
+  "name" : "dm_state_no_ckpt_no_crc_domain_metadata",
+  "description" : "Domain metadata reconstruction: no checkpoint, no CRC"
+}

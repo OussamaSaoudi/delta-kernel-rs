@@ -1,0 +1,7 @@
+{
+  "testName" : "INSERT + DELETE + MERGE + UPDATE with DVs",
+  "workloadCount" : 5,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "597-685",
+  "testId" : "DV-016"
+}

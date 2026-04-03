@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with array columns",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-020",
+  "testId" : "mergeWithArrayCol"
+}

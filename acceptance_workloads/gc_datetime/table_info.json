@@ -1,0 +1,52 @@
+{
+  "name" : "gc_datetime",
+  "description" : "Generated column with date/time functions",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "event_time",
+      "type" : "timestamp",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "event_date",
+      "type" : "date",
+      "nullable" : true,
+      "metadata" : {
+        "delta.generationExpression" : "CAST(event_time AS DATE)"
+      }
+    }, {
+      "name" : "event_hour",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.generationExpression" : "HOUR(event_time)"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "generatedColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 1,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 1120,
+    "numCommits" : 2,
+    "numActions" : 5,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "generatedColumns" ]
+}

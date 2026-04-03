@@ -1,0 +1,7 @@
+{
+  "testName" : "Drop and re-add column with same name but different type",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic drop readd test",
+  "testId" : "cm_drop_readd_same_name"
+}

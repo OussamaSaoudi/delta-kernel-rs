@@ -1,0 +1,138 @@
+{
+  "name" : "mergeEdgeLargePayload",
+  "description" : "MERGE with wide rows (many columns)",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_1",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_2",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_3",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_4",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_5",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_6",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_7",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_8",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_9",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_10",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_11",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_12",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_13",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_14",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_15",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_16",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_17",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_18",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_19",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_20",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 1,
+    "sizeInBytes" : 15205,
+    "numCommits" : 2,
+    "numActions" : 9,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "merge", "edge", "wideRows" ]
+}

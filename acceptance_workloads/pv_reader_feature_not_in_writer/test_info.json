@@ -1,0 +1,7 @@
+{
+  "testName" : "Reader feature not in writer features",
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "protocol spec",
+  "isErrorTest" : true,
+  "testId" : "pv_reader_feature_not_in_writer"
+}

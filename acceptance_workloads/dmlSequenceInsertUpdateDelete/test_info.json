@@ -1,0 +1,7 @@
+{
+  "testName" : "Sequential INSERT, UPDATE, DELETE",
+  "workloadCount" : 2,
+  "sourceFile" : "DMLReadBack.scala",
+  "sourceLines" : "DML-001",
+  "testId" : "dmlSequenceInsertUpdateDelete"
+}

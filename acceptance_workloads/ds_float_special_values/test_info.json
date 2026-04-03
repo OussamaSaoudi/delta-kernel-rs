@@ -1,0 +1,7 @@
+{
+  "testName" : "FLOAT with NaN, Infinity, -0.0",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "new coverage",
+  "testId" : "ds_float_special_values"
+}

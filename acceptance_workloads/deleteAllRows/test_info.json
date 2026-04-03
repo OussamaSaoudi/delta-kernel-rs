@@ -1,0 +1,7 @@
+{
+  "testName" : "DELETE without WHERE",
+  "workloadCount" : 1,
+  "sourceFile" : "DeleteSuiteBase.scala",
+  "sourceLines" : "DEL-002",
+  "testId" : "deleteAllRows"
+}

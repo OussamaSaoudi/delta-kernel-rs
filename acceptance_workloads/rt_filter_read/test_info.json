@@ -1,0 +1,7 @@
+{
+  "testName" : "read mixed materialized columns with filter",
+  "workloadCount" : 2,
+  "sourceFile" : "RowTrackingReadWriteSuite.scala",
+  "sourceLines" : "188-217",
+  "testId" : "rt_filter_read"
+}

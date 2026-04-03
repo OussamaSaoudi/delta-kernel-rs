@@ -1,0 +1,7 @@
+{
+  "testName" : "Float NaN value read-back",
+  "workloadCount" : 2,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "P0-cr_float_nan",
+  "testId" : "cr_float_nan"
+}

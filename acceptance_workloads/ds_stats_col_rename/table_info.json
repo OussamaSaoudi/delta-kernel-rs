@@ -1,0 +1,59 @@
+{
+  "name" : "ds_stats_col_rename",
+  "description" : "Data skipping after column rename (CM=name)",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-70750d9c-4002-4bad-bebf-b9b7acd8662c"
+      }
+    }, {
+      "name" : "val_renamed",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-450e522e-83e1-4a09-9cd6-7741dad2653b"
+      }
+    }, {
+      "name" : "label",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 3,
+        "delta.columnMapping.physicalName" : "col-c71af79c-e34e-47bd-91b0-f6724bee8a31"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "changeDataFeed", "checkConstraints", "columnMapping", "deletionVectors", "generatedColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 4989,
+    "numCommits" : 5,
+    "numActions" : 11,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 4,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.mode" : "name",
+    "delta.columnMapping.maxColumnId" : "3"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "data-skipping", "columnMapping", "schemaEvolution" ]
+}

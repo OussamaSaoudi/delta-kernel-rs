@@ -1,0 +1,41 @@
+{
+  "name" : "ict_enable_later",
+  "description" : "Enable ICT on existing table",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "inCommitTimestamp", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 6,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 3123,
+    "numCommits" : 4,
+    "numActions" : 14,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 3,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableInCommitTimestamps" : "true",
+    "delta.enableDeletionVectors" : "true",
+    "delta.inCommitTimestampEnablementVersion" : "2",
+    "delta.inCommitTimestampEnablementTimestamp" : "1773117510675"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "inCommitTimestamp" ]
+}

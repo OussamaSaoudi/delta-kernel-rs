@@ -1,0 +1,8 @@
+{
+  "testName" : "Explicit projection after column drop (CM name mode)",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic select after drop test",
+  "hasSchemaEvolution" : true,
+  "testId" : "cm_select_after_drop"
+}

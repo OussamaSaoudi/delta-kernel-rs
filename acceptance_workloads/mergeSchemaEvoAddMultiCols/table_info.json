@@ -1,0 +1,58 @@
+{
+  "name" : "mergeSchemaEvoAddMultiCols",
+  "description" : "Schema evolution adds multiple new columns",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "value",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "extra1",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "extra2",
+      "type" : "double",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "extra3",
+      "type" : "boolean",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 1,
+    "sizeInBytes" : 3482,
+    "numCommits" : 2,
+    "numActions" : 10,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "merge", "schemaEvolution" ]
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "CDC with partition pruning",
+  "workloadCount" : 5,
+  "sourceFile" : "DeltaCDCSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cdc_partitioned"
+}

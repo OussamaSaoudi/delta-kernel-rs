@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "dsReadMissingCommitFile",
+  "error" : {
+    "errorCode" : "DELTA_TABLE_NOT_FOUND",
+    "errorMessage" : "[DELTA_TABLE_NOT_FOUND] Delta table `/tmp/spark%dir%prefix-f80f1d6e-508f-4de2-879b-baebad0119f7` doesn't exist."
+  }
+}

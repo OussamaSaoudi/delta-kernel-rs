@@ -1,0 +1,51 @@
+{
+  "name" : "cm_predicate_renamed_partition",
+  "description" : "Filter on renamed partition column",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-1f626bd9-363f-4123-a443-08f0ceb565c3"
+      }
+    }, {
+      "name" : "area",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-572a556b-7c96-4e7a-90f2-a0b702d809ac"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "changeDataFeed", "checkConstraints", "columnMapping", "deletionVectors", "generatedColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 4,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 4864,
+    "numCommits" : 6,
+    "numActions" : 13,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 5,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.mode" : "name",
+    "delta.columnMapping.maxColumnId" : "2"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 1,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "columnMapping", "columnMappingName" ]
+}

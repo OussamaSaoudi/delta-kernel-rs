@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "start_date >= '2024-02-01'",
+  "expected" : {
+    "rowCount" : 1,
+    "fileCount" : 1,
+    "filesSkipped" : 1
+  }
+}

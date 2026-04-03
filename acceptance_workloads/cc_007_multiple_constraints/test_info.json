@@ -1,0 +1,7 @@
+{
+  "testName" : "Read table with multiple check constraints",
+  "workloadCount" : 3,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "multiple constraints pattern",
+  "testId" : "cc_007_multiple_constraints"
+}

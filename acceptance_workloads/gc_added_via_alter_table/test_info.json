@@ -1,0 +1,8 @@
+{
+  "testName" : "Column added via ALTER TABLE alongside generated column",
+  "workloadCount" : 3,
+  "sourceFile" : "GeneratedColumnSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "hasSchemaEvolution" : true,
+  "testId" : "gc_added_via_alter_table"
+}

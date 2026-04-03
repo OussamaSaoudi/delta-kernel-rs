@@ -1,0 +1,61 @@
+{
+  "name" : "mergeStructEvoPartitionedStruct",
+  "description" : "Struct evolution on partitioned table with null handling",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "region",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "metrics",
+      "type" : {
+        "type" : "struct",
+        "fields" : [ {
+          "name" : "score",
+          "type" : "integer",
+          "nullable" : true,
+          "metadata" : { }
+        }, {
+          "name" : "grade",
+          "type" : "string",
+          "nullable" : true,
+          "metadata" : { }
+        } ]
+      },
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 4,
+    "numRemoveFiles" : 1,
+    "sizeInBytes" : 4680,
+    "numCommits" : 2,
+    "numActions" : 11,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 1,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "merge", "structEvolution", "partitioned", "null" ]
+}

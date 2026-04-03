@@ -1,0 +1,7 @@
+{
+  "testName" : "Boolean column with constraints",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "905-914",
+  "testId" : "cc_019_boolean_column_names"
+}

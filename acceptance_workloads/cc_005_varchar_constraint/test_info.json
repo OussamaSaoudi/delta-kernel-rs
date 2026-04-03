@@ -1,0 +1,7 @@
+{
+  "testName" : "Constraint induced by varchar",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "727-742",
+  "testId" : "cc_005_varchar_constraint"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Basic SetTransaction tracking",
+  "sourceFile" : "DeltaIncrementalSetTransactionsSuite.scala",
+  "sourceLines" : "121-169",
+  "testId" : "txn_basic",
+  "isTxnTest" : true
+}

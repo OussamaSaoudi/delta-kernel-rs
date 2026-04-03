@@ -1,0 +1,9 @@
+{
+  "type" : "snapshot",
+  "version" : -1,
+  "name" : "dsReadVersionNegative",
+  "error" : {
+    "errorCode" : "DELTA_TABLE_RESTORE_VERSION_INVALID",
+    "errorMessage" : "[DELTA_VERSION_NOT_FOUND] Cannot time travel Delta table to version -1. Available versions: [0, 0]."
+  }
+}

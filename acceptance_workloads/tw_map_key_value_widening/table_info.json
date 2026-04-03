@@ -1,0 +1,87 @@
+{
+  "name" : "tw_map_key_value_widening",
+  "description" : "Map key/value type widening (map<byte,short> -> map<int,int>)",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "s",
+      "type" : {
+        "type" : "struct",
+        "fields" : [ {
+          "name" : "a",
+          "type" : "integer",
+          "nullable" : true,
+          "metadata" : {
+            "delta.typeChanges" : [ {
+              "toType" : "integer",
+              "fromType" : "byte"
+            } ]
+          }
+        } ]
+      },
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "m",
+      "type" : {
+        "type" : "map",
+        "keyType" : "integer",
+        "valueType" : "integer",
+        "valueContainsNull" : true
+      },
+      "nullable" : true,
+      "metadata" : {
+        "delta.typeChanges" : [ {
+          "toType" : "integer",
+          "fromType" : "byte",
+          "fieldPath" : "key"
+        }, {
+          "toType" : "integer",
+          "fromType" : "short",
+          "fieldPath" : "value"
+        } ]
+      }
+    }, {
+      "name" : "a",
+      "type" : {
+        "type" : "array",
+        "elementType" : "integer",
+        "containsNull" : true
+      },
+      "nullable" : true,
+      "metadata" : {
+        "delta.typeChanges" : [ {
+          "toType" : "integer",
+          "fromType" : "short",
+          "fieldPath" : "element"
+        } ]
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors", "typeWidening" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants", "typeWidening" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 2959,
+    "numCommits" : 2,
+    "numActions" : 18,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 6,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableTypeWidening" : "true",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "typeWidening" ]
+}

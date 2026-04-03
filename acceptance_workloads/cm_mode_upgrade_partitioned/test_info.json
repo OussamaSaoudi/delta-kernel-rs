@@ -1,0 +1,7 @@
+{
+  "testName" : "Upgrade none to name on partitioned table",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic upgrade partitioned test",
+  "testId" : "cm_mode_upgrade_partitioned"
+}

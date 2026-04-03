@@ -1,0 +1,8 @@
+{
+  "testName" : "Checkpoint with schema evolution",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "synthetic schema evolution checkpoint test",
+  "hasSchemaEvolution" : true,
+  "testId" : "cp_schema_evolution"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "V2 checkpoint after DML operations",
+  "workloadCount" : 1,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "custom",
+  "testId" : "cp_v2_after_dml"
+}

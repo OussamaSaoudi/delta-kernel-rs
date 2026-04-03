@@ -1,0 +1,7 @@
+{
+  "testName" : "UPDATE nested struct with new field",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-013",
+  "testId" : "mergeSchemaEvoUpdateNestedField"
+}

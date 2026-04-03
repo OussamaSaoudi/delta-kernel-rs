@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "dsReadEmptyTable",
+  "error" : {
+    "errorCode" : "DELTA_TABLE_NOT_FOUND",
+    "errorMessage" : "[DELTA_MISSING_TRANSACTION_LOG] Incompatible format detected.\n\nYou are trying to read from `/tmp/spark%dir%prefix-4ae01c76-7d48-42d6-9535-00f6273d38b5` using Delta, but there is no\ntransaction log present. Check the upstream job to make sure that it is writing\nusing format(\"delta\") and that you are trying to read from the table base path.\n\nTo learn more about Delta, see https://docs.databricks.com/delta/index.html\n"
+  }
+}

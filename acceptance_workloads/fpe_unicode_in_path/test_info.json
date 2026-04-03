@@ -1,0 +1,7 @@
+{
+  "testName" : "File path with percent-encoded multi-byte UTF-8 characters",
+  "workloadCount" : 2,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "fpe-edge-cases",
+  "testId" : "fpe_unicode_in_path"
+}

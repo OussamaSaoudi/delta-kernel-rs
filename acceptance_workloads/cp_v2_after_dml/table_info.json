@@ -1,0 +1,39 @@
+{
+  "name" : "cp_v2_after_dml",
+  "description" : "V2 checkpoint after DML operations",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors", "v2Checkpoint" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants", "v2Checkpoint" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 1,
+    "sizeInBytes" : 1563,
+    "numCommits" : 0,
+    "numActions" : 10,
+    "lastCheckpointVersion" : 2,
+    "lastCrcVersion" : 2,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.checkpointPolicy" : "v2",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "v2Checkpoint" ]
+}

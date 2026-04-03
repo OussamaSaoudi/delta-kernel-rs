@@ -1,0 +1,8 @@
+{
+  "testName" : "Predicate on column after rename (name mode)",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic predicate after rename test",
+  "hasSchemaEvolution" : true,
+  "testId" : "cm_predicate_after_rename"
+}

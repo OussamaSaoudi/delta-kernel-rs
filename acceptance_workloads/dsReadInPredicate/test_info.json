@@ -1,0 +1,7 @@
+{
+  "testName" : "Read with IN predicate",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dsReadInPredicate"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Read table partitioned by decimal column",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaPartitionSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dpReadPartitionDecimal"
+}

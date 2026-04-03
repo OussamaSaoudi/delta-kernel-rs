@@ -1,0 +1,8 @@
+{
+  "testName" : "Table after ALTER to add CDF feature",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "1748+",
+  "hasSchemaEvolution" : true,
+  "testId" : "pv_046_alter_add_cdf"
+}

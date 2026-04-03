@@ -1,0 +1,7 @@
+{
+  "testName" : "Domain metadata deletion: no checkpoint, no CRC",
+  "sourceFile" : "DomainMetadataSuiteCapture.scala",
+  "sourceLines" : "test-10",
+  "testId" : "dm_deletion_no_ckpt_no_crc",
+  "is_domain_metadata_test" : true
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "UPDATE with expression in SET",
+  "workloadCount" : 2,
+  "sourceFile" : "UpdateSuiteBase.scala",
+  "sourceLines" : "UPD-005",
+  "testId" : "updateWithSubquery"
+}

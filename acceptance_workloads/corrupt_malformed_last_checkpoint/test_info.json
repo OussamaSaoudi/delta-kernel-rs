@@ -1,0 +1,7 @@
+{
+  "testName" : "Invalid JSON in _last_checkpoint",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-8",
+  "testId" : "corrupt_malformed_last_checkpoint"
+}

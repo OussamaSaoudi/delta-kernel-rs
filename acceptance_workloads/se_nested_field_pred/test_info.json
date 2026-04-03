@@ -1,0 +1,7 @@
+{
+  "testName" : "Predicate on added nested field",
+  "workloadCount" : 3,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "se_nested_field_pred"
+}

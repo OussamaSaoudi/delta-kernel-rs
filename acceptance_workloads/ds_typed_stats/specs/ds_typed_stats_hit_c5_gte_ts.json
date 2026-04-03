@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "c5 >= '2001-01-01 01:00:00'",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

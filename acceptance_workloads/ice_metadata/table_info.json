@@ -1,0 +1,53 @@
+{
+  "name" : "ice_metadata",
+  "description" : "IcebergCompat table metadata verification",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.nested.ids" : { },
+        "delta.columnMapping.physicalName" : "col-78aff50b-aaad-40ce-aa34-6dcb78e3baa0"
+      }
+    }, {
+      "name" : "name",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.nested.ids" : { },
+        "delta.columnMapping.physicalName" : "col-3e0d0e14-3115-45d2-a7aa-2a8b6547491d"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 2,
+    "minWriterVersion" : 7,
+    "writerFeatures" : [ "appendOnly", "changeDataFeed", "columnMapping", "icebergCompatV2", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 1,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 1333,
+    "numCommits" : 2,
+    "numActions" : 5,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableIcebergCompatV2" : "true",
+    "delta.enableChangeDataFeed" : "true",
+    "delta.columnMapping.mode" : "name",
+    "delta.columnMapping.maxColumnId" : "2"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "icebergCompat" ]
+}

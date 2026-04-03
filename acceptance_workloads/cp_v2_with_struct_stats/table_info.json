@@ -1,0 +1,44 @@
+{
+  "name" : "cp_v2_with_struct_stats",
+  "description" : "V2 checkpoint with struct stats",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "value",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors", "v2Checkpoint" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants", "v2Checkpoint" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 11,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 8223,
+    "numCommits" : 0,
+    "numActions" : 31,
+    "lastCheckpointVersion" : 11,
+    "lastCrcVersion" : 11,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.checkpointPolicy" : "v2",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "v2Checkpoint" ]
+}

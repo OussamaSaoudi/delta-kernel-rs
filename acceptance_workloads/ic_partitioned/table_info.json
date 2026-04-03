@@ -1,0 +1,53 @@
+{
+  "name" : "ic_partitioned",
+  "description" : "Identity column with partitioned table",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.identity.start" : 1,
+        "delta.identity.step" : 1,
+        "delta.identity.highWaterMark" : 5,
+        "delta.identity.allowExplicitInsert" : false
+      }
+    }, {
+      "name" : "value",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "category",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "identityColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 2958,
+    "numCommits" : 2,
+    "numActions" : 8,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 1,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "identityColumns" ]
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Deeply nested fields in variant",
+  "workloadCount" : 1,
+  "sourceFile" : "VariantDataSkippingStatsSuite.scala",
+  "sourceLines" : "571-591",
+  "testId" : "var_010_nested_fields"
+}

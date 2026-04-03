@@ -1,0 +1,7 @@
+{
+  "testName" : "Partition value encoding: byte with boundary values (-128, 0, 127)",
+  "workloadCount" : 4,
+  "sourceFile" : "PartitionSuiteCapture.scala",
+  "sourceLines" : "protocol-spec",
+  "testId" : "pve_byte_partition"
+}

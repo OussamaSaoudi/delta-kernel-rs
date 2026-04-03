@@ -1,0 +1,7 @@
+{
+  "testName" : "Error on negative version",
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "dsReadVersionNegative"
+}

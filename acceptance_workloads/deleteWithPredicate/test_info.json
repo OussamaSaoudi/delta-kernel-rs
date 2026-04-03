@@ -1,0 +1,7 @@
+{
+  "testName" : "DELETE with complex predicate",
+  "workloadCount" : 1,
+  "sourceFile" : "DeleteSuiteBase.scala",
+  "sourceLines" : "DEL-004",
+  "testId" : "deleteWithPredicate"
+}

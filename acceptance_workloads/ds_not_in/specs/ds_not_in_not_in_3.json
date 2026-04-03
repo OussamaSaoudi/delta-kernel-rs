@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "a NOT IN (3)",
+  "expected" : {
+    "rowCount" : 4,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

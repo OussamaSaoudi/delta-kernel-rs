@@ -1,0 +1,7 @@
+{
+  "testName" : "Read with array size constraint",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "array constraint pattern",
+  "testId" : "cc_009_array_constraint"
+}

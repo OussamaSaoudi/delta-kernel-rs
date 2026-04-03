@@ -1,0 +1,7 @@
+{
+  "testName" : "Table with 50+ small commits without checkpoint",
+  "workloadCount" : 1,
+  "sourceFile" : "ProductionEdgeCaseSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "prod_many_small_commits"
+}

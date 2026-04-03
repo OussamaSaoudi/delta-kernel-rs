@@ -1,0 +1,7 @@
+{
+  "testName" : "Time travel with partition filter",
+  "workloadCount" : 4,
+  "sourceFile" : "TimeTravelSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "tt_partition_filter"
+}

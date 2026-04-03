@@ -1,0 +1,157 @@
+{
+  "name" : "dsReadLargeSchema",
+  "description" : "Read table with many columns (25)",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_1",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_2",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_3",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_4",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_5",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_6",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_7",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_8",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_9",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_10",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_11",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_12",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_13",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_14",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_15",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_16",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_17",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_18",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_19",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_20",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_21",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_22",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_23",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "col_24",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 13760,
+    "numCommits" : 1,
+    "numActions" : 5,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 0,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  }
+}

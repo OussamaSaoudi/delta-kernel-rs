@@ -1,0 +1,7 @@
+{
+  "testName" : "CDC with deletion vectors enabled",
+  "workloadCount" : 7,
+  "sourceFile" : "CDCSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cdc_deletion_vectors"
+}

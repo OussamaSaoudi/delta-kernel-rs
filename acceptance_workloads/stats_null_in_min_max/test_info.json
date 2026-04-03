@@ -1,0 +1,7 @@
+{
+  "testName" : "Stats with all-null column (null min/max)",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "stats-edge-cases",
+  "testId" : "stats_null_in_min_max"
+}

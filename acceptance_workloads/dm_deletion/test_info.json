@@ -1,0 +1,7 @@
+{
+  "testName" : "Domain metadata deletion",
+  "sourceFile" : "DomainMetadataSuite.scala",
+  "sourceLines" : "122-178",
+  "testId" : "dm_deletion",
+  "is_domain_metadata_test" : true
+}

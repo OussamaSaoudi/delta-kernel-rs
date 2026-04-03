@@ -1,0 +1,37 @@
+{
+  "name" : "cp_many_commits",
+  "description" : "Checkpoint after many commits",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 25,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 11749,
+    "numCommits" : 5,
+    "numActions" : 70,
+    "lastCheckpointVersion" : 19,
+    "lastCrcVersion" : 24,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  }
+}

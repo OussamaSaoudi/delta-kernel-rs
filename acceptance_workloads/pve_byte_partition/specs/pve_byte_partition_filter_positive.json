@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "b > CAST(0 AS TINYINT)",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 2,
+    "filesSkipped" : 2
+  }
+}

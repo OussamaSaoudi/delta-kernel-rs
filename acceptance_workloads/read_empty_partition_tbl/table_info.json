@@ -1,0 +1,38 @@
+{
+  "name" : "read_empty_partition_tbl",
+  "description" : "read_empty_partition — tbl",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "part",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 1,
+    "minWriterVersion" : 2
+  },
+  "logInfo" : {
+    "numAddFiles" : 50,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 23897,
+    "numCommits" : 2,
+    "numActions" : 54,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numCheckpointFiles" : 0
+  },
+  "properties" : { },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 1,
+    "numDistinctPartitions" : 0
+  }
+}

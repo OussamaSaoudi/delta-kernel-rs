@@ -1,0 +1,7 @@
+{
+  "testName" : "Forward compat - unknown action at top level",
+  "workloadCount" : 2,
+  "sourceFile" : "EvolvabilitySuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "fc_unknown_action_top_level"
+}

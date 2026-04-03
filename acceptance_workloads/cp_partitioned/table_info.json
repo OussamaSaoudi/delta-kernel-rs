@@ -1,0 +1,42 @@
+{
+  "name" : "cp_partitioned",
+  "description" : "Checkpoint with partitioned table",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "part",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 20,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 16087,
+    "numCommits" : 0,
+    "numActions" : 24,
+    "lastCheckpointVersion" : 1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 1,
+    "numDistinctPartitions" : 0
+  }
+}

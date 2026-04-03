@@ -1,0 +1,7 @@
+{
+  "testName" : "Column projection with reordered columns",
+  "workloadCount" : 2,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cr_projection_reorder"
+}

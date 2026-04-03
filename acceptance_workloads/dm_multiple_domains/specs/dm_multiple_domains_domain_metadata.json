@@ -1,0 +1,10 @@
+{
+  "type" : "domain_metadata",
+  "expected" : {
+    "domain" : "testDomain1",
+    "configuration" : "",
+    "removed" : false
+  },
+  "name" : "dm_multiple_domains_domain_metadata",
+  "description" : "Multiple domain metadata entries - testDomain1"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Protocol (1,3) table with check constraints",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "120-186",
+  "testId" : "pv_001c_protocol_1_3"
+}

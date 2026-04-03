@@ -1,0 +1,26 @@
+{
+  "type" : "snapshot",
+  "version" : 1,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 2,
+      "minWriterVersion" : 7,
+      "writerFeatures" : [ "columnMapping", "icebergCompatV2", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":1,\"delta.columnMapping.nested.ids\":{},\"delta.columnMapping.physicalName\":\"col-126c5f13-540c-428a-8a1f-e2fd4eb0f8ff\"}},{\"name\":\"tags\",\"type\":{\"type\":\"array\",\"elementType\":\"string\",\"containsNull\":true},\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":2,\"delta.columnMapping.nested.ids\":{\"col-6ce62f12-8a35-493e-ba49-f9edb4bb1650.element\":7},\"delta.columnMapping.physicalName\":\"col-6ce62f12-8a35-493e-ba49-f9edb4bb1650\"}},{\"name\":\"props\",\"type\":{\"type\":\"map\",\"keyType\":\"string\",\"valueType\":\"string\",\"valueContainsNull\":true},\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":3,\"delta.columnMapping.nested.ids\":{\"col-0ea672f9-8012-40af-8bc7-119b33e4d553.value\":9,\"col-0ea672f9-8012-40af-8bc7-119b33e4d553.key\":8},\"delta.columnMapping.physicalName\":\"col-0ea672f9-8012-40af-8bc7-119b33e4d553\"}},{\"name\":\"info\",\"type\":{\"type\":\"struct\",\"fields\":[{\"name\":\"name\",\"type\":\"string\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":5,\"delta.columnMapping.nested.ids\":{},\"delta.columnMapping.physicalName\":\"col-f6b80e75-f910-44c8-a430-1056553a1a2d\"}},{\"name\":\"score\",\"type\":\"double\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":6,\"delta.columnMapping.nested.ids\":{},\"delta.columnMapping.physicalName\":\"col-c7dae8d3-dc90-4724-b8ce-824a5ae367ae\"}}]},\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":4,\"delta.columnMapping.nested.ids\":{},\"delta.columnMapping.physicalName\":\"col-9beb5447-2151-4f72-bb8f-0da43364e760\"}}]}",
+      "createdTime" : 1773117273425,
+      "id" : "31e940d5-11f8-4579-b5f5-10f552a8b977",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableIcebergCompatV2" : "true",
+        "delta.columnMapping.mode" : "name",
+        "delta.columnMapping.maxColumnId" : "9"
+      }
+    }
+  }
+}

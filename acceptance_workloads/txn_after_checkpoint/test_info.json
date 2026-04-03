@@ -1,0 +1,7 @@
+{
+  "testName" : "SetTransaction survives checkpoint",
+  "sourceFile" : "AppTransactionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "txn_after_checkpoint",
+  "isTxnTest" : true
+}

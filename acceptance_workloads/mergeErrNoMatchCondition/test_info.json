@@ -1,0 +1,7 @@
+{
+  "testName" : "Table state after failed MERGE without ON condition",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-ERR-002",
+  "testId" : "mergeErrNoMatchCondition"
+}

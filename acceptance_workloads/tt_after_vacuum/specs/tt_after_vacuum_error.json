@@ -1,0 +1,9 @@
+{
+  "type" : "snapshot",
+  "version" : 0,
+  "name" : "tt_after_vacuum",
+  "error" : {
+    "errorCode" : "DELTA_FILE_NOT_FOUND",
+    "errorMessage" : "[FAILED_READ_FILE.DBR_FILE_NOT_EXIST] Error while reading file file:/tmp/spark%dir%prefix-2a3173c0-d285-46fc-88a2-66ace6c942fe/test%file%prefix-part-00000-932d4e02-26a6-4ae4-a6c8-7eafb3a57ee4-c000.snappy.parquet. [DELTA_FILE_NOT_FOUND_DETAILED] File file:/tmp/spark%25dir%25prefix-2a3173c0-d285-46fc-88a2-66ace6c942fe/test%25file%25prefix-part-00000-932d4e02-26a6-4ae4-a6c8-7eafb3a57ee4-c000.snappy.parquet referenced in the transaction log cannot be found. This occurs when data has been manually deleted from the file system rather than using the table `DELETE` statement. \nIt can also be caused by a VACUUM operation that cleaned up data not yet processed if the table's retention period is too short. \nRestart your query with a new checkpoint location, or use spark.sql.files.ignoreMissingFiles to skip the missing files. For more information, see https://docs.databricks.com/delta/delta-intro.html#frequently-asked-questions\n SQLSTATE: KD001"
+  }
+}

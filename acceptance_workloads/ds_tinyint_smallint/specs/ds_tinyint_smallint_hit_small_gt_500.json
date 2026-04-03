@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "small_col > 500",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 1,
+    "filesSkipped" : 1
+  }
+}

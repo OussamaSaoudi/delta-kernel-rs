@@ -1,0 +1,7 @@
+{
+  "testName" : "Forward compat - empty JSON line in commit file",
+  "workloadCount" : 2,
+  "sourceFile" : "EvolvabilitySuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "fc_empty_json_line"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Nested columns with column mapping",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic nested columns test",
+  "testId" : "cm_nested_columns"
+}

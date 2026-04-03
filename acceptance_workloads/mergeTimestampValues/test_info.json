@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with timestamp columns",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-013",
+  "testId" : "mergeTimestampValues"
+}

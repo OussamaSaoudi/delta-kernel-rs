@@ -1,0 +1,7 @@
+{
+  "testName" : "read partitioned Delta table with deletion vectors",
+  "workloadCount" : 8,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "96-118",
+  "testId" : "DV-002"
+}

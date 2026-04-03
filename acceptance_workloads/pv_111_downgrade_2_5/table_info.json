@@ -1,0 +1,43 @@
+{
+  "name" : "pv_111_downgrade_2_5",
+  "description" : "Table with protocol (2,5) for downgrade testing",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-d90d3b76-9199-4ab1-9077-e549838ab1b2"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "columnMapping", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 1523,
+    "numCommits" : 1,
+    "numActions" : 5,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 0,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.columnMapping.mode" : "name",
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.maxColumnId" : "1"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "evolvability" ]
+}

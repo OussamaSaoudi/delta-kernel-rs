@@ -1,0 +1,7 @@
+{
+  "testName" : "Table with protocol (2,5) for downgrade testing",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "3501-3511",
+  "testId" : "pv_111_downgrade_2_5"
+}

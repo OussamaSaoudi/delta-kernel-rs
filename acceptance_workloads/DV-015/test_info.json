@@ -1,0 +1,7 @@
+{
+  "testName" : "UPDATE with DVs - update deleted rows updates nothing",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "571-594",
+  "testId" : "DV-015"
+}

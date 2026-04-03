@@ -1,0 +1,8 @@
+{
+  "testName" : "Time travel with VARIANT column",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaVariantSuite.scala",
+  "sourceLines" : "time travel with variant column works",
+  "hasSchemaEvolution" : true,
+  "testId" : "var_020_time_travel"
+}

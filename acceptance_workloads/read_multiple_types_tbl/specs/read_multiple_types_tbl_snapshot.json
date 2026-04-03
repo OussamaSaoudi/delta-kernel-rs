@@ -1,0 +1,22 @@
+{
+  "type" : "snapshotConstruction",
+  "version" : 2,
+  "expected" : {
+    "version" : 2,
+    "protocol" : {
+      "minReaderVersion" : 1,
+      "minWriterVersion" : 2
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"name\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"score\",\"type\":\"double\",\"nullable\":true,\"metadata\":{}},{\"name\":\"active\",\"type\":\"boolean\",\"nullable\":true,\"metadata\":{}},{\"name\":\"created\",\"type\":\"date\",\"nullable\":true,\"metadata\":{}},{\"name\":\"updated\",\"type\":\"timestamp\",\"nullable\":true,\"metadata\":{}}]}",
+      "partitionColumns" : [ ],
+      "configuration" : { },
+      "createdTime" : 1775089612712,
+      "id" : "1b1656ef-ed52-4b5d-b905-48450801394d"
+    }
+  }
+}

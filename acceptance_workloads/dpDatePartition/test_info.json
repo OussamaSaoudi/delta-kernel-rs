@@ -1,0 +1,7 @@
+{
+  "testName" : "Date-column partition",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaPartitionSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dpDatePartition"
+}

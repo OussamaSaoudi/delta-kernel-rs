@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "dsReadModifyCheckpoint",
+  "error" : {
+    "errorCode" : "DELTA_LOG_INVALID_STATUS",
+    "errorMessage" : "org.apache.spark.SparkException: [FAILED_READ_FILE.NO_HINT] Error while reading file file:/tmp/spark%dir%prefix-a82a9238-a4b2-4e98-9dfb-f254b5b8a79a/_delta_log/00000000000000000009.checkpoint.parquet.  SQLSTATE: KD001"
+  }
+}

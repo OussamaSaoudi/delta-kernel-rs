@@ -1,0 +1,7 @@
+{
+  "type" : "read",
+  "error" : {
+    "errorCode" : "DELTA_TABLE_NOT_FOUND",
+    "errorMessage" : "[DELTA_TABLE_NOT_FOUND] Delta table `/tmp/test/read_empty_path_tbl/delta` doesn't exist."
+  }
+}

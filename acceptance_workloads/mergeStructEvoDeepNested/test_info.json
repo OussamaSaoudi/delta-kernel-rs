@@ -1,0 +1,7 @@
+{
+  "testName" : "Deeply nested struct (3 levels), add field at leaf level",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoStructEvolutionNullnessSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "mergeStructEvoDeepNested"
+}

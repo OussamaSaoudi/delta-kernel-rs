@@ -1,0 +1,7 @@
+{
+  "testName" : "Column mapping with unsupported mode in metadata",
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "cm_err_003_invalid_mode"
+}

@@ -1,0 +1,51 @@
+{
+  "name" : "se_drop_col_pred",
+  "description" : "Data skipping after column drop",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-a5b576aa-5a73-40f9-a9d9-ba580bf934d1"
+      }
+    }, {
+      "name" : "name",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-94bbbc46-6f6c-47fe-aadd-04973476f558"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "changeDataFeed", "checkConstraints", "columnMapping", "deletionVectors", "generatedColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 4,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 6159,
+    "numCommits" : 6,
+    "numActions" : 13,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 5,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.mode" : "name",
+    "delta.columnMapping.maxColumnId" : "3"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "schemaEvolution", "columnMapping", "predicate" ]
+}

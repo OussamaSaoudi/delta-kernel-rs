@@ -1,0 +1,7 @@
+{
+  "testName" : "BINARY column (no min/max, only nullCount)",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "new coverage",
+  "testId" : "ds_binary_type"
+}

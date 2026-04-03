@@ -1,0 +1,47 @@
+{
+  "name" : "cp_v2_with_row_tracking",
+  "description" : "V2 checkpoint with row tracking",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "value",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors", "v2Checkpoint" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "domainMetadata", "invariants", "rowTracking", "v2Checkpoint" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 11,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 8223,
+    "numCommits" : 0,
+    "numActions" : 43,
+    "lastCheckpointVersion" : 11,
+    "lastCrcVersion" : 11,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true",
+    "delta.enableRowTracking" : "true",
+    "delta.checkpointPolicy" : "v2",
+    "delta.rowTracking.materializedRowCommitVersionColumnName" : "_row-commit-version-col-2f2afa2d-77da-41be-a82b-1066a087a740",
+    "delta.rowTracking.materializedRowIdColumnName" : "_row-id-col-7e8b013d-11ae-4d53-b7a8-85149fc53bc0"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "v2Checkpoint" ]
+}

@@ -1,0 +1,27 @@
+{
+  "type" : "snapshot",
+  "version" : 2,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "typeWidening", "deletionVectors" ],
+      "writerFeatures" : [ "typeWidening", "deletionVectors", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"score\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{\"delta.typeChanges\":[{\"toType\":\"integer\",\"fromType\":\"short\"}]}}]}",
+      "createdTime" : 1773119071493,
+      "id" : "d3ff5fc7-1648-4b1e-9750-0094b5b1c309",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableTypeWidening" : "true",
+        "spark.databricks.delta.properties.defaults.enableRowTracking" : "true",
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "part = 'b' OR value = 20",
+  "expected" : {
+    "rowCount" : 4,
+    "fileCount" : 3,
+    "filesSkipped" : 0
+  }
+}

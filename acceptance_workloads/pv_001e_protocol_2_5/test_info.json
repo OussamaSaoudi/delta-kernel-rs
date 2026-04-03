@@ -1,0 +1,7 @@
+{
+  "testName" : "Protocol (2,5) table with column mapping",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "120-186",
+  "testId" : "pv_001e_protocol_2_5"
+}

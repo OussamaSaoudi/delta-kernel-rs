@@ -1,0 +1,7 @@
+{
+  "testName" : "UPDATE multiple columns",
+  "workloadCount" : 2,
+  "sourceFile" : "UpdateSuiteBase.scala",
+  "sourceLines" : "UPD-004",
+  "testId" : "updateMultiCols"
+}

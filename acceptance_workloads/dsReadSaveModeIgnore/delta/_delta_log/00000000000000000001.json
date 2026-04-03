@@ -1,0 +1,1 @@
+{"commitInfo":{"timestamp":1773115847707,"operation":"WRITE","operationParameters":{"mode":"Ignore","statsOnLoad":false,"partitionBy":"[]"},"readVersion":0,"isolationLevel":"WriteSerializable","isBlindAppend":true,"operationMetrics":{},"tags":{"restoresDeletedRows":"false"},"engineInfo":"Databricks-Runtime/<unknown>","txnId":"ccd87195-af73-4b16-83e8-bf2a8706d44e"}}

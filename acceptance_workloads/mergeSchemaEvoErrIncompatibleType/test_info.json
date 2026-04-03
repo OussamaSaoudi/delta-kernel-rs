@@ -1,0 +1,7 @@
+{
+  "testName" : "Table state after incompatible type evolution error",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-026",
+  "testId" : "mergeSchemaEvoErrIncompatibleType"
+}

@@ -1,0 +1,8 @@
+{
+  "testName" : "Multiple successive type widenings (byte -> short -> int)",
+  "workloadCount" : 3,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic byte->short->int test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_byte_to_int"
+}

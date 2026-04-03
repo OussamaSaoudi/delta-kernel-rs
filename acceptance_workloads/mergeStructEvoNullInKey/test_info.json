@@ -1,0 +1,7 @@
+{
+  "testName" : "Merge with null values in struct-type key column",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoStructEvolutionNullnessSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "mergeStructEvoNullInKey"
+}

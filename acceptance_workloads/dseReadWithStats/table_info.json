@@ -1,0 +1,43 @@
+{
+  "name" : "dseReadWithStats",
+  "description" : "Read table and verify data skipping works with stats",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "batch",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 5,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 3859,
+    "numCommits" : 5,
+    "numActions" : 12,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 4,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "stats", "dataSkipping" ]
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Protocol version too high for reader error",
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "451-489",
+  "isErrorTest" : true,
+  "testId" : "pv_err_001_protocol_too_high"
+}

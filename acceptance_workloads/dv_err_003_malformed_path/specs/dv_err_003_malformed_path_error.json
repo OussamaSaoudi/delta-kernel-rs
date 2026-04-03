@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "dv_err_003_malformed_path",
+  "error" : {
+    "errorCode" : "DELTA_INVALID_DV_PATH",
+    "errorMessage" : "org.apache.spark.SparkException: Exception thrown in awaitResult: org.apache.hadoop.fs.ChecksumException: Checksum error: file:/tmp/spark%dir%prefix-d0fbf227-b13b-4bab-a4c4-610ad72c1acc/_delta_log/00000000000000000001.json at 1536 exp: -1864976310 got: 1847978792"
+  }
+}

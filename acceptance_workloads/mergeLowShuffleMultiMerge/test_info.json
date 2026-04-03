@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple low shuffle merges in sequence",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoLowShuffleSuite.scala",
+  "sourceLines" : "P2-LS-010",
+  "testId" : "mergeLowShuffleMultiMerge"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple DELETE operations on same file",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "new coverage",
+  "testId" : "dv_multiple_dvs_same_file"
+}

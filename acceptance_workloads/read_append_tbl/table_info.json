@@ -1,0 +1,33 @@
+{
+  "name" : "read_append_tbl",
+  "description" : "read_append — tbl",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "value",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 1,
+    "minWriterVersion" : 2
+  },
+  "logInfo" : {
+    "numAddFiles" : 10,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 4610,
+    "numCommits" : 3,
+    "numActions" : 15,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 2,
+    "numCheckpointFiles" : 0
+  },
+  "properties" : { },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  }
+}

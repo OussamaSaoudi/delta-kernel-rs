@@ -1,0 +1,7 @@
+{
+  "testName" : "ICT value read from CRC file",
+  "workloadCount" : 2,
+  "sourceFile" : "InCommitTimestampSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "ict_from_crc"
+}

@@ -1,0 +1,25 @@
+{
+  "type" : "snapshot",
+  "version" : 1,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors" ],
+      "writerFeatures" : [ "deletionVectors", "generatedColumns", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"value\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"date_part\",\"type\":\"date\",\"nullable\":true,\"metadata\":{\"delta.generationExpression\":\"CAST(CONCAT('2024-01-', LPAD(CAST(id AS STRING), 2, '0')) AS DATE)\"}}]}",
+      "createdTime" : 1773117146473,
+      "id" : "86c449e8-c52b-46b9-b53a-4d726835a0e9",
+      "partitionColumns" : [ "date_part" ],
+      "configuration" : {
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

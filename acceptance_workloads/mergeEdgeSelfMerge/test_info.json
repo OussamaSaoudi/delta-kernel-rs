@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE table into itself (self-join)",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSuiteBaseEdge.scala",
+  "sourceLines" : "P2-003",
+  "testId" : "mergeEdgeSelfMerge"
+}

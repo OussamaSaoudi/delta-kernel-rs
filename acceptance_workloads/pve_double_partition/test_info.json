@@ -1,0 +1,7 @@
+{
+  "testName" : "Partition value encoding: double with precision",
+  "workloadCount" : 3,
+  "sourceFile" : "PartitionSuiteCapture.scala",
+  "sourceLines" : "protocol-spec",
+  "testId" : "pve_double_partition"
+}

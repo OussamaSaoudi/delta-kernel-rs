@@ -1,0 +1,7 @@
+{
+  "testName" : "Log replay - no checkpoint, full replay from v0",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-17",
+  "testId" : "lr_no_checkpoint_full_replay"
+}

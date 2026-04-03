@@ -1,0 +1,7 @@
+{
+  "testName" : "Map with struct values, merge adds nullable field to struct",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoStructEvolutionNullnessSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "mergeStructEvoMapValueStructNull"
+}

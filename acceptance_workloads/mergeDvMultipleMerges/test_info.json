@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple consecutive merges on DV table",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoLowShuffleDvSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "mergeDvMultipleMerges"
+}

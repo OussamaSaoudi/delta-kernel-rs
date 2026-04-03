@@ -1,0 +1,7 @@
+{
+  "testName" : "Float +Infinity / -Infinity read-back",
+  "workloadCount" : 2,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "P0-cr_float_infinity",
+  "testId" : "cr_float_infinity"
+}

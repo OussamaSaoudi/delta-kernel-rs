@@ -1,0 +1,7 @@
+{
+  "testName" : "Read after coalesce write",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaSuiteEdge.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dseReadCoalesced"
+}

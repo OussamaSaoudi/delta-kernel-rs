@@ -1,0 +1,7 @@
+{
+  "testName" : "CDC with column mapping enabled",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaCDCColumnMappingSuite.scala",
+  "sourceLines" : "50-65",
+  "testId" : "cdc_column_mapping"
+}

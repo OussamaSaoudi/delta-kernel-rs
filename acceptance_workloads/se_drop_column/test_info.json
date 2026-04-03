@@ -1,0 +1,7 @@
+{
+  "testName" : "Read after column drop with column mapping",
+  "workloadCount" : 1,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "se_drop_column"
+}

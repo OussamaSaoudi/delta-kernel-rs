@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple identity columns",
+  "workloadCount" : 3,
+  "sourceFile" : "IdentityColumnSuite.scala",
+  "sourceLines" : "170-264",
+  "testId" : "ic_003_multiple_identity_cols"
+}

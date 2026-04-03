@@ -1,0 +1,59 @@
+{
+  "name" : "cm_id_mode_schema_evolution",
+  "description" : "Add column in id mode",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-24056b25-d0dd-41e7-a768-57d8b1bdb9e3"
+      }
+    }, {
+      "name" : "value",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-ec566661-61f8-4d27-840c-a5888746cd3a"
+      }
+    }, {
+      "name" : "extra",
+      "type" : "double",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 3,
+        "delta.columnMapping.physicalName" : "col-a3fa6f5c-0c23-472b-b79c-5a2a40c7205c"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "columnMapping", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 2869,
+    "numCommits" : 4,
+    "numActions" : 9,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 3,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.columnMapping.mode" : "id",
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.maxColumnId" : "3"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "columnMapping" ]
+}

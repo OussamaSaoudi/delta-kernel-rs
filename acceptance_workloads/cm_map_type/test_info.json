@@ -1,0 +1,7 @@
+{
+  "testName" : "Column mapping with map type columns",
+  "workloadCount" : 2,
+  "sourceFile" : "ColumnMappingSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cm_map_type"
+}

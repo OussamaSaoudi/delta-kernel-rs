@@ -1,0 +1,7 @@
+{
+  "testName" : "DV table read through a checkpoint",
+  "workloadCount" : 2,
+  "sourceFile" : "DeletionVectorsSuiteCapture.scala",
+  "sourceLines" : "feature-interaction",
+  "testId" : "dv_checkpoint_read"
+}

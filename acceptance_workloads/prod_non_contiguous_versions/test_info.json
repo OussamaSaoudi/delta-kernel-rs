@@ -1,0 +1,7 @@
+{
+  "testName" : "Version gap in delta log",
+  "workloadCount" : 1,
+  "sourceFile" : "ProductionEdgeCaseSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "prod_non_contiguous_versions"
+}

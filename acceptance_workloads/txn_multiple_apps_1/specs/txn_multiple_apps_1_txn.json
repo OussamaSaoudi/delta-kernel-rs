@@ -1,0 +1,10 @@
+{
+  "type" : "txn",
+  "expected" : {
+    "appId" : "app-1",
+    "txnVersion" : 1,
+    "lastUpdated" : 1
+  },
+  "name" : "txn_multiple_apps_1_txn",
+  "description" : "Multiple app transactions - app-1"
+}

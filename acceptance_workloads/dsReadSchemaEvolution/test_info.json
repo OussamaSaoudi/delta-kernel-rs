@@ -1,0 +1,8 @@
+{
+  "testName" : "Read after adding a column (schema evolution)",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "hasSchemaEvolution" : true,
+  "testId" : "dsReadSchemaEvolution"
+}

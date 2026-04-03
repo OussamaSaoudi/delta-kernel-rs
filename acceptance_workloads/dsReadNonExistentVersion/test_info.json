@@ -1,0 +1,7 @@
+{
+  "testName" : "Error on non-existent version",
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "dsReadNonExistentVersion"
+}

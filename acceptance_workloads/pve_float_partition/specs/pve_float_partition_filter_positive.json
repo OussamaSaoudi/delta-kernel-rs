@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "f > CAST(0.0 AS FLOAT)",
+  "expected" : {
+    "rowCount" : 3,
+    "fileCount" : 3,
+    "filesSkipped" : 2
+  }
+}

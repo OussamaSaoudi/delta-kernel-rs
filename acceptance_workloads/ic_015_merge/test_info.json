@@ -1,0 +1,8 @@
+{
+  "testName" : "Merge with insert and update",
+  "workloadCount" : 2,
+  "sourceFile" : "IdentityColumnDMLSuite.scala",
+  "sourceLines" : "70-134",
+  "hasSchemaEvolution" : true,
+  "testId" : "ic_015_merge"
+}

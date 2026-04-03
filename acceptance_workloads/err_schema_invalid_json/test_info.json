@@ -1,0 +1,7 @@
+{
+  "testName" : "metaData schemaString is invalid JSON",
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-22",
+  "isErrorTest" : true,
+  "testId" : "err_schema_invalid_json"
+}

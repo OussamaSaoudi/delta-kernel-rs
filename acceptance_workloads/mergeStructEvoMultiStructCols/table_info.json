@@ -1,0 +1,69 @@
+{
+  "name" : "mergeStructEvoMultiStructCols",
+  "description" : "Table with multiple struct columns, merge evolves one",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "s1",
+      "type" : {
+        "type" : "struct",
+        "fields" : [ {
+          "name" : "a",
+          "type" : "integer",
+          "nullable" : true,
+          "metadata" : { }
+        }, {
+          "name" : "b",
+          "type" : "integer",
+          "nullable" : true,
+          "metadata" : { }
+        } ]
+      },
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "s2",
+      "type" : {
+        "type" : "struct",
+        "fields" : [ {
+          "name" : "x",
+          "type" : "string",
+          "nullable" : true,
+          "metadata" : { }
+        } ]
+      },
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 1,
+    "sizeInBytes" : 2466,
+    "numCommits" : 2,
+    "numActions" : 9,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "merge", "structEvolution", "multiColumn" ]
+}

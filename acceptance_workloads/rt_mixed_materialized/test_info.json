@@ -1,0 +1,7 @@
+{
+  "testName" : "write and read table with mixed materialized columns",
+  "workloadCount" : 1,
+  "sourceFile" : "RowTrackingReadWriteSuite.scala",
+  "sourceLines" : "161-186",
+  "testId" : "rt_mixed_materialized"
+}

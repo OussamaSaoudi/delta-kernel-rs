@@ -1,0 +1,7 @@
+{
+  "testName" : "Error: read with predicate on non-existent column",
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "dsReadInvalidColumnName"
+}

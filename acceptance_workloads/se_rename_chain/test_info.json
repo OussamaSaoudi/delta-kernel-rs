@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple renames a -> b -> c",
+  "workloadCount" : 2,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "se_rename_chain"
+}

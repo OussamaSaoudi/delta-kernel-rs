@@ -1,0 +1,8 @@
+{
+  "testName" : "Type change + column rename combined",
+  "workloadCount" : 3,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic TW + rename test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_colmap_rename"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Null counts in variant",
+  "workloadCount" : 2,
+  "sourceFile" : "VariantDataSkippingStatsSuite.scala",
+  "sourceLines" : "321-345",
+  "testId" : "var_005_null_counts"
+}

@@ -1,0 +1,53 @@
+{
+  "name" : "mergeSchemaEvoMapValueType",
+  "description" : "Merge with map column and schema evolution",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "labels",
+      "type" : {
+        "type" : "map",
+        "keyType" : "string",
+        "valueType" : "string",
+        "valueContainsNull" : true
+      },
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "version",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 1,
+    "sizeInBytes" : 3652,
+    "numCommits" : 2,
+    "numActions" : 10,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "merge", "schemaEvolution", "map" ]
+}

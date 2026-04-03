@@ -1,0 +1,7 @@
+{
+  "testName" : "No CRC files",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-1",
+  "testId" : "corrupt_no_crc"
+}

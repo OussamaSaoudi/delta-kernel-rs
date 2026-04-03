@@ -1,0 +1,7 @@
+{
+  "testName" : "String comparisons and LIKE",
+  "workloadCount" : 9,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "string tests",
+  "testId" : "ds_string_patterns"
+}

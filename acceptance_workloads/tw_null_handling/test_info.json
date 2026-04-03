@@ -1,0 +1,7 @@
+{
+  "testName" : "Nulls preserved across type widening (short -> int)",
+  "workloadCount" : 3,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic null handling test",
+  "testId" : "tw_null_handling"
+}

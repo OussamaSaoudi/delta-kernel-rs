@@ -1,0 +1,7 @@
+{
+  "testName" : "NullType inside struct",
+  "workloadCount" : 1,
+  "sourceFile" : "VoidTypeSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "void_002_void_nested_struct"
+}

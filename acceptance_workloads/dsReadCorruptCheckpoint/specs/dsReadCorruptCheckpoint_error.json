@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "dsReadCorruptCheckpoint",
+  "error" : {
+    "errorCode" : "DELTA_FAILED_TO_MERGE_FIELDS",
+    "errorMessage" : "Could not find any delta files for version 10"
+  }
+}

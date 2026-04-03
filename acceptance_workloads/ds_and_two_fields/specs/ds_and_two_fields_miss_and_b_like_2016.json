@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "a > 0 AND b like '2016-%'",
+  "expected" : {
+    "rowCount" : 0,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "name" : "ic_005_identity_not_exposed",
+  "description" : "Identity metadata not exposed to readers",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.identity.start" : 1,
+        "delta.identity.step" : 1,
+        "delta.identity.highWaterMark" : 3,
+        "delta.identity.allowExplicitInsert" : true
+      }
+    }, {
+      "name" : "part",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "value",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "identityColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 2963,
+    "numCommits" : 4,
+    "numActions" : 12,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 3,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 1,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "identityColumns" ]
+}

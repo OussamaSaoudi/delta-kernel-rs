@@ -1,0 +1,7 @@
+{
+  "testName" : "IS NOT NULL constraint on nested struct",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "cc_null_aware"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with multiple WHEN MATCHED clauses",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-010",
+  "testId" : "mergeMultipleMatched"
+}

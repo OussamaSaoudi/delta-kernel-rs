@@ -1,0 +1,7 @@
+{
+  "testName" : "as of exact timestamp",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "518-548",
+  "testId" : "tt_exact_timestamp"
+}

@@ -1,0 +1,26 @@
+{
+  "type" : "snapshot",
+  "version" : 0,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors" ],
+      "writerFeatures" : [ "deletionVectors", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"a\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"b\",\"type\":{\"type\":\"struct\",\"fields\":[{\"name\":\"c\",\"type\":{\"type\":\"struct\",\"fields\":[{\"name\":\"d\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"e\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"f\",\"type\":{\"type\":\"struct\",\"fields\":[{\"name\":\"g\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"h\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"i\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}}]},\"nullable\":true,\"metadata\":{}},{\"name\":\"j\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"k\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}}]},\"nullable\":true,\"metadata\":{}},{\"name\":\"l\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}}]},\"nullable\":true,\"metadata\":{}},{\"name\":\"m\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}}]}",
+      "createdTime" : 1773116376073,
+      "id" : "2c91bf18-f3f6-41ac-8c4d-58970915602d",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.dataSkippingNumIndexedCols" : "9",
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

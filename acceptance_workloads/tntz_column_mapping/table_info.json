@@ -1,0 +1,51 @@
+{
+  "name" : "tntz_column_mapping",
+  "description" : "NTZ with column mapping",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-558d2f9e-d1f9-4906-8a43-86e7c5c9eb3d"
+      }
+    }, {
+      "name" : "event_time",
+      "type" : "timestamp_ntz",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-46280883-e939-490f-b486-23328a721af8"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors", "timestampNtz" ],
+    "writerFeatures" : [ "appendOnly", "changeDataFeed", "checkConstraints", "columnMapping", "deletionVectors", "generatedColumns", "invariants", "timestampNtz" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 1,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 1243,
+    "numCommits" : 2,
+    "numActions" : 5,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.mode" : "name",
+    "delta.columnMapping.maxColumnId" : "2"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "timestampNTZ", "columnMapping" ]
+}

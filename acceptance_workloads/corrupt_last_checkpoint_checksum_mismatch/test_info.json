@@ -1,0 +1,7 @@
+{
+  "testName" : "Content doesn't match its checksum",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-10",
+  "testId" : "corrupt_last_checkpoint_checksum_mismatch"
+}

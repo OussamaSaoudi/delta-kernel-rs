@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "part IN ('b', 'd', 'e')",
+  "expected" : {
+    "rowCount" : 3,
+    "fileCount" : 3,
+    "filesSkipped" : 2
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Type widening in partitioned table",
+  "workloadCount" : 3,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic partitioned type widening test",
+  "testId" : "tw_with_partition"
+}

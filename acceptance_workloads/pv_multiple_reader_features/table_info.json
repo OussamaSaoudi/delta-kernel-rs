@@ -1,0 +1,52 @@
+{
+  "name" : "pv_multiple_reader_features",
+  "description" : "DV + colMapping + v2Checkpoint combined",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-aff2e16c-7e80-4a0d-96ad-3031f9a22895"
+      }
+    }, {
+      "name" : "value",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-ba102edb-db8e-4fac-abad-d8a3061fb2e0"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors", "v2Checkpoint" ],
+    "writerFeatures" : [ "appendOnly", "columnMapping", "deletionVectors", "invariants", "v2Checkpoint" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 1,
+    "numRemoveFiles" : 1,
+    "sizeInBytes" : 1207,
+    "numCommits" : 3,
+    "numActions" : 8,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 2,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.checkpointPolicy" : "v2",
+    "delta.columnMapping.mode" : "name",
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.maxColumnId" : "2"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "protocol", "protocolEdgeCase" ]
+}

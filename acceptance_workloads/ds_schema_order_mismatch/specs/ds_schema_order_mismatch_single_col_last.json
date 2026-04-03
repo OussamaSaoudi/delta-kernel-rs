@@ -1,0 +1,10 @@
+{
+  "type" : "read",
+  "predicate" : "a = 2",
+  "columns" : [ "c" ],
+  "expected" : {
+    "rowCount" : 1,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

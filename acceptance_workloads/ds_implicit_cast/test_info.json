@@ -1,0 +1,7 @@
+{
+  "testName" : "Implicit type casting in predicate (int literal vs long column)",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "data-skipping-gaps",
+  "testId" : "ds_implicit_cast"
+}

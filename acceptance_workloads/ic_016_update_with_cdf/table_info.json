@@ -1,0 +1,49 @@
+{
+  "name" : "ic_016_update_with_cdf",
+  "description" : "UPDATE with CDF enabled",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.identity.start" : 0,
+        "delta.identity.step" : 1,
+        "delta.identity.highWaterMark" : 5,
+        "delta.identity.allowExplicitInsert" : false
+      }
+    }, {
+      "name" : "value",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "changeDataFeed", "deletionVectors", "identityColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 5,
+    "numRemoveFiles" : 3,
+    "sizeInBytes" : 4519,
+    "numCommits" : 3,
+    "numActions" : 36,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 7,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableChangeDataFeed" : "true",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "identityColumns" ]
+}

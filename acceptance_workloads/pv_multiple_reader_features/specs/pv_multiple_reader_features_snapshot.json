@@ -1,0 +1,28 @@
+{
+  "type" : "snapshot",
+  "version" : 2,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors", "v2Checkpoint", "columnMapping" ],
+      "writerFeatures" : [ "deletionVectors", "v2Checkpoint", "invariants", "appendOnly", "columnMapping" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":1,\"delta.columnMapping.physicalName\":\"col-aff2e16c-7e80-4a0d-96ad-3031f9a22895\"}},{\"name\":\"value\",\"type\":\"string\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":2,\"delta.columnMapping.physicalName\":\"col-ba102edb-db8e-4fac-abad-d8a3061fb2e0\"}}]}",
+      "createdTime" : 1773116916090,
+      "id" : "14741952-1a4d-4d55-862d-7262955a156e",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.checkpointPolicy" : "v2",
+        "delta.columnMapping.mode" : "name",
+        "delta.enableDeletionVectors" : "true",
+        "delta.columnMapping.maxColumnId" : "2"
+      }
+    }
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "name" : "read_multiple_types_tbl",
+  "description" : "read_multiple_types — tbl",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "name",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "score",
+      "type" : "double",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "active",
+      "type" : "boolean",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "created",
+      "type" : "date",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "updated",
+      "type" : "timestamp",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 1,
+    "minWriterVersion" : 2
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 3333,
+    "numCommits" : 3,
+    "numActions" : 7,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 2,
+    "numCheckpointFiles" : 0
+  },
+  "properties" : { },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  }
+}

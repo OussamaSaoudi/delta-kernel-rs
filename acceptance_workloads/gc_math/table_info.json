@@ -1,0 +1,50 @@
+{
+  "name" : "gc_math",
+  "description" : "Generated column with mathematical functions",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "x",
+      "type" : "double",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "y",
+      "type" : "double",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "distance",
+      "type" : "double",
+      "nullable" : true,
+      "metadata" : {
+        "delta.generationExpression" : "SQRT(x * x + y * y)"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "generatedColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 1,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 1040,
+    "numCommits" : 2,
+    "numActions" : 5,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "generatedColumns" ]
+}

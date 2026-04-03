@@ -1,0 +1,5 @@
+{
+  "test_id" : "read_large_schema_tbl",
+  "test_name" : "read_large_schema — tbl",
+  "workload_count" : 2
+}

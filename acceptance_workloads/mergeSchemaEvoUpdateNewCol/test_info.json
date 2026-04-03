@@ -1,0 +1,7 @@
+{
+  "testName" : "UPDATE SET with column not in target",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-011",
+  "testId" : "mergeSchemaEvoUpdateNewCol"
+}

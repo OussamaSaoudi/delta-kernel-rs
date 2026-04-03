@@ -1,0 +1,7 @@
+{
+  "testName" : "YearMonthIntervalType column",
+  "workloadCount" : 1,
+  "sourceFile" : "IntervalTypeSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "intv_001_interval_ym_basic"
+}

@@ -1,0 +1,44 @@
+{
+  "name" : "ckp_v2_multiple_sidecars",
+  "description" : "V2 checkpoint with multiple sidecar files",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "value",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors", "v2Checkpoint" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants", "v2Checkpoint" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 20,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 14509,
+    "numCommits" : 0,
+    "numActions" : 61,
+    "lastCheckpointVersion" : 20,
+    "lastCrcVersion" : 20,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.checkpointPolicy" : "v2",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "v2Checkpoint", "sidecar", "featureInteraction" ]
+}

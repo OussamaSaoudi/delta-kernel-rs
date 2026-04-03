@@ -1,0 +1,7 @@
+{
+  "testName" : "Classic checkpoint read",
+  "workloadCount" : 1,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "119-143",
+  "testId" : "cp_classic"
+}

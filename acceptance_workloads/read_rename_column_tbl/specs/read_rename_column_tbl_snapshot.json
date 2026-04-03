@@ -1,0 +1,25 @@
+{
+  "type" : "snapshotConstruction",
+  "version" : 3,
+  "expected" : {
+    "version" : 3,
+    "protocol" : {
+      "minReaderVersion" : 2,
+      "minWriterVersion" : 5
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":1,\"delta.columnMapping.physicalName\":\"col-92e4b25d-be4c-4673-b504-c911e5e31fb2\"}},{\"name\":\"new_name\",\"type\":\"string\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":2,\"delta.columnMapping.physicalName\":\"col-49388da3-ddb6-47fa-b863-e02099416ad5\"}}]}",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.columnMapping.mode" : "name",
+        "delta.columnMapping.maxColumnId" : "2"
+      },
+      "createdTime" : 1775089658232,
+      "id" : "0a467330-2ede-4c44-9765-3fa1ddb4566e"
+    }
+  }
+}

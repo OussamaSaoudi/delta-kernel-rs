@@ -1,0 +1,7 @@
+{
+  "testName" : "V2 checkpoint with all actions in manifest (no sidecars)",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "995-1051",
+  "testId" : "cp_v2_all_actions_in_manifest"
+}

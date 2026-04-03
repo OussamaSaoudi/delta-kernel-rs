@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "null_v_struct.v IS NOT NULL",
+  "expected" : {
+    "rowCount" : 0,
+    "fileCount" : 2,
+    "filesSkipped" : 0
+  }
+}

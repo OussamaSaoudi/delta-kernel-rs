@@ -1,0 +1,7 @@
+{
+  "testName" : "ICT with time travel",
+  "workloadCount" : 6,
+  "sourceFile" : "InCommitTimestampSuite.scala",
+  "sourceLines" : "custom",
+  "testId" : "ict_time_travel"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "CDC with multiple version ranges",
+  "workloadCount" : 6,
+  "sourceFile" : "DeltaCDCSuite.scala",
+  "sourceLines" : "730-748",
+  "testId" : "cdc_multiple_refs"
+}

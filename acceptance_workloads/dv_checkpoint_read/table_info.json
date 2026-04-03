@@ -1,0 +1,43 @@
+{
+  "name" : "dv_checkpoint_read",
+  "description" : "DV table read through a checkpoint",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "value",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 2,
+    "sizeInBytes" : 1412,
+    "numCommits" : 0,
+    "numActions" : 12,
+    "lastCheckpointVersion" : 3,
+    "lastCrcVersion" : 3,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "deletionVectors", "checkpoint", "featureInteraction" ]
+}

@@ -1,0 +1,38 @@
+{
+  "name" : "tt_timestamp_before_retention_error",
+  "description" : "Timestamp before retention window error",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 12,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 6249,
+    "numCommits" : 3,
+    "numActions" : 15,
+    "lastCheckpointVersion" : 2,
+    "lastCrcVersion" : 5,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "timeTravel" ]
+}

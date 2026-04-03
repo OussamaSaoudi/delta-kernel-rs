@@ -1,0 +1,7 @@
+{
+  "testName" : "AND one side unsupported",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "286-299",
+  "testId" : "ds_and_one_side_unsupported"
+}

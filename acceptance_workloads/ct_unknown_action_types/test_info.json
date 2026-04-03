@@ -1,0 +1,7 @@
+{
+  "testName" : "Commit with unknown action type",
+  "workloadCount" : 1,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "corrupt-table-gaps",
+  "testId" : "ct_unknown_action_types"
+}

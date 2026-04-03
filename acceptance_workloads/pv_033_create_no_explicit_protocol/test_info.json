@@ -1,0 +1,7 @@
+{
+  "testName" : "Table created with no explicit protocol specification",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "1270-1290",
+  "testId" : "pv_033_create_no_explicit_protocol"
+}

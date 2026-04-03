@@ -1,0 +1,8 @@
+{
+  "testName" : "Short to long widening (via int)",
+  "workloadCount" : 3,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic short->long test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_short_to_long"
+}

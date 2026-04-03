@@ -1,0 +1,7 @@
+{
+  "testName" : "or statements - simple",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "301-314",
+  "testId" : "ds_or_simple"
+}

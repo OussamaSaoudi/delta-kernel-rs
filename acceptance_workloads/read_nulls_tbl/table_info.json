@@ -1,0 +1,48 @@
+{
+  "name" : "read_nulls_tbl",
+  "description" : "read_nulls — tbl",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "name",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "score",
+      "type" : "double",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "active",
+      "type" : "boolean",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 1,
+    "minWriterVersion" : 2
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 3322,
+    "numCommits" : 4,
+    "numActions" : 9,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 3,
+    "numCheckpointFiles" : 0
+  },
+  "properties" : { },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  }
+}

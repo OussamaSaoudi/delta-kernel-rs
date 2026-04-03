@@ -1,0 +1,8 @@
+{
+  "testName" : "Stats after column rename with column mapping",
+  "workloadCount" : 20,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "1998-2066",
+  "hasSchemaEvolution" : true,
+  "testId" : "ds_stats_after_rename"
+}

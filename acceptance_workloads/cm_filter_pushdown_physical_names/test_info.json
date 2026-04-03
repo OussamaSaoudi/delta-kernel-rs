@@ -1,0 +1,8 @@
+{
+  "testName" : "Filters pushed down to parquet use physical names",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "2212-2250",
+  "hasSchemaEvolution" : true,
+  "testId" : "cm_filter_pushdown_physical_names"
+}

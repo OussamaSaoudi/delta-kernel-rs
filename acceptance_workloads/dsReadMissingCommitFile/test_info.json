@@ -1,0 +1,7 @@
+{
+  "testName" : "Error: _delta_log exists but commit file 0 is missing",
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "dsReadMissingCommitFile"
+}

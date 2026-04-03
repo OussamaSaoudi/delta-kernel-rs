@@ -1,0 +1,7 @@
+{
+  "testName" : "Read with nested column constraint",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "nested column constraint pattern",
+  "testId" : "cc_008_nested_constraint"
+}

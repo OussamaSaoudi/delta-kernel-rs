@@ -1,0 +1,7 @@
+{
+  "testName" : "IS NULL with complex expressions",
+  "workloadCount" : 4,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "new coverage",
+  "testId" : "ds_isnull_complex_expr"
+}

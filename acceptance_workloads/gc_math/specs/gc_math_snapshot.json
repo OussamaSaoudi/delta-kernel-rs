@@ -1,0 +1,25 @@
+{
+  "type" : "snapshot",
+  "version" : 1,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors" ],
+      "writerFeatures" : [ "deletionVectors", "generatedColumns", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"x\",\"type\":\"double\",\"nullable\":true,\"metadata\":{}},{\"name\":\"y\",\"type\":\"double\",\"nullable\":true,\"metadata\":{}},{\"name\":\"distance\",\"type\":\"double\",\"nullable\":true,\"metadata\":{\"delta.generationExpression\":\"SQRT(x * x + y * y)\"}}]}",
+      "createdTime" : 1773117162334,
+      "id" : "a15ef368-9896-449f-b2aa-e8558f3f546c",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

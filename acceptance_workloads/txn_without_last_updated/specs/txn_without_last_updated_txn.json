@@ -1,0 +1,9 @@
+{
+  "type" : "txn",
+  "expected" : {
+    "appId" : "app-no-ts",
+    "txnVersion" : 7
+  },
+  "name" : "txn_without_last_updated_txn",
+  "description" : "SetTransaction without lastUpdated"
+}

@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "timestamp" : "2026-03-09 21:38:36.139",
+  "expected" : {
+    "rowCount" : 15,
+    "fileCount" : 6,
+    "filesSkipped" : 0
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "test_id" : "read_predicate_tbl",
+  "test_name" : "read_predicate — tbl",
+  "workload_count" : 3
+}

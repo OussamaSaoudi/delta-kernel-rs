@@ -1,0 +1,7 @@
+{
+  "testName" : "Max/min interval values",
+  "workloadCount" : 1,
+  "sourceFile" : "IntervalTypeSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "intv_boundary_values"
+}

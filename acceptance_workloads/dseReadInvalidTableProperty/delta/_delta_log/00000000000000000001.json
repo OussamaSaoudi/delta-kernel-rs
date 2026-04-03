@@ -1,0 +1,2 @@
+{"metaData":{"id":"bf87e81f-3c16-4d91-840e-2627c6226dcb","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{"delta.enableDeletionVectors":"true"},"createdTime":1773115816771}}
+{"protocol":{"minReaderVersion":99,"minWriterVersion":7}}

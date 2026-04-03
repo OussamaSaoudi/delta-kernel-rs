@@ -1,0 +1,7 @@
+{
+  "testName" : "Read table and verify data skipping works with stats",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaSuiteEdge.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dseReadWithStats"
+}

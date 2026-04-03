@@ -1,0 +1,7 @@
+{
+  "testName" : "Complex types (array, map) with column mapping",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic complex types test",
+  "testId" : "cm_complex_types"
+}

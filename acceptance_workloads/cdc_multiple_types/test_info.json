@@ -1,0 +1,7 @@
+{
+  "testName" : "CDC with diverse data types",
+  "workloadCount" : 3,
+  "sourceFile" : "CDCSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cdc_multiple_types"
+}

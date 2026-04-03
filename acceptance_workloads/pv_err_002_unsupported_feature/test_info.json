@@ -1,0 +1,7 @@
+{
+  "testName" : "Unsupported table feature error",
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "627-669",
+  "isErrorTest" : true,
+  "testId" : "pv_err_002_unsupported_feature"
+}

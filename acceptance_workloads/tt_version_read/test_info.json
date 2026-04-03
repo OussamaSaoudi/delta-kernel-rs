@@ -1,0 +1,7 @@
+{
+  "testName" : "as of with versions",
+  "workloadCount" : 6,
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "610-655",
+  "testId" : "tt_version_read"
+}

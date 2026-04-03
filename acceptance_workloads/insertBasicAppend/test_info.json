@@ -1,0 +1,7 @@
+{
+  "testName" : "INSERT INTO append mode",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaInsertIntoSuite.scala",
+  "sourceLines" : "INS-001",
+  "testId" : "insertBasicAppend"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "ID mode: swapped field ID reads other column data",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "1854-1859",
+  "testId" : "cm_id_matching_swapped"
+}

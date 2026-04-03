@@ -1,0 +1,7 @@
+{
+  "testName" : "Classic multi-part checkpoint read",
+  "workloadCount" : 6,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "300-378",
+  "testId" : "cp_multipart"
+}

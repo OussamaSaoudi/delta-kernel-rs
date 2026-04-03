@@ -1,0 +1,7 @@
+{
+  "testName" : "NTZ with version-based time travel",
+  "workloadCount" : 3,
+  "sourceFile" : "TimestampNTZSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "tntz_time_travel"
+}

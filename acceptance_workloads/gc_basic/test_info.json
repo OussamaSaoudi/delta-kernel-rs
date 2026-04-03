@@ -1,0 +1,7 @@
+{
+  "testName" : "Create table with generated column",
+  "workloadCount" : 2,
+  "sourceFile" : "GeneratedColumnSuite.scala",
+  "sourceLines" : "various",
+  "testId" : "gc_basic"
+}

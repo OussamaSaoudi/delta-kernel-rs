@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE into empty target table",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBaseEdge.scala",
+  "sourceLines" : "P2-005",
+  "testId" : "mergeEdgeEmptyTarget"
+}

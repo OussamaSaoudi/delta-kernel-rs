@@ -1,0 +1,84 @@
+{
+  "name" : "ds_typed_stats",
+  "description" : "DECIMAL/DATE/TIMESTAMP/FLOAT/DOUBLE data skipping stats",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "c1",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "c2",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "c3",
+      "type" : "float",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "c4",
+      "type" : "double",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "c5",
+      "type" : "timestamp",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "c6",
+      "type" : "timestamp_ntz",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "c7",
+      "type" : "date",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "c8",
+      "type" : "binary",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "c9",
+      "type" : "boolean",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "c10",
+      "type" : "decimal(3,2)",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors", "timestampNtz" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants", "timestampNtz" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 1,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 2641,
+    "numCommits" : 2,
+    "numActions" : 5,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.dataSkippingStatsColumns" : "c1,c2,c3,c4,c5,c6,c7,c10",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "dataSkipping" ]
+}

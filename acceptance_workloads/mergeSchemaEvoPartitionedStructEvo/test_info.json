@@ -1,0 +1,7 @@
+{
+  "testName" : "Struct evolution on partitioned table",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-025",
+  "testId" : "mergeSchemaEvoPartitionedStructEvo"
+}

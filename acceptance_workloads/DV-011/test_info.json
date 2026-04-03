@@ -1,0 +1,7 @@
+{
+  "testName" : "DELETE with DVs with column mapping mode",
+  "workloadCount" : 2,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "303-338",
+  "testId" : "DV-011"
+}

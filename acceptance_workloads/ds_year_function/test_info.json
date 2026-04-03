@@ -1,0 +1,7 @@
+{
+  "testName" : "year() extraction on Date",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "new coverage",
+  "testId" : "ds_year_function"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "boolean comparisons",
+  "workloadCount" : 5,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "715-732",
+  "testId" : "ds_boolean"
+}

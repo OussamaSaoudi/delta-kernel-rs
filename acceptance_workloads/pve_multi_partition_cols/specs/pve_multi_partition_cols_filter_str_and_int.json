@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "p_str = 'alpha' AND p_int = 10",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 2,
+    "filesSkipped" : 4
+  }
+}

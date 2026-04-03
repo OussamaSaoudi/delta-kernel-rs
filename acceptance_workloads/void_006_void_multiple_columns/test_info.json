@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple NullType columns",
+  "workloadCount" : 1,
+  "sourceFile" : "VoidTypeSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "void_006_void_multiple_columns"
+}

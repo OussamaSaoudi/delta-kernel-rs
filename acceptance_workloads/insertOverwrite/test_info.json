@@ -1,0 +1,7 @@
+{
+  "testName" : "INSERT OVERWRITE",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaInsertIntoSuite.scala",
+  "sourceLines" : "INS-002",
+  "testId" : "insertOverwrite"
+}

@@ -1,0 +1,25 @@
+{
+  "type" : "snapshot",
+  "version" : 1,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors" ],
+      "writerFeatures" : [ "deletionVectors", "generatedColumns", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"event_time\",\"type\":\"timestamp\",\"nullable\":true,\"metadata\":{}},{\"name\":\"event_date\",\"type\":\"date\",\"nullable\":true,\"metadata\":{\"delta.generationExpression\":\"CAST(event_time AS DATE)\"}},{\"name\":\"event_hour\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{\"delta.generationExpression\":\"HOUR(event_time)\"}}]}",
+      "createdTime" : 1773117158912,
+      "id" : "d23b6910-c8b6-43b3-8bcf-55c5f2ea78c3",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

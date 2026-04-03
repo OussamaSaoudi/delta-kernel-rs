@@ -1,0 +1,5 @@
+{
+  "test_id" : "read_special_chars_tbl",
+  "test_name" : "read_special_chars — tbl",
+  "workload_count" : 3
+}

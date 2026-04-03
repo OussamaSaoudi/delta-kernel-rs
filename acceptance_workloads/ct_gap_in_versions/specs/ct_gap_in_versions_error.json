@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "ct_gap_in_versions",
+  "error" : {
+    "errorCode" : "DELTA_VERSIONS_NOT_CONTIGUOUS",
+    "errorMessage" : "[DELTA_VERSIONS_NOT_CONTIGUOUS.GENERIC] Versions (0, 1, 3) are not contiguous. \nA gap in the delta log between versions 0 and 3 was detected while trying to load version -1. This can happen when files have been manually removed from the Delta log."
+  }
+}

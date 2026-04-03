@@ -1,0 +1,7 @@
+{
+  "testName" : "DECIMAL/DATE/TIMESTAMP/FLOAT/DOUBLE data skipping stats",
+  "workloadCount" : 20,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "1904-1965",
+  "testId" : "ds_typed_stats"
+}

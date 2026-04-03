@@ -1,0 +1,7 @@
+{
+  "testName" : "Checkpoint file deleted but _last_checkpoint remains (fallback)",
+  "workloadCount" : 1,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "synthetic missing checkpoint file test",
+  "testId" : "ckp_missing_checkpoint_file"
+}

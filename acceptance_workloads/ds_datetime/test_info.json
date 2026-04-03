@@ -1,0 +1,7 @@
+{
+  "testName" : "Date and timestamp predicates",
+  "workloadCount" : 5,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "datetime tests",
+  "testId" : "ds_datetime"
+}

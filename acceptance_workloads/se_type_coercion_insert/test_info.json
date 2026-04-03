@@ -1,0 +1,7 @@
+{
+  "testName" : "INSERT with implicit type cast int to long",
+  "workloadCount" : 2,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "se_type_coercion_insert"
+}

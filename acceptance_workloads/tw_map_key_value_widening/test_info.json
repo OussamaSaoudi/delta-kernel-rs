@@ -1,0 +1,8 @@
+{
+  "testName" : "Map key/value type widening (map<byte,short> -> map<int,int>)",
+  "workloadCount" : 2,
+  "sourceFile" : "TypeWideningAlterTableNestedSuite.scala",
+  "sourceLines" : "109-131",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_map_key_value_widening"
+}

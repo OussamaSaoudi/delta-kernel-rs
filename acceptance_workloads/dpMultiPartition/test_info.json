@@ -1,0 +1,7 @@
+{
+  "testName" : "Multi-column partition (string + int)",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaPartitionSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dpMultiPartition"
+}

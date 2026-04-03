@@ -1,0 +1,8 @@
+{
+  "testName" : "Replace table resets high watermark",
+  "workloadCount" : 2,
+  "sourceFile" : "IdentityColumnSuite.scala",
+  "sourceLines" : "526-584",
+  "hasSchemaEvolution" : true,
+  "testId" : "ic_007_replace_resets_watermark"
+}

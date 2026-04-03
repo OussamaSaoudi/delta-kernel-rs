@@ -1,0 +1,7 @@
+{
+  "testName" : "Read base row IDs",
+  "workloadCount" : 3,
+  "sourceFile" : "RowTrackingSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "rt_read_base_row_id"
+}

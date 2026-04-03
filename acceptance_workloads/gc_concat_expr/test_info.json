@@ -1,0 +1,7 @@
+{
+  "testName" : "Generated column with CONCAT expression",
+  "workloadCount" : 2,
+  "sourceFile" : "GeneratedColumnSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "gc_concat_expr"
+}

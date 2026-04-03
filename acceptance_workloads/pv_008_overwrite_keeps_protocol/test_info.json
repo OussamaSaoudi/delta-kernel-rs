@@ -1,0 +1,7 @@
+{
+  "testName" : "Table after overwrite preserves protocol version",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "318-329",
+  "testId" : "pv_008_overwrite_keeps_protocol"
+}

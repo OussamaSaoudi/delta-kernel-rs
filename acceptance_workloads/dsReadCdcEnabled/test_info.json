@@ -1,0 +1,7 @@
+{
+  "testName" : "Read base table with CDC enabled, verify data after DML",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "DS-018",
+  "testId" : "dsReadCdcEnabled"
+}

@@ -1,0 +1,26 @@
+{
+  "type" : "snapshot",
+  "version" : 3,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors", "timestampNtz", "typeWidening" ],
+      "writerFeatures" : [ "deletionVectors", "timestampNtz", "invariants", "appendOnly", "typeWidening" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"a\",\"type\":\"timestamp_ntz\",\"nullable\":true,\"metadata\":{\"delta.typeChanges\":[{\"toType\":\"timestamp_ntz\",\"fromType\":\"date\"}]}}]}",
+      "createdTime" : 1773119006092,
+      "id" : "0fec2e59-bb5c-4063-8dcb-a20d9d328cd1",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableTypeWidening" : "true",
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

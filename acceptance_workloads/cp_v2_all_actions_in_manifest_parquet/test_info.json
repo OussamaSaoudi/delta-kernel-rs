@@ -1,0 +1,7 @@
+{
+  "testName" : "V2 checkpoint, all actions in Parquet manifest",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "995-1051",
+  "testId" : "cp_v2_all_actions_in_manifest_parquet"
+}

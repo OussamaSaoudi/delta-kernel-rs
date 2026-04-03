@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "full_name LIKE '%ob'",
+  "expected" : {
+    "rowCount" : 1,
+    "fileCount" : 3,
+    "filesSkipped" : 0
+  }
+}

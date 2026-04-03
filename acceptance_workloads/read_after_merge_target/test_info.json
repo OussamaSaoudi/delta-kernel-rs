@@ -1,0 +1,5 @@
+{
+  "test_id" : "read_after_merge_target",
+  "test_name" : "read_after_merge — target",
+  "workload_count" : 2
+}

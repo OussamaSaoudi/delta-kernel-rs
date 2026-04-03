@@ -1,0 +1,7 @@
+{
+  "testName" : "Read MAP<STRING, VARIANT> column",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaVariantSuite.scala",
+  "sourceLines" : "synthetic map variant test",
+  "testId" : "var_017_map_variant"
+}

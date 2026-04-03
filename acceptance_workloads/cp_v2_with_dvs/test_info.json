@@ -1,0 +1,7 @@
+{
+  "testName" : "V2 checkpoint with deletion vectors (checkpoint-only read)",
+  "workloadCount" : 1,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "623-663",
+  "testId" : "cp_v2_with_dvs"
+}

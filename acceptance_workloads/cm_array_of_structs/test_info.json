@@ -1,0 +1,7 @@
+{
+  "testName" : "Column mapping with array of structs",
+  "workloadCount" : 2,
+  "sourceFile" : "ColumnMappingSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cm_array_of_structs"
+}

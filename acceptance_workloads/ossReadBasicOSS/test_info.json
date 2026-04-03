@@ -1,0 +1,7 @@
+{
+  "testName" : "Basic OSS compatible read",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaSuiteOSS.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "ossReadBasicOSS"
+}

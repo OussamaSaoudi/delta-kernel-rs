@@ -1,0 +1,7 @@
+{
+  "testName" : "DV deduplication during log replay - latest DV wins",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "log_replay_dv_key_dedup"
+}

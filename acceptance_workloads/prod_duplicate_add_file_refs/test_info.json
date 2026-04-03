@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple versions with overlapping file paths",
+  "workloadCount" : 1,
+  "sourceFile" : "ProductionEdgeCaseSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "prod_duplicate_add_file_refs"
+}

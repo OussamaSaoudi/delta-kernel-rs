@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE after DELETE",
+  "workloadCount" : 1,
+  "sourceFile" : "DMLReadBack.scala",
+  "sourceLines" : "DML-003",
+  "testId" : "dmlMergeAfterDelete"
+}

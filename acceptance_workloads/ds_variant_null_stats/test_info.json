@@ -1,0 +1,7 @@
+{
+  "testName" : "VARIANT NULL/NOT NULL data skipping",
+  "workloadCount" : 8,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "1967-1996",
+  "testId" : "ds_variant_null_stats"
+}

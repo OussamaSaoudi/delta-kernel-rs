@@ -1,0 +1,7 @@
+{
+  "testName" : "UPDATE without WHERE",
+  "workloadCount" : 2,
+  "sourceFile" : "UpdateSuiteBase.scala",
+  "sourceLines" : "UPD-002",
+  "testId" : "updateAllRows"
+}

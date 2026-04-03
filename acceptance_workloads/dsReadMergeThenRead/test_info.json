@@ -1,0 +1,7 @@
+{
+  "testName" : "Read after MERGE",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dsReadMergeThenRead"
+}

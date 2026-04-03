@@ -1,0 +1,7 @@
+{
+  "testName" : "Feature name case sensitivity - wrong case rejected",
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "protocol spec",
+  "isErrorTest" : true,
+  "testId" : "pv_features_case_sensitivity"
+}

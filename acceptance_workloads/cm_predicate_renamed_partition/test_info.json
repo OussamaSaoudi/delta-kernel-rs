@@ -1,0 +1,8 @@
+{
+  "testName" : "Filter on renamed partition column",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic predicate renamed partition test",
+  "hasSchemaEvolution" : true,
+  "testId" : "cm_predicate_renamed_partition"
+}

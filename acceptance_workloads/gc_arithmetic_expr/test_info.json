@@ -1,0 +1,7 @@
+{
+  "testName" : "Generated column with arithmetic expression",
+  "workloadCount" : 2,
+  "sourceFile" : "GeneratedColumnSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "gc_arithmetic_expr"
+}

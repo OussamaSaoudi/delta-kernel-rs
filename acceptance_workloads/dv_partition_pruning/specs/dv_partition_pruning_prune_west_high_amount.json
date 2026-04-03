@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "region = 'west' AND amount > 400",
+  "expected" : {
+    "rowCount" : 1,
+    "fileCount" : 2,
+    "filesSkipped" : 1
+  }
+}

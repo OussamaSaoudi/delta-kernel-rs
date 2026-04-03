@@ -1,0 +1,7 @@
+{
+  "testName" : "Read after later JSON commits deleted",
+  "workloadCount" : 1,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "synthetic version delete test",
+  "testId" : "cp_read_after_version_delete"
+}

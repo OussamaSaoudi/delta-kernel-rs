@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with duplicate keys in source (write-path error, table unchanged)",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBaseEdge.scala",
+  "sourceLines" : "P2-013",
+  "testId" : "mergeEdgeDuplicateSourceKeys"
+}

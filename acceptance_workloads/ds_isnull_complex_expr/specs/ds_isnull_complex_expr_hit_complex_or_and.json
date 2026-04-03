@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "(a IS NULL OR b > 10) AND c IS NOT NULL",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 1,
+    "filesSkipped" : 2
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Constraint with decimal column",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "decimal constraint pattern",
+  "testId" : "cc_020_decimal_constraint"
+}

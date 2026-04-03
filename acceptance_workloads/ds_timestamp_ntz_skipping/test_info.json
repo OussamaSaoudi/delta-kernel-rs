@@ -1,0 +1,7 @@
+{
+  "testName" : "NTZ-specific data skipping",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "data-skipping-gaps",
+  "testId" : "ds_timestamp_ntz_skipping"
+}

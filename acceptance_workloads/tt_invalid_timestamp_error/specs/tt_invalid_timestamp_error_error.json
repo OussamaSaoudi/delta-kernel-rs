@@ -1,0 +1,9 @@
+{
+  "type" : "snapshot",
+  "timestamp" : "i am not a timestamp",
+  "name" : "tt_invalid_timestamp_error",
+  "error" : {
+    "errorCode" : "INVALID_TIMESTAMP",
+    "errorMessage" : "[DELTA_TIMESTAMP_INVALID] The provided timestamp ('i am not a timestamp') cannot be converted to a valid timestamp."
+  }
+}

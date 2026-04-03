@@ -1,0 +1,7 @@
+{
+  "testName" : "TIME type multi-file data skipping",
+  "workloadCount" : 4,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "2706-2753",
+  "testId" : "ds_multi_file_time"
+}

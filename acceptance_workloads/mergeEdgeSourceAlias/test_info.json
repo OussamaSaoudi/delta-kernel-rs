@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with aliased source subquery",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSuiteBaseEdge.scala",
+  "sourceLines" : "P2-002",
+  "testId" : "mergeEdgeSourceAlias"
+}

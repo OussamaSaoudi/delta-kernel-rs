@@ -1,0 +1,7 @@
+{
+  "testName" : "Basic domain metadata read",
+  "sourceFile" : "DomainMetadataSuite.scala",
+  "sourceLines" : "69-120",
+  "testId" : "dm_basic_read",
+  "is_domain_metadata_test" : true
+}

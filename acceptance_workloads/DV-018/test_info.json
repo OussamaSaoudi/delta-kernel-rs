@@ -1,0 +1,7 @@
+{
+  "testName" : "table with DV feature enabled but no DVs",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "companion object",
+  "testId" : "DV-018"
+}

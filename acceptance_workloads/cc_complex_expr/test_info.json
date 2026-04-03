@@ -1,0 +1,7 @@
+{
+  "testName" : "Check constraint with AND/OR expression",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "cc_complex_expr"
+}

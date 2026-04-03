@@ -1,0 +1,7 @@
+{
+  "testName" : "Commit JSON truncated mid-line",
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-12",
+  "isErrorTest" : true,
+  "testId" : "corrupt_truncated_commit_json"
+}

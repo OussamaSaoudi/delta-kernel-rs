@@ -1,0 +1,68 @@
+{
+  "name" : "cm_complex_types",
+  "description" : "Complex types (array, map) with column mapping",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-f378f377-39f0-480a-aeac-f4a3de69d1c8"
+      }
+    }, {
+      "name" : "tags",
+      "type" : {
+        "type" : "array",
+        "elementType" : "string",
+        "containsNull" : true
+      },
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-e95b9e6a-152a-4d5c-8735-323735ed9cc0"
+      }
+    }, {
+      "name" : "props",
+      "type" : {
+        "type" : "map",
+        "keyType" : "string",
+        "valueType" : "integer",
+        "valueContainsNull" : true
+      },
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 3,
+        "delta.columnMapping.physicalName" : "col-22a3e33c-c9a2-452b-9c1b-b1c380607f36"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "columnMapping", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 4248,
+    "numCommits" : 3,
+    "numActions" : 7,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 2,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.columnMapping.mode" : "name",
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.maxColumnId" : "3"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "columnMapping", "columnMappingName" ]
+}

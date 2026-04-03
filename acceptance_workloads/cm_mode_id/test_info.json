@@ -1,0 +1,7 @@
+{
+  "testName" : "Read table with column mapping mode 'id'",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic mode=id test",
+  "testId" : "cm_mode_id"
+}

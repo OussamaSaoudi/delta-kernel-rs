@@ -1,0 +1,50 @@
+{
+  "name" : "tw_row_tracking_combo",
+  "description" : "Type widening + row tracking combined",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "score",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.typeChanges" : [ {
+          "toType" : "integer",
+          "fromType" : "short"
+        } ]
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors", "typeWidening" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants", "typeWidening" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 1433,
+    "numCommits" : 4,
+    "numActions" : 9,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 3,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableTypeWidening" : "true",
+    "spark.databricks.delta.properties.defaults.enableRowTracking" : "true",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "typeWidening", "rowTracking" ]
+}

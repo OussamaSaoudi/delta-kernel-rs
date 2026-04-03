@@ -1,0 +1,7 @@
+{
+  "testName" : "Multi-column partitioning with 3 columns",
+  "workloadCount" : 4,
+  "sourceFile" : "PartitionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "part_multi_column"
+}

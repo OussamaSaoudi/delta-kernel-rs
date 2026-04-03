@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "x IS NOT NULL",
+  "expected" : {
+    "rowCount" : 1,
+    "fileCount" : 2,
+    "filesSkipped" : 0
+  }
+}

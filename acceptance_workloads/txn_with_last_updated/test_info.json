@@ -1,0 +1,7 @@
+{
+  "testName" : "SetTransaction with lastUpdated",
+  "sourceFile" : "AppTransactionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "txn_with_last_updated",
+  "isTxnTest" : true
+}

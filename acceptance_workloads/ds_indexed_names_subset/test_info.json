@@ -1,0 +1,7 @@
+{
+  "testName" : "index subset of leaf columns",
+  "workloadCount" : 10,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "654-691",
+  "testId" : "ds_indexed_names_subset"
+}

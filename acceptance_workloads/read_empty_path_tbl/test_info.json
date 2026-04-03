@@ -1,0 +1,5 @@
+{
+  "test_id" : "read_empty_path_tbl",
+  "test_name" : "read_empty_path — tbl",
+  "workload_count" : 1
+}

@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "city = 'New York'",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 1,
+    "filesSkipped" : 1
+  }
+}

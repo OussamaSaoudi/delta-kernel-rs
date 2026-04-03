@@ -1,0 +1,8 @@
+{
+  "testName" : "Table after CDF feature disabled",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "2741+",
+  "hasSchemaEvolution" : true,
+  "testId" : "pv_105_remove_cdf"
+}

@@ -1,0 +1,43 @@
+{
+  "name" : "mergeDvMultipleMerges",
+  "description" : "Multiple consecutive merges on DV table",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "value",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 5,
+    "numRemoveFiles" : 2,
+    "sizeInBytes" : 3489,
+    "numCommits" : 5,
+    "numActions" : 16,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 4,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "merge", "deletionVectors", "multiple" ]
+}

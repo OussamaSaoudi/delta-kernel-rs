@@ -1,0 +1,11 @@
+{
+  "type" : "txn",
+  "version" : 1,
+  "expected" : {
+    "appId" : "app-1",
+    "txnVersion" : 1,
+    "lastUpdated" : 1
+  },
+  "name" : "txn_basic_txn",
+  "description" : "Basic SetTransaction tracking"
+}

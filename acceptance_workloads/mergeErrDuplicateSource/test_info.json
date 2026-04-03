@@ -1,0 +1,7 @@
+{
+  "testName" : "Table state after failed MERGE with duplicate source rows",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-ERR-001",
+  "testId" : "mergeErrDuplicateSource"
+}

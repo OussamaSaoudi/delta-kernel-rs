@@ -1,0 +1,7 @@
+{
+  "testName" : "LIKE on nested string fields",
+  "workloadCount" : 6,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "236-252",
+  "testId" : "ds_starts_with_nested"
+}

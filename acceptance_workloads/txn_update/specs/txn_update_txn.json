@@ -1,0 +1,10 @@
+{
+  "type" : "txn",
+  "expected" : {
+    "appId" : "app-1",
+    "txnVersion" : 3,
+    "lastUpdated" : 2
+  },
+  "name" : "txn_update_txn",
+  "description" : "SetTransaction version update"
+}

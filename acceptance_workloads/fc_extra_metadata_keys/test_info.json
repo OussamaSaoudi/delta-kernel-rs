@@ -1,0 +1,7 @@
+{
+  "testName" : "Forward compat - extra metadata configuration keys",
+  "workloadCount" : 2,
+  "sourceFile" : "EvolvabilitySuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "fc_extra_metadata_keys"
+}

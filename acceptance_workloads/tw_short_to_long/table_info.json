@@ -1,0 +1,52 @@
+{
+  "name" : "tw_short_to_long",
+  "description" : "Short to long widening (via int)",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "value",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.typeChanges" : [ {
+          "toType" : "integer",
+          "fromType" : "short"
+        }, {
+          "toType" : "long",
+          "fromType" : "integer"
+        } ]
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors", "typeWidening" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants", "typeWidening" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 2143,
+    "numCommits" : 6,
+    "numActions" : 13,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 5,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableTypeWidening" : "true",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "typeWidening" ]
+}

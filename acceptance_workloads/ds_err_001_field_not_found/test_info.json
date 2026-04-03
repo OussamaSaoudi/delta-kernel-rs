@@ -1,0 +1,7 @@
+{
+  "testName" : "FIELD_NOT_FOUND for row commit version filter",
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "2537-2563",
+  "isErrorTest" : true,
+  "testId" : "ds_err_001_field_not_found"
+}

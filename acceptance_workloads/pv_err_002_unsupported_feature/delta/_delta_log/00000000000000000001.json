@@ -1,0 +1,2 @@
+{"metaData":{"id":"cf9080cb-64bb-41ed-b279-a81b10079b46","format":{"provider":"parquet","options":{}},"partitionColumns":[],"configuration":{}}}
+{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["NonExistingReaderFeature"],"writerFeatures":[]}}

@@ -1,0 +1,8 @@
+{
+  "testName" : "Read after column rename with column mapping",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic rename test",
+  "hasSchemaEvolution" : true,
+  "testId" : "cm_rename_column"
+}

@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "ts >= TIMESTAMP '2024-06-01 00:00:00'",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 2,
+    "filesSkipped" : 2
+  }
+}

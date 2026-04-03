@@ -1,0 +1,8 @@
+{
+  "testName" : "Data skipping after type change",
+  "workloadCount" : 4,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic stats + TW test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_stats_after_change"
+}

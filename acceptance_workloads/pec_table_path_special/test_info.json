@@ -1,0 +1,7 @@
+{
+  "testName" : "Table path with special characters (spaces)",
+  "workloadCount" : 2,
+  "sourceFile" : "ProductionEdgeCaseSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "pec_table_path_special"
+}

@@ -1,0 +1,25 @@
+{
+  "type" : "snapshot",
+  "version" : 0,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors" ],
+      "writerFeatures" : [ "deletionVectors", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"col00\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col01\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col02\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col03\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col04\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col05\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col06\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col07\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col08\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col09\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col10\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col11\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col12\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col13\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col14\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col15\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col16\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col17\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col18\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col19\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col20\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col21\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col22\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col23\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col24\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col25\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col26\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col27\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col28\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col29\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col30\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col31\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col32\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}}]}",
+      "createdTime" : 1773116364268,
+      "id" : "fb6ea1cd-1334-42da-9537-d2b03d9fe18d",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

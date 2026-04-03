@@ -1,0 +1,7 @@
+{
+  "testName" : "Filter on non-existent column (should error or return all/none)",
+  "workloadCount" : 2,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "data-skipping-gaps",
+  "testId" : "ds_nonexistent_col_filter"
+}

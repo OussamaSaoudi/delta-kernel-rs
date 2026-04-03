@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "display_name = 'Al'",
+  "expected" : {
+    "rowCount" : 1,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

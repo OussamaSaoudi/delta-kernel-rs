@@ -1,0 +1,7 @@
+{
+  "testName" : "select metadata columns from a Delta table with deletion vectors",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "120-123",
+  "testId" : "DV-003"
+}

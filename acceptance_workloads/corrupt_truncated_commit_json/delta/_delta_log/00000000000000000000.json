@@ -1,0 +1,4 @@
+{"commitInfo":{"timestamp":1773116065746,"operation":"WRITE","operationParameters":{"mode":"ErrorIfExists","statsOnLoad":false,"partitionBy":"[]"},"isolationLevel":"WriteSerializable","isBlindAppend":true,"operationMetrics":{"numFiles":"2","numOutputRows":"10","numOutputBytes":"1039"},"tags":{"noRowsCopied":"true","restoresDeletedRows":"false"},"engineInfo":"Databricks-Runtime/<unknown>","txnId":"fe8d6fa0-9447-461e-86be-127a68ca3696"}}
+{"metaData":{"id":"0a7ebbee-ff06-4ad0-ac25-ff13ebac647e","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{"delta.enableDeletionVectors":"true"},"createdTime":1773116065562}}
+{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors","appendOnly","invariants"]}}
+{"add":{"pat

@@ -1,0 +1,8 @@
+{
+  "testName" : "Predicate on re-added column (new physical name)",
+  "workloadCount" : 3,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "hasSchemaEvolution" : true,
+  "testId" : "se_readd_pred"
+}

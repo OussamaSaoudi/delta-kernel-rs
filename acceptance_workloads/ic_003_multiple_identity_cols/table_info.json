@@ -1,0 +1,58 @@
+{
+  "name" : "ic_003_multiple_identity_cols",
+  "description" : "Multiple identity columns",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id1",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.identity.start" : 1,
+        "delta.identity.step" : 1,
+        "delta.identity.highWaterMark" : 2,
+        "delta.identity.allowExplicitInsert" : true
+      }
+    }, {
+      "name" : "id2",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.identity.start" : 100,
+        "delta.identity.step" : -10,
+        "delta.identity.highWaterMark" : 80,
+        "delta.identity.allowExplicitInsert" : false
+      }
+    }, {
+      "name" : "value",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "identityColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 2907,
+    "numCommits" : 4,
+    "numActions" : 12,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 3,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "identityColumns" ]
+}

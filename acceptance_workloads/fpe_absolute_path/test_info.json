@@ -1,0 +1,7 @@
+{
+  "testName" : "Add action with absolute URI path (file:///)",
+  "workloadCount" : 2,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "fpe-edge-cases",
+  "testId" : "fpe_absolute_path"
+}

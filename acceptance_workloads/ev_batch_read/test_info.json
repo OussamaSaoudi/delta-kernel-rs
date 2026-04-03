@@ -1,0 +1,7 @@
+{
+  "testName" : "Transaction log schema evolvability - batch read with unknown actions",
+  "workloadCount" : 2,
+  "sourceFile" : "EvolvabilitySuite.scala",
+  "sourceLines" : "149-153",
+  "testId" : "ev_batch_read"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Unknown reader feature blocks read",
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "protocol spec",
+  "isErrorTest" : true,
+  "testId" : "pv_unknown_reader_feature"
+}

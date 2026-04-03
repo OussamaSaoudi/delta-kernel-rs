@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "info.code IN (99, 100)",
+  "expected" : {
+    "rowCount" : 0,
+    "fileCount" : 2,
+    "filesSkipped" : 0
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "testName" : "ICT enabled at version N",
+  "workloadCount" : 3,
+  "sourceFile" : "InCommitTimestampSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "hasSchemaEvolution" : true,
+  "testId" : "ict_enabled_mid_lifecycle"
+}

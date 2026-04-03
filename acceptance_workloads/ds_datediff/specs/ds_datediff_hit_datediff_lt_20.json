@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "datediff(end_dt, start_dt) < 20",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 2,
+    "filesSkipped" : 0
+  }
+}

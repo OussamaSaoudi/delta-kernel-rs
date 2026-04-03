@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with complex multi-column join condition",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSuiteBaseEdge.scala",
+  "sourceLines" : "P2-001",
+  "testId" : "mergeEdgeMultiJoin"
+}

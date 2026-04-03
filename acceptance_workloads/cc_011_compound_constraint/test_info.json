@@ -1,0 +1,7 @@
+{
+  "testName" : "Read with compound constraint",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "compound constraint pattern",
+  "testId" : "cc_011_compound_constraint"
+}

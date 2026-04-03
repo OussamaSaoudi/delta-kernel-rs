@@ -1,0 +1,44 @@
+{
+  "name" : "cdc_optimize",
+  "description" : "CDC after OPTIMIZE",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "value",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "changeDataFeed", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 3,
+    "sizeInBytes" : 1471,
+    "numCommits" : 6,
+    "numActions" : 16,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 5,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableChangeDataFeed" : "true",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "cdc", "optimize" ]
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Unknown reader feature blocks read",
+  "sourceFile" : "EvolvabilitySuiteCapture.scala",
+  "sourceLines" : "custom",
+  "isErrorTest" : true,
+  "testId" : "ev_unknown_reader_feature"
+}

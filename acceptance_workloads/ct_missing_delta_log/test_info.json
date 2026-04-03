@@ -1,0 +1,7 @@
+{
+  "testName" : "Directory without _delta_log",
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "corrupt-table-gaps",
+  "isErrorTest" : true,
+  "testId" : "ct_missing_delta_log"
+}

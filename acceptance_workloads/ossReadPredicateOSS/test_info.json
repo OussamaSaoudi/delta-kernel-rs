@@ -1,0 +1,7 @@
+{
+  "testName" : "Predicate pushdown on OSS table",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaSuiteOSS.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "ossReadPredicateOSS"
+}

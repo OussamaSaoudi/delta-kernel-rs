@@ -1,0 +1,8 @@
+{
+  "testName" : "Table after SQL API protocol upgrade",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "295-316",
+  "hasSchemaEvolution" : true,
+  "testId" : "pv_007_upgrade_sql_api"
+}

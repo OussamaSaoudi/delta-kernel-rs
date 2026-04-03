@@ -1,0 +1,7 @@
+{
+  "testName" : "Partition directory with encoded value (New%20York)",
+  "workloadCount" : 3,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "fpe-edge-cases",
+  "testId" : "fpe_partition_dir_encoded"
+}

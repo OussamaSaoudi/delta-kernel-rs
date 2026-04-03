@@ -1,0 +1,7 @@
+{
+  "testName" : "Mixed types for same field",
+  "workloadCount" : 2,
+  "sourceFile" : "VariantDataSkippingStatsSuite.scala",
+  "sourceLines" : "628-659",
+  "testId" : "var_012_mixed_types"
+}

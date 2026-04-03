@@ -1,0 +1,7 @@
+{
+  "testName" : "Read with string length constraint",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "LENGTH constraint pattern",
+  "testId" : "cc_010_length_constraint"
+}

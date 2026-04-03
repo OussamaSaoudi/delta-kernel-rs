@@ -1,0 +1,7 @@
+{
+  "testName" : "Null-fill predicate + DVs combined",
+  "workloadCount" : 3,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "se_dv_pred_null"
+}

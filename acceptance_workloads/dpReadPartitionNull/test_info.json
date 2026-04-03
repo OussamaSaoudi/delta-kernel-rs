@@ -1,0 +1,7 @@
+{
+  "testName" : "Read partition with null partition values",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaPartitionSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dpReadPartitionNull"
+}

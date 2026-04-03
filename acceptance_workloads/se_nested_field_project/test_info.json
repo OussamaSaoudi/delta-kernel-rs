@@ -1,0 +1,7 @@
+{
+  "testName" : "Nested struct projection with null-fill for old files",
+  "workloadCount" : 3,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "schema-evolution-gaps",
+  "testId" : "se_nested_field_project"
+}

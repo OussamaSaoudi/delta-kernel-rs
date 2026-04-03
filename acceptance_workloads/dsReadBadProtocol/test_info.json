@@ -1,0 +1,7 @@
+{
+  "testName" : "Error: read table with incompatible protocol version",
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "dsReadBadProtocol"
+}

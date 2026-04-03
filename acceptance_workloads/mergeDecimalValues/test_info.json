@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with decimal value columns",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-012",
+  "testId" : "mergeDecimalValues"
+}

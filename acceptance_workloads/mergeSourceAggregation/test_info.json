@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with aggregated source",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-025",
+  "testId" : "mergeSourceAggregation"
+}

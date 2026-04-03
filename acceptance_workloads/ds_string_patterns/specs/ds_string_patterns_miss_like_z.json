@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "fruit like 'z%'",
+  "expected" : {
+    "rowCount" : 0,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

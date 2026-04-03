@@ -1,0 +1,7 @@
+{
+  "testName" : "CHECK constraints with TIME type - multiple conditions",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "1085-1107",
+  "testId" : "cc_015_time_multiple_conditions"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Boolean column skipping",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "data-skipping-gaps",
+  "testId" : "ds_boolean_column"
+}

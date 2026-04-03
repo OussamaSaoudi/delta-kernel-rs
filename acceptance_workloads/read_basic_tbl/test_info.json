@@ -1,0 +1,5 @@
+{
+  "test_id" : "read_basic_tbl",
+  "test_name" : "read_basic — tbl",
+  "workload_count" : 2
+}

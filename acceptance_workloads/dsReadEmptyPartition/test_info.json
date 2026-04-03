@@ -1,0 +1,7 @@
+{
+  "testName" : "Read with empty partition filter result",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dsReadEmptyPartition"
+}

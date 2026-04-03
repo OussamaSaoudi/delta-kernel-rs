@@ -1,0 +1,7 @@
+{
+  "testName" : "Read after ALTER TABLE ADD COLUMN (verify nulls in new column)",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaSuiteEdge.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dseReadAfterSchemaChange"
+}

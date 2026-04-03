@@ -1,0 +1,7 @@
+{
+  "testName" : "Stats with truncated string min/max (must not over-prune)",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "stats-edge-cases",
+  "testId" : "stats_string_truncation"
+}

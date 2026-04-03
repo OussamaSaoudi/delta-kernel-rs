@@ -1,0 +1,7 @@
+{
+  "testName" : "Forward compat - unknown field in metadata",
+  "workloadCount" : 2,
+  "sourceFile" : "EvolvabilitySuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "fc_unknown_field_in_metadata"
+}

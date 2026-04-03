@@ -1,0 +1,8 @@
+{
+  "testName" : "Table with ICT for ICT removal testing",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "4177-4211",
+  "hasSchemaEvolution" : true,
+  "testId" : "pv_116_ict_state"
+}

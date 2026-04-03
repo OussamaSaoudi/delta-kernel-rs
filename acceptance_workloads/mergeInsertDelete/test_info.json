@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with INSERT and DELETE clauses",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-005",
+  "testId" : "mergeInsertDelete"
+}

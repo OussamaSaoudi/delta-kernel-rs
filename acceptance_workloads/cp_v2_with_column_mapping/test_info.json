@@ -1,0 +1,7 @@
+{
+  "testName" : "V2 checkpoint with column mapping",
+  "workloadCount" : 1,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "custom",
+  "testId" : "cp_v2_with_column_mapping"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "VARIANT with column mapping",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaVariantSuite.scala",
+  "sourceLines" : "column mapping pattern",
+  "testId" : "var_018_column_mapping"
+}

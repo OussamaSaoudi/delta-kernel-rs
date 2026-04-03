@@ -1,0 +1,27 @@
+{
+  "type" : "snapshot",
+  "version" : 3,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors", "columnMapping" ],
+      "writerFeatures" : [ "deletionVectors", "columnMapping", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"a\",\"type\":\"string\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":5,\"delta.columnMapping.physicalName\":\"col-1d9947b2-4c7a-4ab5-869b-1d31e43f4f4a\",\"parquet.field.id\":5}},{\"name\":\"b\",\"type\":{\"type\":\"struct\",\"fields\":[{\"name\":\"c\",\"type\":\"string\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":3,\"delta.columnMapping.physicalName\":\"col-2d094fca-6bb0-425b-8a2b-d35f6d2e0d54\"}},{\"name\":\"d\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":4,\"delta.columnMapping.physicalName\":\"col-2c4451b9-ba77-4d2b-8600-25d7848f03ce\"}}]},\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":2,\"delta.columnMapping.physicalName\":\"col-4a00d2c5-50ec-47e4-8d58-cf1c01ef6611\"}}]}",
+      "createdTime" : 1773115547847,
+      "id" : "fb7e698e-6d0d-427d-bfb2-6ba4d7ca089a",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.columnMapping.mode" : "id",
+        "delta.enableDeletionVectors" : "true",
+        "delta.columnMapping.maxColumnId" : "10000"
+      }
+    }
+  }
+}

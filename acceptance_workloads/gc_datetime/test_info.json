@@ -1,0 +1,7 @@
+{
+  "testName" : "Generated column with date/time functions",
+  "workloadCount" : 3,
+  "sourceFile" : "GeneratedColumnSuite.scala",
+  "sourceLines" : "various",
+  "testId" : "gc_datetime"
+}

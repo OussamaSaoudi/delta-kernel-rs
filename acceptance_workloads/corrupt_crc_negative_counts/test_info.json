@@ -1,0 +1,7 @@
+{
+  "testName" : "CRC with negative fileCounts",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-4",
+  "testId" : "corrupt_crc_negative_counts"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "JOIN with DVs - self-join a table with DVs (underlying read)",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "486-495",
+  "testId" : "DV-008"
+}

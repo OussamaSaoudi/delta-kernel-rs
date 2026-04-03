@@ -1,0 +1,7 @@
+{
+  "testName" : "Protocol with CDF feature enabled",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "120-186",
+  "testId" : "pv_001f_protocol_cdf"
+}

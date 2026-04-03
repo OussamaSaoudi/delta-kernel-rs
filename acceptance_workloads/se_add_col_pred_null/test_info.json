@@ -1,0 +1,7 @@
+{
+  "testName" : "Predicate on null-filled column from old files",
+  "workloadCount" : 4,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "schema-evolution-gaps",
+  "testId" : "se_add_col_pred_null"
+}

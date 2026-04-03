@@ -1,0 +1,7 @@
+{
+  "testName" : "Serialized partition values with null values",
+  "workloadCount" : 3,
+  "sourceFile" : "EvolvabilitySuite.scala",
+  "sourceLines" : "54-79",
+  "testId" : "ev_partition_null"
+}

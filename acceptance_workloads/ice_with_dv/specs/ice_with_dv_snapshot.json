@@ -1,0 +1,26 @@
+{
+  "type" : "snapshot",
+  "version" : 2,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 2,
+      "minWriterVersion" : 7,
+      "writerFeatures" : [ "columnMapping", "icebergCompatV2", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":1,\"delta.columnMapping.nested.ids\":{},\"delta.columnMapping.physicalName\":\"col-d6d319b0-161f-4844-9306-f6a306d0ef03\"}},{\"name\":\"value\",\"type\":\"string\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":2,\"delta.columnMapping.nested.ids\":{},\"delta.columnMapping.physicalName\":\"col-1fc2cb72-bfd5-4569-9122-64759d2e326a\"}}]}",
+      "createdTime" : 1773117283288,
+      "id" : "12a8804f-8ae5-4df8-8cb5-eeeeac74d673",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableIcebergCompatV2" : "true",
+        "delta.columnMapping.mode" : "name",
+        "delta.columnMapping.maxColumnId" : "2"
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "NOT(a >= 10 AND b <= 20)",
+  "expected" : {
+    "rowCount" : 0,
+    "fileCount" : 0,
+    "filesSkipped" : 1
+  }
+}

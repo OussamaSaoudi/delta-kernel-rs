@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "ts_part = TIMESTAMP_NTZ'2024-01-01 00:00:00'",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 1,
+    "filesSkipped" : 2
+  }
+}

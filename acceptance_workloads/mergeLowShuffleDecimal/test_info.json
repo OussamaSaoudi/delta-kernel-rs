@@ -1,0 +1,7 @@
+{
+  "testName" : "Low shuffle with decimal columns",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoLowShuffleSuite.scala",
+  "sourceLines" : "P2-LS-007",
+  "testId" : "mergeLowShuffleDecimal"
+}

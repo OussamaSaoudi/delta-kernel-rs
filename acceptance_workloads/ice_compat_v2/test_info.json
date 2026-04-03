@@ -1,0 +1,7 @@
+{
+  "testName" : "Table with IcebergCompatV2 enabled",
+  "workloadCount" : 4,
+  "sourceFile" : "IcebergCompatSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "ice_compat_v2"
+}

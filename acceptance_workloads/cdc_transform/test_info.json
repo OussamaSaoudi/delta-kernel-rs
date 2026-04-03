@@ -1,0 +1,7 @@
+{
+  "testName" : "CDC data transformation",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaCDCSuite.scala",
+  "sourceLines" : "708-728",
+  "testId" : "cdc_transform"
+}

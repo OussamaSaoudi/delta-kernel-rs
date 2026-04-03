@@ -1,0 +1,7 @@
+{
+  "testName" : "CREATE TABLE with valid check constraint",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "171-190",
+  "testId" : "cc_001_create_with_constraint"
+}

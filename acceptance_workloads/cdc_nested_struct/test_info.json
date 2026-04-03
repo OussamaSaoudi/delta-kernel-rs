@@ -1,0 +1,7 @@
+{
+  "testName" : "CDC with nested struct columns",
+  "workloadCount" : 3,
+  "sourceFile" : "CDCSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cdc_nested_struct"
+}

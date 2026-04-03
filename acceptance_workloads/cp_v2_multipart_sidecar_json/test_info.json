@@ -1,0 +1,7 @@
+{
+  "testName" : "Multi-part V2 checkpoint (json) - 7 versions with varying sidecars",
+  "workloadCount" : 6,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "380-437",
+  "testId" : "cp_v2_multipart_sidecar_json"
+}

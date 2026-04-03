@@ -1,0 +1,25 @@
+{
+  "type" : "snapshot",
+  "version" : 1,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors", "variantType" ],
+      "writerFeatures" : [ "deletionVectors", "variantType", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"v\",\"type\":\"variant\",\"nullable\":true,\"metadata\":{}},{\"name\":\"v_struct\",\"type\":{\"type\":\"struct\",\"fields\":[{\"name\":\"v\",\"type\":\"variant\",\"nullable\":true,\"metadata\":{}}]},\"nullable\":true,\"metadata\":{}},{\"name\":\"null_v\",\"type\":\"variant\",\"nullable\":true,\"metadata\":{}},{\"name\":\"null_v_struct\",\"type\":{\"type\":\"struct\",\"fields\":[{\"name\":\"v\",\"type\":\"variant\",\"nullable\":true,\"metadata\":{}}]},\"nullable\":true,\"metadata\":{}}]}",
+      "createdTime" : 1773116317090,
+      "id" : "4555506c-1616-4bb1-9d1a-0bb63480acad",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

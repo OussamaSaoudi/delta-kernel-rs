@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "part >= 2 AND part <= 4",
+  "expected" : {
+    "rowCount" : 3,
+    "fileCount" : 3,
+    "filesSkipped" : 2
+  }
+}

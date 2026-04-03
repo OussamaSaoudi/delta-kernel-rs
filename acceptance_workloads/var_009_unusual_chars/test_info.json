@@ -1,0 +1,7 @@
+{
+  "testName" : "Unusual characters in field names",
+  "workloadCount" : 1,
+  "sourceFile" : "VariantDataSkippingStatsSuite.scala",
+  "sourceLines" : "527-569",
+  "testId" : "var_009_unusual_chars"
+}

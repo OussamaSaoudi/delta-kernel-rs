@@ -1,0 +1,59 @@
+{
+  "name" : "gc_multiple",
+  "description" : "Create table with multiple generated columns",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "doubled",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.generationExpression" : "id * 2"
+      }
+    }, {
+      "name" : "tripled",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.generationExpression" : "id * 3"
+      }
+    }, {
+      "name" : "squared",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.generationExpression" : "id * id"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "generatedColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 1,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 1378,
+    "numCommits" : 2,
+    "numActions" : 5,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "generatedColumns" ]
+}

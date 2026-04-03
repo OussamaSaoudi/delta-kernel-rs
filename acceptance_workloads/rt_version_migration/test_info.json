@@ -1,0 +1,7 @@
+{
+  "testName" : "Upgrade from non-tracking to tracking",
+  "workloadCount" : 4,
+  "sourceFile" : "RowTrackingSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "rt_version_migration"
+}

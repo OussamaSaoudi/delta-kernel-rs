@@ -1,0 +1,10 @@
+{
+  "type" : "domain_metadata",
+  "expected" : {
+    "domain" : "testDomain2",
+    "configuration" : "{\"key1\":\"value1\"}",
+    "removed" : false
+  },
+  "name" : "dm_deletion_no_ckpt_crc_domain_metadata",
+  "description" : "Domain metadata deletion: no checkpoint, with CRC"
+}

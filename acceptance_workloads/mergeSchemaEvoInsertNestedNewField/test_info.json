@@ -1,0 +1,7 @@
+{
+  "testName" : "INSERT with nested struct extra field",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-008",
+  "testId" : "mergeSchemaEvoInsertNestedNewField"
+}

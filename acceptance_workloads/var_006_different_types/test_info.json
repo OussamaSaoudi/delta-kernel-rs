@@ -1,0 +1,7 @@
+{
+  "testName" : "Variant stats with different data types",
+  "workloadCount" : 2,
+  "sourceFile" : "VariantDataSkippingStatsSuite.scala",
+  "sourceLines" : "347-386",
+  "testId" : "var_006_different_types"
+}

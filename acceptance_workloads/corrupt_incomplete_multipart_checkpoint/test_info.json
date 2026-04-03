@@ -1,0 +1,7 @@
+{
+  "testName" : "Multi-part checkpoint with missing part file",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-11",
+  "testId" : "corrupt_incomplete_multipart_checkpoint"
+}

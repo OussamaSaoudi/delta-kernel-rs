@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple MERGE operations",
+  "workloadCount" : 1,
+  "sourceFile" : "DMLReadBack.scala",
+  "sourceLines" : "DML-002",
+  "testId" : "dmlMultipleMerges"
+}

@@ -1,0 +1,28 @@
+{
+  "type" : "snapshot",
+  "version" : 4,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors", "columnMapping", "typeWidening" ],
+      "writerFeatures" : [ "deletionVectors", "invariants", "appendOnly", "columnMapping", "typeWidening" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":1,\"delta.columnMapping.physicalName\":\"col-082e7412-14b6-441c-9473-2a153f035bd2\"}},{\"name\":\"score\",\"type\":\"long\",\"nullable\":true,\"metadata\":{\"delta.typeChanges\":[{\"toType\":\"long\",\"fromType\":\"integer\"}],\"delta.columnMapping.id\":2,\"delta.columnMapping.physicalName\":\"col-04d6defc-2f71-463b-b256-f7f4d0329e93\"}}]}",
+      "createdTime" : 1773119066999,
+      "id" : "bb07c327-a272-4dd3-aa18-89146cee71af",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableDeletionVectors" : "true",
+        "delta.enableTypeWidening" : "true",
+        "delta.columnMapping.mode" : "name",
+        "delta.columnMapping.maxColumnId" : "2"
+      }
+    }
+  }
+}

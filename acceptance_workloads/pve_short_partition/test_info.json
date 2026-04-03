@@ -1,0 +1,7 @@
+{
+  "testName" : "Partition value encoding: short with boundary values (-32768, 0, 32767)",
+  "workloadCount" : 4,
+  "sourceFile" : "PartitionSuiteCapture.scala",
+  "sourceLines" : "protocol-spec",
+  "testId" : "pve_short_partition"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "CRC numFiles doesn't match actual",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-5",
+  "testId" : "corrupt_crc_wrong_numfiles"
+}

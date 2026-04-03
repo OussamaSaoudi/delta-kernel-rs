@@ -1,0 +1,7 @@
+{
+  "testName" : "Generated column with CASE WHEN expression",
+  "workloadCount" : 3,
+  "sourceFile" : "GeneratedColumnSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "gc_case_when"
+}

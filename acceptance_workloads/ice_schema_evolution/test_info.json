@@ -1,0 +1,8 @@
+{
+  "testName" : "IcebergCompatV2 with schema evolution (ADD COLUMN)",
+  "workloadCount" : 2,
+  "sourceFile" : "IcebergCompatSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "hasSchemaEvolution" : true,
+  "testId" : "ice_schema_evolution"
+}

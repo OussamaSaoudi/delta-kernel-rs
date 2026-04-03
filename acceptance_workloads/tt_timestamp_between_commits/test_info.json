@@ -1,0 +1,7 @@
+{
+  "testName" : "as of timestamp in between commits should use commit before timestamp",
+  "workloadCount" : 6,
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "498-516",
+  "testId" : "tt_timestamp_between_commits"
+}

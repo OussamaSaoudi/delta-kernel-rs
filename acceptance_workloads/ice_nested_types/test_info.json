@@ -1,0 +1,7 @@
+{
+  "testName" : "IcebergCompat V2 with nested types",
+  "workloadCount" : 2,
+  "sourceFile" : "IcebergCompatSuite.scala",
+  "sourceLines" : "610-622",
+  "testId" : "ice_nested_types"
+}

@@ -1,0 +1,61 @@
+{
+  "name" : "ice_partition_evolution",
+  "description" : "IcebergCompatV2 with partition columns",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.nested.ids" : { },
+        "delta.columnMapping.physicalName" : "col-255b2611-9324-43bf-a723-dbd8a5b05931"
+      }
+    }, {
+      "name" : "value",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.nested.ids" : { },
+        "delta.columnMapping.physicalName" : "col-28b76b8f-e621-4929-8897-648caca855ca"
+      }
+    }, {
+      "name" : "category",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 3,
+        "delta.columnMapping.nested.ids" : { },
+        "delta.columnMapping.physicalName" : "col-cf593f8f-bf9b-48a9-b360-e6449a4ed12f"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 2,
+    "minWriterVersion" : 7,
+    "writerFeatures" : [ "appendOnly", "columnMapping", "icebergCompatV2", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 5694,
+    "numCommits" : 2,
+    "numActions" : 7,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableIcebergCompatV2" : "true",
+    "delta.columnMapping.mode" : "name",
+    "delta.columnMapping.maxColumnId" : "3"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 1,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "icebergCompat" ]
+}

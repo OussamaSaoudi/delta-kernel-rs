@@ -1,0 +1,7 @@
+{
+  "testName" : "UPDATE null to non-null values",
+  "workloadCount" : 2,
+  "sourceFile" : "UpdateSuiteBase.scala",
+  "sourceLines" : "UPD-006",
+  "testId" : "updateNullToValue"
+}

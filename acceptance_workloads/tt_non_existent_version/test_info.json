@@ -1,0 +1,7 @@
+{
+  "testName" : "Time travel to non-existent version",
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "synthetic non-existent version test",
+  "isErrorTest" : true,
+  "testId" : "tt_non_existent_version"
+}

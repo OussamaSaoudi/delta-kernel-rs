@@ -1,0 +1,7 @@
+{
+  "testName" : "Empty readerFeatures array is still readable",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "protocol spec",
+  "testId" : "pv_empty_reader_features"
+}

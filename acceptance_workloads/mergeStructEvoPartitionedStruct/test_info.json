@@ -1,0 +1,7 @@
+{
+  "testName" : "Struct evolution on partitioned table with null handling",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoStructEvolutionNullnessSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "mergeStructEvoPartitionedStruct"
+}

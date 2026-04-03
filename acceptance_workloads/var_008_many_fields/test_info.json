@@ -1,0 +1,7 @@
+{
+  "testName" : "More than 10 fields in variant",
+  "workloadCount" : 1,
+  "sourceFile" : "VariantDataSkippingStatsSuite.scala",
+  "sourceLines" : "464-485",
+  "testId" : "var_008_many_fields"
+}

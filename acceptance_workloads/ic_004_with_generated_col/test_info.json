@@ -1,0 +1,7 @@
+{
+  "testName" : "Identity column with generated column",
+  "workloadCount" : 2,
+  "sourceFile" : "IdentityColumnSuite.scala",
+  "sourceLines" : "245-258",
+  "testId" : "ic_004_with_generated_col"
+}

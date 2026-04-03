@@ -1,0 +1,7 @@
+{
+  "testName" : "DV checksum validation failure error",
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "734",
+  "isErrorTest" : true,
+  "testId" : "dv_err_001_checksum"
+}

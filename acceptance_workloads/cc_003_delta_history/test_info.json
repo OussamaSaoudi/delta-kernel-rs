@@ -1,0 +1,8 @@
+{
+  "testName" : "Delta history for constraints",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "439-468",
+  "hasSchemaEvolution" : true,
+  "testId" : "cc_003_delta_history"
+}

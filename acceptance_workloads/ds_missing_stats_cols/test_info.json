@@ -1,0 +1,7 @@
+{
+  "testName" : "missing stats columns",
+  "workloadCount" : 5,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "400-416",
+  "testId" : "ds_missing_stats_cols"
+}

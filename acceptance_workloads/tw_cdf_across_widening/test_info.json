@@ -1,0 +1,7 @@
+{
+  "testName" : "CDF spanning type widening change",
+  "workloadCount" : 3,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic CDF + TW test",
+  "testId" : "tw_cdf_across_widening"
+}

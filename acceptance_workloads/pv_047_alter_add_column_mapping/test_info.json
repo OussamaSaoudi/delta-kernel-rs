@@ -1,0 +1,8 @@
+{
+  "testName" : "Table after ALTER to add column mapping",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "1748+",
+  "hasSchemaEvolution" : true,
+  "testId" : "pv_047_alter_add_column_mapping"
+}

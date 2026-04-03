@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with all three clause types",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeReadBackSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "mrb_all_clause_types"
+}

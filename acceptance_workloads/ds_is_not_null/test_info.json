@@ -1,0 +1,7 @@
+{
+  "testName" : "IS NOT NULL predicate pushdown",
+  "workloadCount" : 1,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "data-skipping-gaps",
+  "testId" : "ds_is_not_null"
+}

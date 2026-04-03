@@ -1,0 +1,7 @@
+{
+  "testName" : "NTZ epoch value",
+  "workloadCount" : 2,
+  "sourceFile" : "TimestampNTZSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "tntz_epoch"
+}

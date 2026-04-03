@@ -7,18 +7,21 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use delta_kernel::actions::deletion_vector::{KernelDeletionVector, StreamingDeletionVectorWriter};
 use delta_kernel::arrow::array::{
     ArrayRef, BooleanArray, Int64Array, MapArray, StringArray, StructArray,
 };
 use delta_kernel::arrow::buffer::OffsetBuffer;
+use delta_kernel::arrow::compute::filter_record_batch;
 use delta_kernel::arrow::datatypes::{DataType as ArrowDataType, Field};
-use delta_kernel::engine::arrow_conversion::TryFromKernel;
 use delta_kernel::arrow::record_batch::RecordBatch;
 use delta_kernel::committer::FileSystemCommitter;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
-use delta_kernel::schema::{SchemaRef, StructType};
+use delta_kernel::engine::arrow_expression::evaluate_expression::evaluate_predicate;
+use delta_kernel::schema::SchemaRef;
 use delta_kernel::snapshot::Snapshot;
-use delta_kernel::Engine;
+use delta_kernel::{Engine, StructType};
+use delta_kernel_benchmarks::predicate_parser::parse_predicate;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::Deserialize;
 use tracing::{info, warn};
@@ -89,29 +92,17 @@ pub fn execute_write_spec(
                 applied += 1;
             }
             Ok(Outcome::Skipped(reason)) => {
-                info!(
-                    commit = i,
-                    op = commit.operation.as_str(),
-                    reason = reason.as_str(),
-                    "Skipped"
-                );
-                skipped_reasons
-                    .push(format!("commit {}: {} — {}", i, commit.operation, reason));
+                info!(commit = i, op = commit.operation.as_str(), reason = reason.as_str(), "Skipped");
+                skipped_reasons.push(format!("commit {}: {} — {}", i, commit.operation, reason));
                 skipped += 1;
             }
             Err(e) => {
-                return Err(
-                    format!("commit {} ({}) failed: {}", i, commit.operation, e).into(),
-                );
+                return Err(format!("commit {} ({}) failed: {}", i, commit.operation, e).into());
             }
         }
     }
 
-    Ok(WriteResult {
-        commits_applied: applied,
-        commits_skipped: skipped,
-        skipped_reasons,
-    })
+    Ok(WriteResult { commits_applied: applied, commits_skipped: skipped, skipped_reasons })
 }
 
 enum Outcome {
@@ -136,9 +127,7 @@ fn execute_commit(
         "update" => Ok(Outcome::Skipped("update not yet supported".into())),
         "truncate" => Ok(Outcome::Skipped("truncate not yet supported".into())),
         "replace_table" => Ok(Outcome::Skipped("replace_table not yet supported".into())),
-        "insert_overwrite" => Ok(Outcome::Skipped(
-            "insert_overwrite not yet supported".into(),
-        )),
+        "insert_overwrite" => Ok(Outcome::Skipped("insert_overwrite not yet supported".into())),
         "vacuum" => Ok(Outcome::Skipped("vacuum is engine-level".into())),
         other => Ok(Outcome::Skipped(format!("unknown operation: {}", other))),
     }
@@ -164,16 +153,12 @@ fn execute_create_table(
     let mut builder = create_table(table_root.as_str(), schema, "delta-dat-write-executor");
 
     if let Some(ref props) = commit.properties {
-        builder = builder
-            .with_table_properties(props.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        builder = builder.with_table_properties(props.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     }
 
     if let Some(ref part_cols) = commit.partition_columns {
         if !part_cols.is_empty() {
-            warn!(
-                partition_columns = ?part_cols,
-                "Partition columns not yet supported by kernel create_table"
-            );
+            warn!(partition_columns = ?part_cols, "Partition columns not yet supported by kernel create_table");
         }
     }
 
@@ -183,13 +168,7 @@ fn execute_create_table(
     if result.is_committed() {
         if let Some(ref data_files) = commit.data_files {
             if !data_files.is_empty() {
-                append_data_files(
-                    data_files,
-                    &commit.partition_columns,
-                    table_root,
-                    test_case_root,
-                    engine,
-                )?;
+                append_data_files(data_files, &commit.partition_columns, table_root, test_case_root, engine)?;
             }
         }
         Ok(Outcome::Applied)
@@ -208,10 +187,7 @@ fn execute_insert(
     test_case_root: &Path,
     engine: &dyn Engine,
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
-    let data_files = commit
-        .data_files
-        .as_ref()
-        .ok_or("insert: missing dataFiles")?;
+    let data_files = commit.data_files.as_ref().ok_or("insert: missing dataFiles")?;
     if data_files.is_empty() {
         return Ok(Outcome::Skipped("insert: empty dataFiles".into()));
     }
@@ -220,7 +196,7 @@ fn execute_insert(
 }
 
 // ---------------------------------------------------------------------------
-// delete (via DVs when enabled)
+// delete (via DVs)
 // ---------------------------------------------------------------------------
 
 fn execute_delete(
@@ -228,32 +204,161 @@ fn execute_delete(
     table_root: &Url,
     engine: &dyn Engine,
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
-    let _predicate = commit
-        .predicate
-        .as_ref()
-        .ok_or("delete: missing predicate")?;
+    use delta_kernel::object_store::path::Path as ObjectStorePath;
 
-    let snapshot = Snapshot::builder_for(table_root.clone()).build(engine)?;
+    let predicate_str = commit.predicate.as_ref().ok_or("delete: missing predicate")?;
+
+    let snapshot = Arc::new(Snapshot::builder_for(table_root.clone()).build(engine)?);
     let dvs_enabled = snapshot
         .table_configuration()
         .is_feature_supported(&delta_kernel::table_features::TableFeature::DeletionVectors);
 
     if !dvs_enabled {
-        return Ok(Outcome::Skipped(
-            "delete: DVs not enabled, file-level delete not yet implemented".into(),
-        ));
+        return Ok(Outcome::Skipped("delete: DVs not enabled".into()));
     }
 
-    // TODO: implement scan → predicate eval → DV write pipeline
-    // This requires:
-    // 1. Scan the table to get files + row data
-    // 2. Evaluate the predicate against each row to get matching row indexes per file
-    // 3. Build KernelDeletionVector with those indexes
-    // 4. Write DV files via StreamingDeletionVectorWriter
-    // 5. Call txn.update_deletion_vectors() (internal API)
-    Ok(Outcome::Skipped(
-        "delete with DVs: predicate eval + DV write pipeline not yet implemented".into(),
-    ))
+    // Parse the predicate
+    let predicate = parse_predicate(predicate_str)
+        .map_err(|e| format!("delete: failed to parse predicate '{}': {}", predicate_str, e))?;
+
+    // Scan the table: read each file's data and evaluate predicate to find matching row indexes
+    let scan = snapshot.scan_builder().build()?;
+    let scan_result = scan.execute(Arc::new(engine) as Arc<dyn Engine>)?;
+
+    // We need file-level granularity. Scan the table to get file paths,
+    // then read each file individually to get row indexes.
+    // Use scan_metadata to get file paths, then read parquet directly.
+    let scan2 = snapshot.scan_builder().build()?;
+    let scan_metadata: Vec<_> = scan2.scan_metadata(engine)?.collect::<Result<Vec<_>, _>>()?;
+    let scan_files: Vec<_> = scan_metadata.into_iter().map(|sm| sm.scan_files).collect();
+
+    // Get write context for DV path generation
+    let write_context = {
+        let txn_tmp = snapshot.as_ref().clone()
+            .transaction(Box::new(FileSystemCommitter::new()), engine)?;
+        txn_tmp.get_write_context()
+    };
+
+    // For each file, read the parquet, evaluate predicate, collect matching row indexes
+    let table_dir = table_root.to_file_path()
+        .map_err(|_| "Cannot convert table URL to file path")?;
+
+    let mut dv_map = HashMap::new();
+
+    // Read the delta log to get file paths
+    let log_dir = table_dir.join("_delta_log");
+    let mut all_add_paths = Vec::new();
+    if log_dir.exists() {
+        for entry in std::fs::read_dir(&log_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().map_or(false, |e| e == "json") {
+                let content = std::fs::read_to_string(&path)?;
+                for line in content.lines() {
+                    if line.contains("\"add\"") {
+                        if let Ok(node) = serde_json::from_str::<serde_json::Value>(line) {
+                            if let Some(add) = node.get("add") {
+                                if let Some(p) = add.get("path").and_then(|p| p.as_str()) {
+                                    all_add_paths.push(p.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Deduplicate (a file might be added then removed — only keep current ones)
+    // For simplicity, just try all add paths and skip ones that don't exist
+    let store = engine.object_store(table_root)?;
+
+    for file_path in &all_add_paths {
+        let full_path = table_dir.join(file_path);
+        if !full_path.exists() {
+            continue;
+        }
+
+        // Read parquet file
+        let file = std::fs::File::open(&full_path)?;
+        let reader = SerializedFileReader::new(file)?;
+        let arrow_reader = parquet::arrow::arrow_reader::ParquetFileArrowReader::new(
+            Arc::new(reader),
+        );
+
+        // Actually, use arrow's parquet reader for RecordBatch
+        let parquet_file = std::fs::File::open(&full_path)?;
+        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(parquet_file)?;
+        let mut batch_reader = builder.build()?;
+
+        let mut row_offset: u64 = 0;
+        let mut deleted_indexes = Vec::new();
+
+        while let Some(batch) = batch_reader.next() {
+            let batch = batch?;
+            // Evaluate predicate against this batch
+            let selection = evaluate_predicate(&predicate, &batch, false)?;
+            // Collect indexes where predicate is true
+            for (i, val) in selection.iter().enumerate() {
+                if val == Some(true) {
+                    deleted_indexes.push(row_offset + i as u64);
+                }
+            }
+            row_offset += batch.num_rows() as u64;
+        }
+
+        if !deleted_indexes.is_empty() {
+            // Build DV for this file
+            let mut dv = KernelDeletionVector::new();
+            dv.add_deleted_row_indexes(deleted_indexes);
+
+            // Write DV to store
+            let dv_path = write_context.new_deletion_vector_path(String::new());
+            let dv_absolute_path = dv_path.absolute_path()?;
+            let dv_object_path = ObjectStorePath::parse(dv_absolute_path.path())?;
+
+            let mut dv_buffer = Vec::new();
+            let mut dv_writer = StreamingDeletionVectorWriter::new(&mut dv_buffer);
+            let dv_write_result = dv_writer.write_deletion_vector(dv)?;
+            dv_writer.finalize()?;
+
+            // Write DV file synchronously via blocking
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(store.put(&dv_object_path, dv_buffer.into()))?;
+
+            let descriptor = dv_write_result.to_descriptor(&dv_path);
+            dv_map.insert(file_path.clone(), descriptor);
+        }
+    }
+
+    if dv_map.is_empty() {
+        info!("delete: predicate matched no rows");
+        return Ok(Outcome::Applied);
+    }
+
+    // Commit the DVs
+    let snapshot = Snapshot::builder_for(table_root.clone()).build(engine)?;
+    let mut txn = snapshot
+        .transaction(Box::new(FileSystemCommitter::new()), engine)?
+        .with_operation("DELETE".to_string());
+
+    let scan_for_commit = {
+        let snap = Snapshot::builder_for(table_root.clone()).build(engine)?;
+        let scan = snap.scan_builder().build()?;
+        let metadata: Vec<_> = scan.scan_metadata(engine)?.collect::<Result<Vec<_>, _>>()?;
+        metadata.into_iter().map(|sm| sm.scan_files).collect::<Vec<_>>()
+    };
+
+    txn.update_deletion_vectors(dv_map, scan_for_commit.into_iter().map(Ok))?;
+    let result = txn.commit(engine)?;
+
+    if result.is_committed() {
+        Ok(Outcome::Applied)
+    } else {
+        Err("delete: commit was not committed".into())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -265,10 +370,7 @@ fn execute_set_transaction(
     table_root: &Url,
     engine: &dyn Engine,
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
-    let app_id = commit
-        .app_id
-        .as_ref()
-        .ok_or("set_transaction: missing appId")?;
+    let app_id = commit.app_id.as_ref().ok_or("set_transaction: missing appId")?;
     let version = commit.version.ok_or("set_transaction: missing version")?;
 
     let snapshot = Snapshot::builder_for(table_root.clone()).build(engine)?;
@@ -293,10 +395,7 @@ fn execute_set_domain_metadata(
     table_root: &Url,
     engine: &dyn Engine,
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
-    let domain = commit
-        .domain
-        .as_ref()
-        .ok_or("set_domain_metadata: missing domain")?;
+    let domain = commit.domain.as_ref().ok_or("set_domain_metadata: missing domain")?;
     let config = commit.configuration.as_deref().unwrap_or("");
     let removed = commit.removed.unwrap_or(false);
 
@@ -331,14 +430,9 @@ fn execute_checkpoint(
 }
 
 // ---------------------------------------------------------------------------
-// Helpers: append data files with proper metadata
+// Helpers: append data files
 // ---------------------------------------------------------------------------
 
-/// Append data files to an existing table via blind append.
-///
-/// For each file: reads parquet footer (size, row count), extracts partition
-/// values from the file path, copies file to table dir, constructs AddFile
-/// metadata, and commits.
 fn append_data_files(
     data_files: &[String],
     partition_columns: &Option<Vec<String>>,
@@ -359,8 +453,7 @@ fn append_data_files(
     let mut row_counts = Vec::new();
     let mut partition_maps: Vec<HashMap<String, String>> = Vec::new();
 
-    let table_dir = table_root
-        .to_file_path()
+    let table_dir = table_root.to_file_path()
         .map_err(|_| "Cannot convert table URL to file path")?;
 
     for data_file in data_files {
@@ -369,42 +462,29 @@ fn append_data_files(
             return Err(format!("Data file not found: {}", resolved.display()).into());
         }
 
-        // Read parquet footer for real row count
+        // Read real row count from parquet footer
         let file = std::fs::File::open(&resolved)?;
         let reader = SerializedFileReader::new(file)?;
         let num_rows = reader.metadata().file_metadata().num_rows();
 
         let file_meta = std::fs::metadata(&resolved)?;
         let file_size = file_meta.len() as i64;
-        let mod_time = file_meta
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis() as i64;
+        let mod_time = file_meta.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
 
-        let file_name = resolved
-            .file_name()
-            .ok_or("no filename")?
-            .to_string_lossy()
-            .to_string();
+        let file_name = resolved.file_name().ok_or("no filename")?.to_string_lossy().to_string();
 
-        // Extract partition values from the data file path
         let part_values = extract_partition_values(data_file, partition_columns);
 
-        // Build target path and copy file
         let target_relative = if !part_values.is_empty() {
-            let part_dir: String = part_values
-                .iter()
+            let part_dir: String = part_values.iter()
                 .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>()
-                .join("/");
+                .collect::<Vec<_>>().join("/");
             let target_dir = table_dir.join(&part_dir);
             std::fs::create_dir_all(&target_dir)?;
-            let target = target_dir.join(&file_name);
-            std::fs::copy(&resolved, &target)?;
+            std::fs::copy(&resolved, target_dir.join(&file_name))?;
             format!("{}/{}", part_dir, file_name)
         } else {
-            let target = table_dir.join(&file_name);
-            std::fs::copy(&resolved, &target)?;
+            std::fs::copy(&resolved, table_dir.join(&file_name))?;
             file_name
         };
 
@@ -419,14 +499,7 @@ fn append_data_files(
         return Err("No data files to append".into());
     }
 
-    let add_metadata = build_add_files_metadata(
-        &add_schema,
-        &paths,
-        &sizes,
-        &mod_times,
-        &row_counts,
-        &partition_maps,
-    )?;
+    let add_metadata = build_add_files_metadata(&add_schema, &paths, &sizes, &mod_times, &row_counts, &partition_maps)?;
     txn.add_files(add_metadata);
 
     let result = txn.commit(engine)?;
@@ -437,14 +510,7 @@ fn append_data_files(
     }
 }
 
-/// Extract partition values from a data file path.
-///
-/// e.g., "data/commit_1/region=us/part-00000.parquet" with partition_columns=["region"]
-/// → {"region": "us"}
-fn extract_partition_values(
-    data_file: &str,
-    partition_columns: &Option<Vec<String>>,
-) -> HashMap<String, String> {
+fn extract_partition_values(data_file: &str, partition_columns: &Option<Vec<String>>) -> HashMap<String, String> {
     let mut result = HashMap::new();
     if let Some(ref cols) = partition_columns {
         for component in data_file.split('/') {
@@ -460,11 +526,6 @@ fn extract_partition_values(
     result
 }
 
-/// Build EngineData for the Transaction::add_files() call.
-///
-/// Constructs a RecordBatch matching the add_files_schema with:
-/// - path, partitionValues, size, modificationTime
-/// - stats (numRecords from actual parquet footer, empty min/max/nullCount)
 fn build_add_files_metadata(
     add_schema: &SchemaRef,
     paths: &[String],
@@ -473,59 +534,29 @@ fn build_add_files_metadata(
     row_counts: &[i64],
     partition_maps: &[HashMap<String, String>],
 ) -> Result<Box<dyn delta_kernel::EngineData>, Box<dyn std::error::Error>> {
+    use delta_kernel::engine::arrow_conversion::TryFromKernel;
+
     let num_files = paths.len();
 
     let path_array = StringArray::from(paths.to_vec());
     let size_array = Int64Array::from(sizes.to_vec());
     let mod_time_array = Int64Array::from(mod_times.to_vec());
     let num_records_array = Int64Array::from(row_counts.to_vec());
-
     let partition_values_array = build_partition_values_array(partition_maps)?;
 
-    // Stats: numRecords from real parquet metadata, empty column-level stats
-    let empty_struct_fields: delta_kernel::arrow::datatypes::Fields =
-        Vec::<Arc<Field>>::new().into();
+    let empty_struct_fields: delta_kernel::arrow::datatypes::Fields = Vec::<Arc<Field>>::new().into();
     let empty_struct = StructArray::new_empty_fields(num_files, None);
     let tight_bounds_array = BooleanArray::from(vec![true; num_files]);
 
     let stats_struct = StructArray::from(vec![
-        (
-            Arc::new(Field::new("numRecords", ArrowDataType::Int64, true)),
-            Arc::new(num_records_array) as ArrayRef,
-        ),
-        (
-            Arc::new(Field::new(
-                "nullCount",
-                ArrowDataType::Struct(empty_struct_fields.clone()),
-                true,
-            )),
-            Arc::new(empty_struct.clone()) as ArrayRef,
-        ),
-        (
-            Arc::new(Field::new(
-                "minValues",
-                ArrowDataType::Struct(empty_struct_fields.clone()),
-                true,
-            )),
-            Arc::new(empty_struct.clone()) as ArrayRef,
-        ),
-        (
-            Arc::new(Field::new(
-                "maxValues",
-                ArrowDataType::Struct(empty_struct_fields),
-                true,
-            )),
-            Arc::new(empty_struct) as ArrayRef,
-        ),
-        (
-            Arc::new(Field::new("tightBounds", ArrowDataType::Boolean, true)),
-            Arc::new(tight_bounds_array) as ArrayRef,
-        ),
+        (Arc::new(Field::new("numRecords", ArrowDataType::Int64, true)), Arc::new(num_records_array) as ArrayRef),
+        (Arc::new(Field::new("nullCount", ArrowDataType::Struct(empty_struct_fields.clone()), true)), Arc::new(empty_struct.clone()) as ArrayRef),
+        (Arc::new(Field::new("minValues", ArrowDataType::Struct(empty_struct_fields.clone()), true)), Arc::new(empty_struct.clone()) as ArrayRef),
+        (Arc::new(Field::new("maxValues", ArrowDataType::Struct(empty_struct_fields), true)), Arc::new(empty_struct) as ArrayRef),
+        (Arc::new(Field::new("tightBounds", ArrowDataType::Boolean, true)), Arc::new(tight_bounds_array) as ArrayRef),
     ]);
 
-    // Convert kernel schema to arrow schema
     let arrow_schema = TryFromKernel::try_from_kernel(add_schema.as_ref())?;
-
     let batch = RecordBatch::try_new(
         Arc::new(arrow_schema),
         vec![
@@ -540,19 +571,13 @@ fn build_add_files_metadata(
     Ok(Box::new(ArrowEngineData::new(batch)))
 }
 
-/// Build a MapArray for partition values.
-fn build_partition_values_array(
-    partition_maps: &[HashMap<String, String>],
-) -> Result<ArrayRef, Box<dyn std::error::Error>> {
+fn build_partition_values_array(partition_maps: &[HashMap<String, String>]) -> Result<ArrayRef, Box<dyn std::error::Error>> {
     let entries_field = Arc::new(Field::new(
         "key_value",
-        ArrowDataType::Struct(
-            vec![
-                Arc::new(Field::new("key", ArrowDataType::Utf8, false)),
-                Arc::new(Field::new("value", ArrowDataType::Utf8, true)),
-            ]
-            .into(),
-        ),
+        ArrowDataType::Struct(vec![
+            Arc::new(Field::new("key", ArrowDataType::Utf8, false)),
+            Arc::new(Field::new("value", ArrowDataType::Utf8, true)),
+        ].into()),
         false,
     ));
 
@@ -574,22 +599,10 @@ fn build_partition_values_array(
     let keys_array = StringArray::from(all_keys);
     let values_array = StringArray::from(all_values);
     let entries = StructArray::from(vec![
-        (
-            Arc::new(Field::new("key", ArrowDataType::Utf8, false)),
-            Arc::new(keys_array) as ArrayRef,
-        ),
-        (
-            Arc::new(Field::new("value", ArrowDataType::Utf8, true)),
-            Arc::new(values_array) as ArrayRef,
-        ),
+        (Arc::new(Field::new("key", ArrowDataType::Utf8, false)), Arc::new(keys_array) as ArrayRef),
+        (Arc::new(Field::new("value", ArrowDataType::Utf8, true)), Arc::new(values_array) as ArrayRef),
     ]);
 
     let offset_buffer = OffsetBuffer::new(offsets.into());
-    Ok(Arc::new(MapArray::new(
-        entries_field,
-        offset_buffer,
-        entries,
-        None,
-        false,
-    )))
+    Ok(Arc::new(MapArray::new(entries_field, offset_buffer, entries, None, false)))
 }

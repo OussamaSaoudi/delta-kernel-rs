@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "dept = 'eng'",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 1,
+    "filesSkipped" : 2
+  }
+}

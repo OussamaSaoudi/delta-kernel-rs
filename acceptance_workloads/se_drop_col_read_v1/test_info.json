@@ -1,0 +1,8 @@
+{
+  "testName" : "Time travel to version before column was dropped",
+  "workloadCount" : 2,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "hasSchemaEvolution" : true,
+  "testId" : "se_drop_col_read_v1"
+}

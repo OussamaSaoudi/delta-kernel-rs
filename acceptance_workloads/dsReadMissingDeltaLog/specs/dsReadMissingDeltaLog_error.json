@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "dsReadMissingDeltaLog",
+  "error" : {
+    "errorCode" : "DELTA_TABLE_NOT_FOUND",
+    "errorMessage" : "[DELTA_TABLE_NOT_FOUND] Delta table `/tmp/spark%dir%prefix-d3be3c2f-073a-45fe-96e4-f8e8a87911a2` doesn't exist."
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Read with mixed partition + data column filters",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaPartitionSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dpReadPartitionMixed"
+}

@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "nonExistentCol = 1",
+  "name" : "dsReadInvalidColumnName",
+  "error" : {
+    "errorCode" : "UNRESOLVED_COLUMN",
+    "errorMessage" : "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `nonExistentCol` cannot be resolved. Did you mean one of the following? [`id`]. SQLSTATE: 42703; line 1 pos 0;\n'Filter ('nonExistentCol = 1)\n+- Relation [id#97656] parquet\n"
+  }
+}

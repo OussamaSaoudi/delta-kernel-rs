@@ -1,0 +1,7 @@
+{
+  "testName" : "SetTransaction at version 1",
+  "sourceFile" : "DeltaIncrementalSetTransactionsSuite.scala",
+  "sourceLines" : "custom",
+  "testId" : "txn_at_version_1",
+  "isTxnTest" : true
+}

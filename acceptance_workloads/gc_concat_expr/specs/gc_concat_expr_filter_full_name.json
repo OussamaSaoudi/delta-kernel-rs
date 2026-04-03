@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "full_name = 'Alice Johnson'",
+  "expected" : {
+    "rowCount" : 1,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

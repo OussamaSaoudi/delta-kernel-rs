@@ -1,0 +1,7 @@
+{
+  "testName" : "Log replay - metadata latest wins",
+  "workloadCount" : 3,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-18",
+  "testId" : "lr_metadata_latest_wins"
+}

@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "err_schema_invalid_json",
+  "error" : {
+    "errorCode" : "DELTA_MISSING_PART_FILE",
+    "errorMessage" : "org.apache.spark.SparkException: Exception thrown in awaitResult: org.apache.hadoop.fs.ChecksumException: Checksum error: file:/tmp/spark%dir%prefix-f8c24063-6602-494d-9884-86a371ee73d8/_delta_log/00000000000000000000.json at 512 exp: -1102349249 got: 364389111"
+  }
+}

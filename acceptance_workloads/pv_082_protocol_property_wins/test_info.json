@@ -1,0 +1,7 @@
+{
+  "testName" : "Table where protocol property wins over session config",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "2077-2088",
+  "testId" : "pv_082_protocol_property_wins"
+}

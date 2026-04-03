@@ -1,0 +1,7 @@
+{
+  "testName" : "Read ARRAY<VARIANT> column",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaVariantSuite.scala",
+  "sourceLines" : "synthetic array variant test",
+  "testId" : "var_016_array_variant"
+}

@@ -1,0 +1,40 @@
+{
+  "name" : "ckp_incomplete_multipart",
+  "description" : "Multi-part checkpoint with one part missing (fallback to JSON replay)",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 12,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 6450,
+    "numCommits" : 2,
+    "numActions" : 16,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 1,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.checkpointPolicy" : "classic",
+    "delta.checkpointInterval" : "1",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "checkpoint" ]
+}

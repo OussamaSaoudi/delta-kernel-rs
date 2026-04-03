@@ -1,0 +1,7 @@
+{
+  "testName" : "_last_checkpoint pointing to wrong (older) version",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "synthetic wrong version hint test",
+  "testId" : "ckp_wrong_version_hint"
+}

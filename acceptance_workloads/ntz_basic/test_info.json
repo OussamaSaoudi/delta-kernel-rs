@@ -1,0 +1,7 @@
+{
+  "testName" : "Table with TIMESTAMP_NTZ column",
+  "workloadCount" : 2,
+  "sourceFile" : "TimestampNTZSuiteCapture.scala",
+  "sourceLines" : "synthetic NTZ basic test",
+  "testId" : "ntz_basic"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Error: schema with duplicate column names",
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "dsReadDuplicateColumns"
+}

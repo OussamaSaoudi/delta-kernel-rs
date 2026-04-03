@@ -1,0 +1,7 @@
+{
+  "testName" : "Low shuffle with timestamp columns",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoLowShuffleSuite.scala",
+  "sourceLines" : "P2-LS-008",
+  "testId" : "mergeLowShuffleTimestamp"
+}

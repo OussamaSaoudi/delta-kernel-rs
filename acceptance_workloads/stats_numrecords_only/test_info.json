@@ -1,0 +1,7 @@
+{
+  "testName" : "Stats with only numRecords, no min/max/null counts",
+  "workloadCount" : 2,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "stats-edge-cases",
+  "testId" : "stats_numrecords_only"
+}

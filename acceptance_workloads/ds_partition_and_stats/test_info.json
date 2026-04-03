@@ -1,0 +1,7 @@
+{
+  "testName" : "Partition pruning + stats skipping combined",
+  "workloadCount" : 4,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "data-skipping-gaps",
+  "testId" : "ds_partition_and_stats"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Checkpoint after many commits",
+  "workloadCount" : 3,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "synthetic many commits test",
+  "testId" : "cp_many_commits"
+}

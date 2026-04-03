@@ -1,0 +1,41 @@
+{
+  "name" : "rt_read_row_id_and_index",
+  "description" : "Read both row id and row index",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "domainMetadata", "invariants", "rowTracking" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 4,
+    "numRemoveFiles" : 2,
+    "sizeInBytes" : 2838,
+    "numCommits" : 3,
+    "numActions" : 16,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 2,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableRowTracking" : "true",
+    "delta.enableDeletionVectors" : "true",
+    "delta.rowTracking.materializedRowIdColumnName" : "_row-id-col-4eb502a9-f247-4537-8510-9d9901387266",
+    "delta.rowTracking.materializedRowCommitVersionColumnName" : "_row-commit-version-col-d1a7ca0f-1439-4fd0-b0b5-ebefea078f69"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "rowTracking" ]
+}

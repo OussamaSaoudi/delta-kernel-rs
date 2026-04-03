@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "s >= CAST(0 AS SMALLINT)",
+  "expected" : {
+    "rowCount" : 3,
+    "fileCount" : 3,
+    "filesSkipped" : 1
+  }
+}

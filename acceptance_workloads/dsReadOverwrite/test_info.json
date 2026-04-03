@@ -1,0 +1,7 @@
+{
+  "testName" : "Read after overwriting data",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dsReadOverwrite"
+}

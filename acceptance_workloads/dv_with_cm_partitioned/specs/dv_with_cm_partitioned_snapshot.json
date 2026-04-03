@@ -1,0 +1,27 @@
+{
+  "type" : "snapshot",
+  "version" : 2,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors", "columnMapping" ],
+      "writerFeatures" : [ "deletionVectors", "checkConstraints", "generatedColumns", "invariants", "changeDataFeed", "appendOnly", "columnMapping" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":1,\"delta.columnMapping.physicalName\":\"col-e71d25fb-23d1-4195-89e7-fb38703e0afd\"}},{\"name\":\"dept\",\"type\":\"string\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":2,\"delta.columnMapping.physicalName\":\"col-cde35150-ce3e-4087-a6af-fecde6fad41c\"}},{\"name\":\"salary\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":3,\"delta.columnMapping.physicalName\":\"col-1a679f4d-79d0-4d86-bd97-58b45c6797e4\"}}]}",
+      "createdTime" : 1773116753103,
+      "id" : "da4c04ca-c4f0-44e0-a8ed-01e8f9fc62bb",
+      "partitionColumns" : [ "dept" ],
+      "configuration" : {
+        "delta.enableDeletionVectors" : "true",
+        "delta.columnMapping.mode" : "id",
+        "delta.columnMapping.maxColumnId" : "3"
+      }
+    }
+  }
+}

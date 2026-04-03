@@ -1,0 +1,7 @@
+{
+  "testName" : "Version gap (0, 1, 3 - version 2 missing)",
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "corrupt-table-gaps",
+  "isErrorTest" : true,
+  "testId" : "ct_gap_in_versions"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Read table where columns are in different order in schema",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dsReadColumnReorder"
+}

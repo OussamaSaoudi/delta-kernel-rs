@@ -1,0 +1,7 @@
+{
+  "testName" : "nested columns with complex types",
+  "workloadCount" : 6,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "627-652",
+  "testId" : "ds_indexed_names_complex"
+}

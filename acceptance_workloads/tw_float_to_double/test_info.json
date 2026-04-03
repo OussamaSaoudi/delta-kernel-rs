@@ -1,0 +1,8 @@
+{
+  "testName" : "Float to double widening",
+  "workloadCount" : 2,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic float->double test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_float_to_double"
+}

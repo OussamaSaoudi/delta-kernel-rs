@@ -1,0 +1,22 @@
+{
+  "type" : "snapshotConstruction",
+  "version" : 3,
+  "expected" : {
+    "version" : 3,
+    "protocol" : {
+      "minReaderVersion" : 1,
+      "minWriterVersion" : 2
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"tags\",\"type\":{\"type\":\"array\",\"elementType\":\"string\",\"containsNull\":true},\"nullable\":true,\"metadata\":{}},{\"name\":\"scores\",\"type\":{\"type\":\"array\",\"elementType\":\"integer\",\"containsNull\":true},\"nullable\":true,\"metadata\":{}}]}",
+      "partitionColumns" : [ ],
+      "configuration" : { },
+      "createdTime" : 1775089644740,
+      "id" : "321f56e5-3c19-429a-952c-679620f200bd"
+    }
+  }
+}

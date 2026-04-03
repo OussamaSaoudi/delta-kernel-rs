@@ -1,0 +1,7 @@
+{
+  "testName" : "Add field to deeply nested struct",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-020",
+  "testId" : "mergeSchemaEvoNestedStructAdd"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with UPDATE SET * syntax",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-023",
+  "testId" : "mergeStarUpdate"
+}

@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "person.age > 28",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 3,
+    "filesSkipped" : 0
+  }
+}

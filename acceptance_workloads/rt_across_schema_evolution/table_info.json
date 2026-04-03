@@ -1,0 +1,46 @@
+{
+  "name" : "rt_across_schema_evolution",
+  "description" : "Row IDs preserved after ADD COLUMN",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "name",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "domainMetadata", "invariants", "rowTracking" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 1783,
+    "numCommits" : 3,
+    "numActions" : 11,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 2,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableRowTracking" : "true",
+    "delta.enableDeletionVectors" : "true",
+    "delta.rowTracking.materializedRowIdColumnName" : "_row-id-col-1b3e850f-1943-4d1a-9777-097820a62c5e",
+    "delta.rowTracking.materializedRowCommitVersionColumnName" : "_row-commit-version-col-456b7d9c-fc2f-4866-9133-e747ae695997"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "rowTracking" ]
+}

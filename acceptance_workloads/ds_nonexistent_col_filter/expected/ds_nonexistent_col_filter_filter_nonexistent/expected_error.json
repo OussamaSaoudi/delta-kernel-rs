@@ -1,0 +1,4 @@
+{
+  "errorClass" : "UNRESOLVED_COLUMN",
+  "messageContains" : "nonexistent_col"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Table after overwrite preserves table features",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "349-363",
+  "testId" : "pv_010_overwrite_keeps_features"
+}

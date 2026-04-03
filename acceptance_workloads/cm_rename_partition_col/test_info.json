@@ -1,0 +1,7 @@
+{
+  "testName" : "Rename partition column",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic rename partition test",
+  "testId" : "cm_rename_partition_col"
+}

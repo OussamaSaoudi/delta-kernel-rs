@@ -1,0 +1,7 @@
+{
+  "testName" : "nested schema, indexed=3",
+  "workloadCount" : 9,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "437-470",
+  "testId" : "ds_nested_indexed_3"
+}

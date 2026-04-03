@@ -1,0 +1,7 @@
+{
+  "testName" : "Widen int to long via merge",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-004",
+  "testId" : "mergeSchemaEvoWidenType"
+}

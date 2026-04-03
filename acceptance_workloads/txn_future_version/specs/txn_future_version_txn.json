@@ -1,0 +1,10 @@
+{
+  "type" : "txn",
+  "expected" : {
+    "appId" : "app-future",
+    "txnVersion" : 999999,
+    "lastUpdated" : 1
+  },
+  "name" : "txn_future_version_txn",
+  "description" : "SetTransaction version greater than commit version"
+}

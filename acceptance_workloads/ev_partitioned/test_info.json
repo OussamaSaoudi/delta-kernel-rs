@@ -1,0 +1,7 @@
+{
+  "testName" : "Partitioned table evolvability",
+  "workloadCount" : 3,
+  "sourceFile" : "EvolvabilitySuite.scala",
+  "sourceLines" : "custom",
+  "testId" : "ev_partitioned"
+}

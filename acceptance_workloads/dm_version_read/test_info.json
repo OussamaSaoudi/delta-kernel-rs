@@ -1,0 +1,7 @@
+{
+  "testName" : "Read domain metadata at specific version",
+  "sourceFile" : "DomainMetadataSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dm_version_read",
+  "is_domain_metadata_test" : true
+}

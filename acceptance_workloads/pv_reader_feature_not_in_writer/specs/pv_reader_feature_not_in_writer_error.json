@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "pv_reader_feature_not_in_writer",
+  "error" : {
+    "errorCode" : "DELTA_FEATURES_REQUIRE_WRITE_SUPPORT",
+    "errorMessage" : "[DELTA_READ_TABLE_WITHOUT_COLUMNS] You are trying to read a Delta table `delta`.`file:/tmp/spark%dir%prefix-0ac41b3f-534a-4ab2-86e0-4e4b430dccf4` that does not have any columns.\n\nWrite some new data with the option `mergeSchema = true` to be able to read the table."
+  }
+}

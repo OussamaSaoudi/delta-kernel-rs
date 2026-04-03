@@ -1,0 +1,8 @@
+{
+  "testName" : "Table after REPLACE AS with lower protocol defaults (keeps existing)",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "2345-2381",
+  "hasSchemaEvolution" : true,
+  "testId" : "pv_100_replace_as_keeps_protocol"
+}

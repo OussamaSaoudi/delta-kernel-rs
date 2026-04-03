@@ -1,0 +1,7 @@
+{
+  "testName" : "Table created with session-configured features",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "1034-1052",
+  "testId" : "pv_030_create_session_features"
+}

@@ -1,0 +1,8 @@
+{
+  "testName" : "Time travel with constraints",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "time travel pattern",
+  "hasSchemaEvolution" : true,
+  "testId" : "cc_013_time_travel"
+}

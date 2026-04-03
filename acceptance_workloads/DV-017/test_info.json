@@ -1,0 +1,7 @@
+{
+  "testName" : "huge table: read from tables of 2B rows with existing DV",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "687-701",
+  "testId" : "DV-017"
+}

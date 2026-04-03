@@ -1,0 +1,20 @@
+{
+  "type" : "snapshot",
+  "version" : -1,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 1,
+      "minWriterVersion" : 2
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "createdTime" : 1773115819535,
+      "id" : "12d02390-d152-49cb-9809-1b7c22decc12",
+      "partitionColumns" : [ ],
+      "configuration" : { }
+    }
+  }
+}

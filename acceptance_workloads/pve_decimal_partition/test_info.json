@@ -1,0 +1,7 @@
+{
+  "testName" : "Partition value encoding: decimal(10,2) type",
+  "workloadCount" : 4,
+  "sourceFile" : "PartitionSuiteCapture.scala",
+  "sourceLines" : "protocol-spec",
+  "testId" : "pve_decimal_partition"
+}

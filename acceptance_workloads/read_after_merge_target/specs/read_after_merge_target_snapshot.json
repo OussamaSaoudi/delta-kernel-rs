@@ -1,0 +1,22 @@
+{
+  "type" : "snapshotConstruction",
+  "version" : 2,
+  "expected" : {
+    "version" : 2,
+    "protocol" : {
+      "minReaderVersion" : 1,
+      "minWriterVersion" : 2
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"val\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}]}",
+      "partitionColumns" : [ ],
+      "configuration" : { },
+      "createdTime" : 1775089631474,
+      "id" : "4e8d68dd-0123-4e9a-a75a-127dbbf5ccc6"
+    }
+  }
+}

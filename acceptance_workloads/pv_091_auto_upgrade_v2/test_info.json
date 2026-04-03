@@ -1,0 +1,8 @@
+{
+  "testName" : "Table after auto upgrade to version 2 (appendOnly)",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "2189-2198",
+  "hasSchemaEvolution" : true,
+  "testId" : "pv_091_auto_upgrade_v2"
+}

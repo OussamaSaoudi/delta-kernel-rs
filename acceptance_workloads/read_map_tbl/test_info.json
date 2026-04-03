@@ -1,0 +1,5 @@
+{
+  "test_id" : "read_map_tbl",
+  "test_name" : "read_map — tbl",
+  "workload_count" : 2
+}

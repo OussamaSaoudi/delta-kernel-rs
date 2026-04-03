@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "year = 2024 AND month = 1",
+  "expected" : {
+    "rowCount" : 2,
+    "fileCount" : 2,
+    "filesSkipped" : 2
+  }
+}

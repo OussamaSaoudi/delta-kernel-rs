@@ -1,0 +1,40 @@
+{
+  "name" : "ict_with_checkpoint",
+  "description" : "ICT after checkpoint compaction",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "inCommitTimestamp", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 8,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 4052,
+    "numCommits" : 1,
+    "numActions" : 15,
+    "lastCheckpointVersion" : 3,
+    "lastCrcVersion" : 4,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.enableInCommitTimestamps" : "true",
+    "delta.checkpointInterval" : "3",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "inCommitTimestamp" ]
+}

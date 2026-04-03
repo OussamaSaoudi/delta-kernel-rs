@@ -1,0 +1,7 @@
+{
+  "testName" : "V2 checkpoint with multiple sidecar files",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckpointV2SuiteCapture.scala",
+  "sourceLines" : "feature-interaction",
+  "testId" : "ckp_v2_multiple_sidecars"
+}

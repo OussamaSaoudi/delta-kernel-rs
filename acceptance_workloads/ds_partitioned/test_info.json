@@ -1,0 +1,7 @@
+{
+  "testName" : "Partitioned table data skipping",
+  "workloadCount" : 6,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "partition tests",
+  "testId" : "ds_partitioned"
+}

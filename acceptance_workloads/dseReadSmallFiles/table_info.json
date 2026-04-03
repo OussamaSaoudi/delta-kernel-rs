@@ -1,0 +1,37 @@
+{
+  "name" : "dseReadSmallFiles",
+  "description" : "Read table with many small files",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "value",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 10,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 4790,
+    "numCommits" : 5,
+    "numActions" : 28,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 9,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  }
+}

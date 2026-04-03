@@ -1,0 +1,7 @@
+{
+  "testName" : "V2 backward compat checkpoint (JSON format)",
+  "workloadCount" : 1,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "667-693",
+  "testId" : "cp_v2_compat_json"
+}

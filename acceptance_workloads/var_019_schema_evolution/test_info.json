@@ -1,0 +1,8 @@
+{
+  "testName" : "Schema evolution with VARIANT column",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaVariantSuite.scala",
+  "sourceLines" : "variant works with schema evolution for INSERT",
+  "hasSchemaEvolution" : true,
+  "testId" : "var_019_schema_evolution"
+}

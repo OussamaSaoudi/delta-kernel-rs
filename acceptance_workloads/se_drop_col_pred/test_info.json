@@ -1,0 +1,8 @@
+{
+  "testName" : "Data skipping after column drop",
+  "workloadCount" : 3,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "hasSchemaEvolution" : true,
+  "testId" : "se_drop_col_pred"
+}

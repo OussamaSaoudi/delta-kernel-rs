@@ -1,0 +1,8 @@
+{
+  "testName" : "Type widening + row tracking combined",
+  "workloadCount" : 2,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic TW + row tracking test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_row_tracking_combo"
+}

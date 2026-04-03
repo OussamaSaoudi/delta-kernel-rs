@@ -1,0 +1,7 @@
+{
+  "testName" : "Array of structs, add struct field",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-023",
+  "testId" : "mergeSchemaEvoArrayStructEvolution"
+}

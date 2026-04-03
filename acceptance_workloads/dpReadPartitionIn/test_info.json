@@ -1,0 +1,7 @@
+{
+  "testName" : "Read with partition column IN filter",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaPartitionSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dpReadPartitionIn"
+}

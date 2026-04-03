@@ -1,0 +1,8 @@
+{
+  "testName" : "Column mapping + type widening combined",
+  "workloadCount" : 3,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic CM + TW test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_with_column_mapping"
+}

@@ -1,0 +1,84 @@
+{
+  "name" : "cm_deeply_nested",
+  "description" : "3+ level nested schema with CM",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-d3ce4a54-cd96-4c4d-bbc6-344be3c84f0e"
+      }
+    }, {
+      "name" : "data",
+      "type" : {
+        "type" : "struct",
+        "fields" : [ {
+          "name" : "a",
+          "type" : {
+            "type" : "struct",
+            "fields" : [ {
+              "name" : "b",
+              "type" : {
+                "type" : "struct",
+                "fields" : [ {
+                  "name" : "c",
+                  "type" : "integer",
+                  "nullable" : true,
+                  "metadata" : {
+                    "delta.columnMapping.id" : 5,
+                    "delta.columnMapping.physicalName" : "col-8701defe-b399-41ae-81b0-1625ac5b9081"
+                  }
+                } ]
+              },
+              "nullable" : true,
+              "metadata" : {
+                "delta.columnMapping.id" : 4,
+                "delta.columnMapping.physicalName" : "col-56956ca5-8678-4d83-997f-33038d24cbfd"
+              }
+            } ]
+          },
+          "nullable" : true,
+          "metadata" : {
+            "delta.columnMapping.id" : 3,
+            "delta.columnMapping.physicalName" : "col-1c66717b-1f27-4c56-88d3-32845c90aac8"
+          }
+        } ]
+      },
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-cd4da4ee-9482-4e3b-838b-a038cca2eb69"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "changeDataFeed", "checkConstraints", "columnMapping", "deletionVectors", "generatedColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 4378,
+    "numCommits" : 3,
+    "numActions" : 7,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 2,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.mode" : "name",
+    "delta.columnMapping.maxColumnId" : "5"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "columnMapping", "columnMappingName", "nestedStruct" ]
+}

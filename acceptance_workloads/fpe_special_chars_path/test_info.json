@@ -1,0 +1,7 @@
+{
+  "testName" : "File path with encoded special chars (#, %, ?)",
+  "workloadCount" : 2,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "fpe-edge-cases",
+  "testId" : "fpe_special_chars_path"
+}

@@ -1,0 +1,3 @@
+{"commitInfo":{"timestamp":1773114666464,"operation":"WRITE","operationParameters":{"mode":"Append","statsOnLoad":false},"readVersion":0,"isolationLevel":"WriteSerializable","isBlindAppend":true,"operationMetrics":{},"tags":{"restoresDeletedRows":"false"},"engineInfo":"Databricks-Runtime/<unknown>","txnId":"15e7040e-130d-4d11-a3a1-0d4989301561"}}
+{"txn":{"appId":"app-1","version":1,"lastUpdated":1}}
+{"add":{"path":"file-625ed4fc-e37a-497a-8bd5-1fbb699addac","partitionValues":{},"size":1,"modificationTime":1,"dataChange":true,"stats":"{\"numRecords\": 1}"}}

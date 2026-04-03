@@ -1,0 +1,7 @@
+{
+  "testName" : "CRC missing metadata/protocol",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-3",
+  "testId" : "corrupt_crc_no_metadata"
+}

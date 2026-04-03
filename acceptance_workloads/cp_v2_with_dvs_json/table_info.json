@@ -1,0 +1,39 @@
+{
+  "name" : "cp_v2_with_dvs_json",
+  "description" : "V2 checkpoint with DVs - JSON format (checkpoint-only read)",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors", "v2Checkpoint" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants", "v2Checkpoint" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 4,
+    "numRemoveFiles" : 2,
+    "sizeInBytes" : 2521,
+    "numCommits" : 0,
+    "numActions" : 14,
+    "lastCheckpointVersion" : 3,
+    "lastCrcVersion" : 3,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.checkpointPolicy" : "v2",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "v2Checkpoint" ]
+}

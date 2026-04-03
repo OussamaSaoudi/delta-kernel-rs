@@ -1,0 +1,7 @@
+{
+  "testName" : "time travel support with column defaults",
+  "workloadCount" : 5,
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "874-891",
+  "testId" : "tt_column_defaults"
+}

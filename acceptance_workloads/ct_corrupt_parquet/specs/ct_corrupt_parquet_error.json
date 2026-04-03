@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "ct_corrupt_parquet",
+  "error" : {
+    "errorCode" : "CANNOT_READ_FILE_FOOTER",
+    "errorMessage" : "[FAILED_READ_FILE.NO_HINT] Error while reading file file:/tmp/spark%dir%prefix-04225e50-33a2-4531-a675-4db1464c6e04/test%file%prefix-part-00000-3cc444ad-1292-4a0d-9219-dcbd382e171a-c000.snappy.parquet.  SQLSTATE: KD001"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Read after SaveMode.Overwrite",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dsReadSaveModeOverwrite"
+}

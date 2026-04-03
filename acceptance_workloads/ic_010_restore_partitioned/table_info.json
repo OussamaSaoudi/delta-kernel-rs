@@ -1,0 +1,48 @@
+{
+  "name" : "ic_010_restore_partitioned",
+  "description" : "Restore on partitioned table",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.identity.start" : 1,
+        "delta.identity.step" : 1,
+        "delta.identity.highWaterMark" : 6,
+        "delta.identity.allowExplicitInsert" : false
+      }
+    }, {
+      "name" : "value",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "identityColumns", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 4,
+    "numRemoveFiles" : 2,
+    "sizeInBytes" : 2904,
+    "numCommits" : 1,
+    "numActions" : 20,
+    "lastCheckpointVersion" : 3,
+    "lastCrcVersion" : 4,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 1,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "identityColumns" ]
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "ICT after checkpoint compaction",
+  "workloadCount" : 3,
+  "sourceFile" : "InCommitTimestampSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "ict_with_checkpoint"
+}

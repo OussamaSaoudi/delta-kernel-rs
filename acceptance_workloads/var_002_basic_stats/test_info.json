@@ -1,0 +1,7 @@
+{
+  "testName" : "Basic variant stats",
+  "workloadCount" : 1,
+  "sourceFile" : "VariantDataSkippingStatsSuite.scala",
+  "sourceLines" : "281-288",
+  "testId" : "var_002_basic_stats"
+}

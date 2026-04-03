@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "date_trunc('MONTH', ts) = '2024-01-01'",
+  "expected" : {
+    "rowCount" : 0,
+    "fileCount" : 2,
+    "filesSkipped" : 0
+  }
+}

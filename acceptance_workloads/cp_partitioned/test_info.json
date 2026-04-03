@@ -1,0 +1,7 @@
+{
+  "testName" : "Checkpoint with partitioned table",
+  "workloadCount" : 3,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "synthetic partitioned checkpoint test",
+  "testId" : "cp_partitioned"
+}

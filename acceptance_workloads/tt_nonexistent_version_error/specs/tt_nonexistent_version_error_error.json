@@ -1,0 +1,9 @@
+{
+  "type" : "snapshot",
+  "version" : 3,
+  "name" : "tt_nonexistent_version_error",
+  "error" : {
+    "errorCode" : "DELTA_VERSION_NOT_FOUND",
+    "errorMessage" : "[DELTA_VERSION_NOT_FOUND] Cannot time travel Delta table to version 3. Available versions: [0, 2]."
+  }
+}

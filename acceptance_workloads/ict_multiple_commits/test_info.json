@@ -1,0 +1,7 @@
+{
+  "testName" : "ICT with multiple commits",
+  "workloadCount" : 6,
+  "sourceFile" : "InCommitTimestampSuite.scala",
+  "sourceLines" : "custom",
+  "testId" : "ict_multiple_commits"
+}

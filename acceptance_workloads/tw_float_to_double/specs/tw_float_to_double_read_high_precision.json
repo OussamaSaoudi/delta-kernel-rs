@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "value > 1.0E300",
+  "expected" : {
+    "rowCount" : 1,
+    "fileCount" : 1,
+    "filesSkipped" : 1
+  }
+}

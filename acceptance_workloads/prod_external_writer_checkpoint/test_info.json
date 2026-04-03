@@ -1,0 +1,7 @@
+{
+  "testName" : "Checkpoint written by external tool",
+  "workloadCount" : 1,
+  "sourceFile" : "ProductionEdgeCaseSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "prod_external_writer_checkpoint"
+}

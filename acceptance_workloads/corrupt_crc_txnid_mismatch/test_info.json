@@ -1,0 +1,7 @@
+{
+  "testName" : "CRC txnId doesn't match commit",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-6",
+  "testId" : "corrupt_crc_txnid_mismatch"
+}

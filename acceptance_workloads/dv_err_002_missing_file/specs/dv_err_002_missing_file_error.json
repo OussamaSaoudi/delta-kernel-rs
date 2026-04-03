@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "dv_err_002_missing_file",
+  "error" : {
+    "errorCode" : "DELTA_MISSING_DELETION_VECTOR_FILE",
+    "errorMessage" : "[FAILED_READ_FILE.DBR_FILE_NOT_EXIST] Error while reading file file:/tmp/spark%dir%prefix-2e7c076c-9aa5-4909-8fe2-2de6a5b658a7/test%file%prefix-part-00000-8296727c-2b04-4d68-9aed-98e67d1932ab-c000.snappy.parquet. [DELTA_FILE_NOT_FOUND_DETAILED] File file:/tmp/spark%25dir%25prefix-2e7c076c-9aa5-4909-8fe2-2de6a5b658a7/test%25file%25prefix-part-00000-8296727c-2b04-4d68-9aed-98e67d1932ab-c000.snappy.parquet referenced in the transaction log cannot be found. This occurs when data has been manually deleted from the file system rather than using the table `DELETE` statement. \nIt can also be caused by a VACUUM operation that cleaned up data not yet processed if the table's retention period is too short. \nRestart your query with a new checkpoint location, or use spark.sql.files.ignoreMissingFiles to skip the missing files. For more information, see https://docs.databricks.com/delta/delta-intro.html#frequently-asked-questions\n SQLSTATE: KD001"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "testName" : "Delete operations with identity column",
+  "workloadCount" : 2,
+  "sourceFile" : "IdentityColumnDMLSuite.scala",
+  "sourceLines" : "45-68",
+  "hasSchemaEvolution" : true,
+  "testId" : "ic_014_delete"
+}

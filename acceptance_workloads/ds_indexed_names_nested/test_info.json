@@ -1,0 +1,7 @@
+{
+  "testName" : "naming nested column indexes leaves",
+  "workloadCount" : 10,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "588-625",
+  "testId" : "ds_indexed_names_nested"
+}

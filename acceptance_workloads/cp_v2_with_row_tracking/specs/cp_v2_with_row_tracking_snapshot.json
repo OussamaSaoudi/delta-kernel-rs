@@ -1,0 +1,29 @@
+{
+  "type" : "snapshot",
+  "version" : 11,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors", "v2Checkpoint" ],
+      "writerFeatures" : [ "deletionVectors", "domainMetadata", "v2Checkpoint", "rowTracking", "invariants", "appendOnly" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"value\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}]}",
+      "createdTime" : 1773119592117,
+      "id" : "892549f3-db17-4d6f-8ae4-b6558e66849b",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableDeletionVectors" : "true",
+        "delta.enableRowTracking" : "true",
+        "delta.checkpointPolicy" : "v2",
+        "delta.rowTracking.materializedRowCommitVersionColumnName" : "_row-commit-version-col-2f2afa2d-77da-41be-a82b-1066a087a740",
+        "delta.rowTracking.materializedRowIdColumnName" : "_row-id-col-7e8b013d-11ae-4d53-b7a8-85149fc53bc0"
+      }
+    }
+  }
+}

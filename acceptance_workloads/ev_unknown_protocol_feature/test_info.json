@@ -1,0 +1,7 @@
+{
+  "testName" : "Protocol with unrecognized writer feature",
+  "workloadCount" : 1,
+  "sourceFile" : "EvolvabilitySuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "ev_unknown_protocol_feature"
+}

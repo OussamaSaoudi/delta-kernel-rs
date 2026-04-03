@@ -1,0 +1,7 @@
+{
+  "testName" : "Domain metadata with large payload (>1KB)",
+  "sourceFile" : "DomainMetadataSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dm_large_payload",
+  "is_domain_metadata_test" : true
+}

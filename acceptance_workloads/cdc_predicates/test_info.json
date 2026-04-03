@@ -1,0 +1,7 @@
+{
+  "testName" : "CDC read with predicates",
+  "workloadCount" : 6,
+  "sourceFile" : "DeltaCDCSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cdc_predicates"
+}

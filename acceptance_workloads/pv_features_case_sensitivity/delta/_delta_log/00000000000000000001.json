@@ -1,0 +1,2 @@
+{"metaData":{"id":"fac5807a-6af4-4d3a-9ff1-969c21990cd6","format":{"provider":"parquet","options":{}},"partitionColumns":[],"configuration":{}}}
+{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["DeletionVectors"],"writerFeatures":["DeletionVectors"]}}

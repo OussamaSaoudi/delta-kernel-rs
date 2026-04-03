@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "a > 127",
+  "expected" : {
+    "rowCount" : 4,
+    "fileCount" : 2,
+    "filesSkipped" : 1
+  }
+}

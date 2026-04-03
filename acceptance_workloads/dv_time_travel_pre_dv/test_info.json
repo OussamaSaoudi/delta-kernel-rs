@@ -1,0 +1,7 @@
+{
+  "testName" : "Time travel before DV exists",
+  "workloadCount" : 2,
+  "sourceFile" : "DeletionVectorsSuiteCapture.scala",
+  "sourceLines" : "new coverage",
+  "testId" : "dv_time_travel_pre_dv"
+}

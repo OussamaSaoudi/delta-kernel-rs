@@ -1,0 +1,8 @@
+{
+  "testName" : "Drop and re-add column with same name (CM)",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic drop readd test",
+  "hasSchemaEvolution" : true,
+  "testId" : "cm_drop_readd"
+}

@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "pv_err_001_protocol_too_high",
+  "error" : {
+    "errorCode" : "DELTA_INVALID_PROTOCOL_VERSION",
+    "errorMessage" : "[DELTA_INVALID_PROTOCOL_VERSION] Unsupported Delta protocol version: table \"file:/tmp/spark%dir%prefix-55250bf2-4c5d-4be0-a4da-56b68861c7be\" requires reader version 2147483647 and writer version 2147483647, but this version of Databricks supports reader versions 0, 1, 2, 3 and writer versions 0, 1, 2, 3, 4, 5, 6, 7. Please upgrade to a newer release."
+  }
+}

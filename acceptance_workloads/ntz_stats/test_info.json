@@ -1,0 +1,7 @@
+{
+  "testName" : "Data skipping with NTZ min/max stats",
+  "workloadCount" : 3,
+  "sourceFile" : "TimestampNTZSuiteCapture.scala",
+  "sourceLines" : "synthetic NTZ stats test",
+  "testId" : "ntz_stats"
+}

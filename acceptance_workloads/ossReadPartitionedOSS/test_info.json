@@ -1,0 +1,7 @@
+{
+  "testName" : "Partitioned table OSS read",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaSuiteOSS.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "ossReadPartitionedOSS"
+}

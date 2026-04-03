@@ -1,0 +1,7 @@
+{
+  "testName" : "4+ levels nested struct",
+  "workloadCount" : 1,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cr_deeply_nested_struct"
+}

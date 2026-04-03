@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "err_duplicate_add_same_version",
+  "error" : {
+    "errorCode" : "DELTA_DUPLICATE_FILE_PATHS_IN_SAME_COMMIT",
+    "errorMessage" : "org.apache.spark.SparkException: Exception thrown in awaitResult: org.apache.hadoop.fs.ChecksumException: Checksum error: file:/tmp/spark%dir%prefix-de565bd6-0e30-4682-99c5-6d6e4cd3580d/_delta_log/00000000000000000000.json at 1536 exp: -500950587 got: 1280886330"
+  }
+}

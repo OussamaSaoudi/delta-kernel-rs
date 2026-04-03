@@ -1,0 +1,7 @@
+{
+  "testName" : "INSERT and UPDATE add same new column",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-015",
+  "testId" : "mergeSchemaEvoInsertUpdateNewCol"
+}

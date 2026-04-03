@@ -1,0 +1,7 @@
+{
+  "testName" : "nested, single 1",
+  "workloadCount" : 8,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "142-157",
+  "testId" : "ds_nested_single_1"
+}

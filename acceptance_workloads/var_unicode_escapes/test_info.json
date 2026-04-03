@@ -1,0 +1,7 @@
+{
+  "testName" : "Variant with unicode and escape sequences",
+  "workloadCount" : 1,
+  "sourceFile" : "VariantSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "var_unicode_escapes"
+}

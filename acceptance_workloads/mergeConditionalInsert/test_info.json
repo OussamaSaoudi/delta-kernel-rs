@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with conditional WHEN NOT MATCHED",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-009",
+  "testId" : "mergeConditionalInsert"
+}

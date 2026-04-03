@@ -1,0 +1,7 @@
+{
+  "testName" : "Read VARIANT after OPTIMIZE",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaVariantSuite.scala",
+  "sourceLines" : "optimize variant table test",
+  "testId" : "var_021_optimized"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "SetTransaction version greater than commit version",
+  "sourceFile" : "AppTransactionSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "txn_future_version",
+  "isTxnTest" : true
+}

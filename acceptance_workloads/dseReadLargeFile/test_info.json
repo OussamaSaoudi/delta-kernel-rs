@@ -1,0 +1,7 @@
+{
+  "testName" : "Read table with large number of rows (10000)",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaSuiteEdge.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dseReadLargeFile"
+}

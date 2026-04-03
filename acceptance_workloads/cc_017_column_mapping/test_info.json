@@ -1,0 +1,7 @@
+{
+  "testName" : "Read constraints with column mapping",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "column mapping pattern",
+  "testId" : "cc_017_column_mapping"
+}

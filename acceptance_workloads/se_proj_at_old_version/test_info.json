@@ -1,0 +1,8 @@
+{
+  "testName" : "Project column at version before schema change",
+  "workloadCount" : 3,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "hasSchemaEvolution" : true,
+  "testId" : "se_proj_at_old_version"
+}

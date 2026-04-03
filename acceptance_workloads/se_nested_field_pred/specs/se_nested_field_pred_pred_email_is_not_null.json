@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "info.email IS NOT NULL",
+  "expected" : {
+    "rowCount" : 1,
+    "fileCount" : 3,
+    "filesSkipped" : 0
+  }
+}

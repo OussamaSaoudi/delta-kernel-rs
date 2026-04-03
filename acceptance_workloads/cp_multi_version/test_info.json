@@ -1,0 +1,7 @@
+{
+  "testName" : "Read checkpoint with time travel across versions",
+  "workloadCount" : 5,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "synthetic multi-version checkpoint test",
+  "testId" : "cp_multi_version"
+}

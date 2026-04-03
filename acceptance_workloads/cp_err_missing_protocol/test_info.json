@@ -1,0 +1,7 @@
+{
+  "testName" : "Checkpoint without Protocol action (corrupted checkpoint)",
+  "sourceFile" : "CheckpointV2SuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "cp_err_missing_protocol"
+}

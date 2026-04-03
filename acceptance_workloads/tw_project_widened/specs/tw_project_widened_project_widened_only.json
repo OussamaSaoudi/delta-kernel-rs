@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "columns" : [ "value" ],
+  "expected" : {
+    "rowCount" : 3,
+    "fileCount" : 2,
+    "filesSkipped" : 0
+  }
+}

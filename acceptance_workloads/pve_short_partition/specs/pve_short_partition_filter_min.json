@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "s = CAST(-32768 AS SMALLINT)",
+  "expected" : {
+    "rowCount" : 1,
+    "fileCount" : 1,
+    "filesSkipped" : 3
+  }
+}

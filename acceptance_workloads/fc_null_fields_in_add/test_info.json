@@ -1,0 +1,7 @@
+{
+  "testName" : "Forward compat - null fields in add action",
+  "workloadCount" : 2,
+  "sourceFile" : "EvolvabilitySuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "fc_null_fields_in_add"
+}

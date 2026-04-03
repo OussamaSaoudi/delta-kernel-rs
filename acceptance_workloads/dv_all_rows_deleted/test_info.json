@@ -1,0 +1,7 @@
+{
+  "testName" : "All rows in file marked deleted via DV",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "new coverage",
+  "testId" : "dv_all_rows_deleted"
+}

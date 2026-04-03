@@ -1,0 +1,7 @@
+{
+  "testName" : "ICT preserved across REPLACE",
+  "workloadCount" : 1,
+  "sourceFile" : "InCommitTimestampSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "ict_create_or_replace"
+}

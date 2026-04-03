@@ -1,0 +1,7 @@
+{
+  "testName" : "Table with all active features enabled",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "2272-2292",
+  "testId" : "pv_097_all_active_features"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Snapshot version number verification",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaSuiteEdge.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dseSnapshotVersion"
+}

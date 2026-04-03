@@ -1,0 +1,7 @@
+{
+  "testName" : "DecimalType(38,0) read-back",
+  "workloadCount" : 1,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cr_decimal_zero_scale"
+}

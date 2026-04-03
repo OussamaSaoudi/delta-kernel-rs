@@ -1,0 +1,7 @@
+{
+  "testName" : "_last_checkpoint absent",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-9",
+  "testId" : "corrupt_missing_last_checkpoint"
+}

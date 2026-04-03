@@ -1,0 +1,9 @@
+{"commitInfo":{"timestamp":1773117086093,"operation":"WRITE","operationParameters":{"mode":"ErrorIfExists","statsOnLoad":false,"partitionBy":"[]"},"isolationLevel":"WriteSerializable","isBlindAppend":true,"operationMetrics":{"numFiles":"2","numOutputRows":"10","numOutputBytes":"1039"},"tags":{"noRowsCopied":"true","restoresDeletedRows":"false"},"engineInfo":"Databricks-Runtime/<unknown>","txnId":"183b94ff-ce0e-4499-be61-8c0c6686d596"}}
+
+{"metaData":{"id":"0d9f12f8-23f2-420c-8624-b9f3f57e7082","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{"delta.enableDeletionVectors":"true"},"createdTime":1773117085943}}
+
+{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors","appendOnly","invariants"]}}
+
+{"add":{"path":"test%25file%25prefix-part-00000-b53f2213-8b8f-43c4-b657-efb0c2960415-c000.snappy.parquet","partitionValues":{},"size":518,"modificationTime":1773117086026,"dataChange":true,"stats":"{\"numRecords\":5,\"minValues\":{\"id\":0},\"maxValues\":{\"id\":4},\"nullCount\":{\"id\":0},\"tightBounds\":true}","tags":{"INSERTION_TIME":"1773117086026000","MIN_INSERTION_TIME":"1773117086026000","MAX_INSERTION_TIME":"1773117086026000","OPTIMIZE_TARGET_SIZE":"268435456"}}}
+
+{"add":{"path":"test%25file%25prefix-part-00001-389cf3e6-0f54-4866-a9b3-5eb79b396a8a-c000.snappy.parquet","partitionValues":{},"size":521,"modificationTime":1773117086026,"dataChange":true,"stats":"{\"numRecords\":5,\"minValues\":{\"id\":5},\"maxValues\":{\"id\":9},\"nullCount\":{\"id\":0},\"tightBounds\":true}","tags":{"INSERTION_TIME":"1773117086026001","MIN_INSERTION_TIME":"1773117086026001","MAX_INSERTION_TIME":"1773117086026001","OPTIMIZE_TARGET_SIZE":"268435456"}}}

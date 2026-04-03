@@ -1,0 +1,51 @@
+{
+  "name" : "read_array_tbl",
+  "description" : "read_array — tbl",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "tags",
+      "type" : {
+        "type" : "array",
+        "elementType" : "string",
+        "containsNull" : true
+      },
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "scores",
+      "type" : {
+        "type" : "array",
+        "elementType" : "integer",
+        "containsNull" : true
+      },
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 1,
+    "minWriterVersion" : 2
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 3249,
+    "numCommits" : 4,
+    "numActions" : 9,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 3,
+    "numCheckpointFiles" : 0
+  },
+  "properties" : { },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  }
+}

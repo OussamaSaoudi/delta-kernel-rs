@@ -1,0 +1,7 @@
+{
+  "testName" : "Error: corrupt JSON in commit file",
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "dsReadCorruptJson"
+}

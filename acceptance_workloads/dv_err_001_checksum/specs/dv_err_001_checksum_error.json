@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "dv_err_001_checksum",
+  "error" : {
+    "errorCode" : "DELTA_DV_CHECKSUM_MISMATCH",
+    "errorMessage" : "[FAILED_READ_FILE.NO_HINT] Error while reading file file:/tmp/spark%dir%prefix-8f174518-3a61-40cd-bc66-d5a335ae2611/test%file%prefix-part-00000-68641b05-c17c-4788-a19a-df7349f8cf49-c000.snappy.parquet.  SQLSTATE: KD001"
+  }
+}

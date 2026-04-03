@@ -1,0 +1,7 @@
+{
+  "testName" : "Table after operations that ignore protocol defaults",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "900-969",
+  "testId" : "pv_026_operation_ignore_defaults"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "IcebergCompat with column mapping name mode",
+  "workloadCount" : 3,
+  "sourceFile" : "IcebergCompatSuite.scala",
+  "sourceLines" : "106-130",
+  "testId" : "ice_column_mapping"
+}

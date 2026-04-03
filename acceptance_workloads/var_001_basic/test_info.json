@@ -1,0 +1,7 @@
+{
+  "testName" : "Read table with VARIANT column",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaVariantSuite.scala",
+  "sourceLines" : "create a new table with Variant test",
+  "testId" : "var_001_basic"
+}

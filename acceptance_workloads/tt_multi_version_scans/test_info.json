@@ -1,0 +1,7 @@
+{
+  "testName" : "scans on different versions of same table are executed correctly",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "746-761",
+  "testId" : "tt_multi_version_scans"
+}

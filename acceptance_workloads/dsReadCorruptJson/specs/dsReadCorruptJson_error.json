@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "dsReadCorruptJson",
+  "error" : {
+    "errorCode" : "DELTA_INVALID_JSON_COMMIT_FILE",
+    "errorMessage" : "org.apache.spark.SparkException: Exception thrown in awaitResult: org.apache.hadoop.fs.ChecksumException: Checksum error: file:/tmp/spark%dir%prefix-4a8edc10-962d-4d20-840c-32a6acd87d8a/_delta_log/00000000000000000000.json at 0 exp: 850342145 got: -868427916"
+  }
+}

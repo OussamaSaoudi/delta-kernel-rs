@@ -1,0 +1,39 @@
+{
+  "name" : "ckp_multipart_10_parts",
+  "description" : "Multi-part checkpoint with 10+ parts",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 51,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 25296,
+    "numCommits" : 0,
+    "numActions" : 59,
+    "lastCheckpointVersion" : 5,
+    "lastCrcVersion" : 5,
+    "numParallelCheckpointFiles" : 11
+  },
+  "properties" : {
+    "delta.checkpointPolicy" : "classic",
+    "delta.checkpointInterval" : "1000",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  }
+}

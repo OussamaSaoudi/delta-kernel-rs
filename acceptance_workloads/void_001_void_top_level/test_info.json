@@ -1,0 +1,7 @@
+{
+  "testName" : "Top-level NullType column",
+  "workloadCount" : 1,
+  "sourceFile" : "VoidTypeSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "void_001_void_top_level"
+}

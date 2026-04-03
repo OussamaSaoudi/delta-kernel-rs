@@ -1,0 +1,7 @@
+{
+  "testName" : "Predicate on non-variant column with variant present",
+  "workloadCount" : 2,
+  "sourceFile" : "VariantSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "var_predicate_non_variant"
+}

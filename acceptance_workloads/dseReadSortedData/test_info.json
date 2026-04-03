@@ -1,0 +1,7 @@
+{
+  "testName" : "Read table written with sorted data",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaSuiteEdge.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dseReadSortedData"
+}

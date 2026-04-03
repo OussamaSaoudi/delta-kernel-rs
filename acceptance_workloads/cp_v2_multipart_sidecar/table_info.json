@@ -1,0 +1,40 @@
+{
+  "name" : "cp_v2_multipart_sidecar",
+  "description" : "Multi-part V2 checkpoint (parquet) - 7 versions with varying sidecars",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors", "v2Checkpoint" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants", "v2Checkpoint" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 101,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 56368,
+    "numCommits" : 0,
+    "numActions" : 110,
+    "lastCheckpointVersion" : 6,
+    "lastCrcVersion" : 6,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.checkpointPolicy" : "v2",
+    "delta.checkpointInterval" : "1",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "v2Checkpoint" ]
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Table state that vacuum would check protocol on",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "419-449",
+  "testId" : "pv_014_vacuum_protocol_check"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "ID mode: non-existing field ID returns null",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "1785-1852",
+  "testId" : "cm_id_matching_nonexistent"
+}

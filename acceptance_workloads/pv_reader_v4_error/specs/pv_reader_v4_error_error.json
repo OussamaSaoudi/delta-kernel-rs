@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "pv_reader_v4_error",
+  "error" : {
+    "errorCode" : "DELTA_INVALID_PROTOCOL_VERSION",
+    "errorMessage" : "[EXPRESSION_DECODING_FAILED] Failed to decode a row to a value of the expressions: . SQLSTATE: 42846"
+  }
+}

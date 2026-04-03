@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "err_dv_invalid_storage_type",
+  "error" : {
+    "errorCode" : "DELTA_UNSUPPORTED_DELETION_VECTOR_STORAGE_TYPE",
+    "errorMessage" : "org.apache.spark.SparkException: Exception thrown in awaitResult: org.apache.hadoop.fs.ChecksumException: Checksum error: file:/tmp/spark%dir%prefix-01541f8c-3a96-44b7-afd5-5c3bfb75a7fb/_delta_log/00000000000000000002.json at 1536 exp: -1556103571 got: 255589008"
+  }
+}

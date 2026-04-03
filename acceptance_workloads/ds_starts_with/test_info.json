@@ -1,0 +1,7 @@
+{
+  "testName" : "starts with",
+  "workloadCount" : 6,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "218-234",
+  "testId" : "ds_starts_with"
+}

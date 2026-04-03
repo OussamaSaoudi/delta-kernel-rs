@@ -1,0 +1,2 @@
+{"commitInfo":{"timestamp":1773119580546,"operation":"Manual Update","operationParameters":{},"readVersion":1,"isolationLevel":"WriteSerializable","isBlindAppend":true,"operationMetrics":{},"engineInfo":"Databricks-Runtime/<unknown>","txnId":"f929ea59-15b6-4a43-9597-135172fcf5ce"}}
+{"txn":{"appId":"app-1","version":2}}

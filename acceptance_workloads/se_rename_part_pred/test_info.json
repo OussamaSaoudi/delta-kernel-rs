@@ -1,0 +1,8 @@
+{
+  "testName" : "Partition pruning on renamed partition column",
+  "workloadCount" : 3,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "hasSchemaEvolution" : true,
+  "testId" : "se_rename_part_pred"
+}

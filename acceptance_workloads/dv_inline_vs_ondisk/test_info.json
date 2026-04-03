@@ -1,0 +1,7 @@
+{
+  "testName" : "Both inline and on-disk DVs in same table",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "new coverage",
+  "testId" : "dv_inline_vs_ondisk"
+}

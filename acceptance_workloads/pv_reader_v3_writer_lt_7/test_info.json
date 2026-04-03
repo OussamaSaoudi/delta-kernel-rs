@@ -1,0 +1,7 @@
+{
+  "testName" : "Reader v3 with writer less than 7",
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "protocol spec",
+  "isErrorTest" : true,
+  "testId" : "pv_reader_v3_writer_lt_7"
+}

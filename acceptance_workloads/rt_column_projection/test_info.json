@@ -1,0 +1,7 @@
+{
+  "testName" : "Column subset on RT table",
+  "workloadCount" : 2,
+  "sourceFile" : "RowTrackingSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "rt_column_projection"
+}

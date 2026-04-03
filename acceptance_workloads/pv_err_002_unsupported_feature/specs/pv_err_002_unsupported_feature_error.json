@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "pv_err_002_unsupported_feature",
+  "error" : {
+    "errorCode" : "DELTA_UNSUPPORTED_FEATURES_FOR_READ",
+    "errorMessage" : "[DELTA_UNSUPPORTED_FEATURES_FOR_READ] Unsupported Delta read feature: table \"file:/tmp/spark%dir%prefix-988ddf6a-bf14-49c4-9ddf-301f9c878275\" requires reader table feature(s) that are unsupported by this version of Databricks: NonExistingReaderFeature. Please refer to https://docs.databricks.com/delta/feature-compatibility.html for more information on Delta Lake feature compatibility."
+  }
+}

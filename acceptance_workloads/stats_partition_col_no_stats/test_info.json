@@ -1,0 +1,7 @@
+{
+  "testName" : "Partition column excluded from data statistics",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "stats-edge-cases",
+  "testId" : "stats_partition_col_no_stats"
+}

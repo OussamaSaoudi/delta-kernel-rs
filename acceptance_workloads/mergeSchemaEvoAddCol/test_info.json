@@ -1,0 +1,7 @@
+{
+  "testName" : "Merge adds new column via schema evolution",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-001",
+  "testId" : "mergeSchemaEvoAddCol"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "INSERT new col, existing rows get null",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-010",
+  "testId" : "mergeSchemaEvoInsertWithDefault"
+}

@@ -1,0 +1,8 @@
+{
+  "testName" : "Data skipping after column rename (CM=name)",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "data-skipping-gaps",
+  "hasSchemaEvolution" : true,
+  "testId" : "ds_stats_col_rename"
+}

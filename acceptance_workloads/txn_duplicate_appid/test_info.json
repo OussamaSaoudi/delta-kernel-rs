@@ -1,0 +1,7 @@
+{
+  "testName" : "Two SetTransaction for same appId in separate commits",
+  "sourceFile" : "AppTransactionSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "txn_duplicate_appid",
+  "isTxnTest" : true
+}

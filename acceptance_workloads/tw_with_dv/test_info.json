@@ -1,0 +1,7 @@
+{
+  "testName" : "Type widening with deletion vectors",
+  "workloadCount" : 2,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic type widening + DV test",
+  "testId" : "tw_with_dv"
+}

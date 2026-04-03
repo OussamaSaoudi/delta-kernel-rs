@@ -1,0 +1,8 @@
+{
+  "testName" : "Column mapping mode upgrade from none to name",
+  "workloadCount" : 2,
+  "sourceFile" : "ColumnMappingSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "hasSchemaEvolution" : true,
+  "testId" : "cm_mode_upgrade"
+}

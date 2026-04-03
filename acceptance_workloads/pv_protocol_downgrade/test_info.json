@@ -1,0 +1,7 @@
+{
+  "testName" : "Protocol downgrade - latest protocol wins, table readable",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "protocol spec",
+  "testId" : "pv_protocol_downgrade"
+}

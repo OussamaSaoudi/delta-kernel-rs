@@ -1,0 +1,7 @@
+{
+  "testName" : "Column subset with DV selection vector",
+  "workloadCount" : 2,
+  "sourceFile" : "DeletionVectorsSuiteCapture.scala",
+  "sourceLines" : "feature-interaction",
+  "testId" : "dv_column_projection"
+}

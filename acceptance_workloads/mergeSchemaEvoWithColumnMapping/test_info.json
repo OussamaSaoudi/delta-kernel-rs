@@ -1,0 +1,7 @@
+{
+  "testName" : "Schema evolution with column mapping",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-029",
+  "testId" : "mergeSchemaEvoWithColumnMapping"
+}

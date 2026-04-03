@@ -1,0 +1,8 @@
+{
+  "testName" : "Table after DeltaTable API protocol upgrades",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "199-226",
+  "hasSchemaEvolution" : true,
+  "testId" : "pv_003_upgrade_deltatable_api"
+}

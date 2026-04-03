@@ -1,0 +1,10 @@
+{
+  "type" : "txn",
+  "expected" : {
+    "appId" : "app-with-ts",
+    "txnVersion" : 42,
+    "lastUpdated" : 1709251200000
+  },
+  "name" : "txn_with_last_updated_txn",
+  "description" : "SetTransaction with lastUpdated"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Read table using _last_checkpoint",
+  "workloadCount" : 3,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "synthetic _last_checkpoint test",
+  "testId" : "cp_last_checkpoint"
+}

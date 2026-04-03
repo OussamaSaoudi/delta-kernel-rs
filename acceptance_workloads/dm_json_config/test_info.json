@@ -1,0 +1,7 @@
+{
+  "testName" : "Domain metadata with JSON configuration",
+  "sourceFile" : "DomainMetadataSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dm_json_config",
+  "is_domain_metadata_test" : true
+}

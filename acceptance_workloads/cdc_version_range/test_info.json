@@ -1,0 +1,7 @@
+{
+  "testName" : "Read CDC data with version range",
+  "workloadCount" : 6,
+  "sourceFile" : "DeltaCDCSuite.scala",
+  "sourceLines" : "659-676",
+  "testId" : "cdc_version_range"
+}

@@ -1,0 +1,8 @@
+{
+  "testName" : "Schema evolution across versions",
+  "workloadCount" : 3,
+  "sourceFile" : "EvolvabilitySuite.scala",
+  "sourceLines" : "custom",
+  "hasSchemaEvolution" : true,
+  "testId" : "ev_schema_evolution"
+}

@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "columns" : [ "_metadata.file_path" ],
+  "expected" : {
+    "rowCount" : 693,
+    "fileCount" : 9,
+    "filesSkipped" : 0
+  }
+}

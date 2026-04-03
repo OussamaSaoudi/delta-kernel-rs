@@ -1,0 +1,7 @@
+{
+  "testName" : "Read CDC data from table by path",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaCDCSuite.scala",
+  "sourceLines" : "262-278",
+  "testId" : "cdc_by_path"
+}

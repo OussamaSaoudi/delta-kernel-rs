@@ -1,0 +1,7 @@
+{
+  "testName" : "or statements - two fields",
+  "workloadCount" : 5,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "316-331",
+  "testId" : "ds_or_two_fields"
+}

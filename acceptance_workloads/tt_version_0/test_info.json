@@ -1,0 +1,7 @@
+{
+  "testName" : "Time travel to version 0 (initial commit)",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "synthetic version 0 test",
+  "testId" : "tt_version_0"
+}

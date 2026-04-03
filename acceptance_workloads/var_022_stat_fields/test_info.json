@@ -1,0 +1,7 @@
+{
+  "testName" : "VARIANT_DATA_SKIPPING_STAT_FIELDS property",
+  "workloadCount" : 2,
+  "sourceFile" : "VariantDataSkippingStatsSuite.scala",
+  "sourceLines" : "1067-1095",
+  "testId" : "var_022_stat_fields"
+}

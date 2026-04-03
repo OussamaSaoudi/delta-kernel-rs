@@ -1,0 +1,7 @@
+{
+  "testName" : "Basic single-column string partition",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaPartitionSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dpBasicPartition"
+}

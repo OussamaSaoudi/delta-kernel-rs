@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "id IN (100, 200, 300)",
+  "expected" : {
+    "rowCount" : 0,
+    "fileCount" : 0,
+    "filesSkipped" : 2
+  }
+}

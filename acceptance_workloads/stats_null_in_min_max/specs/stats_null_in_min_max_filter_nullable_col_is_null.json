@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "nullable_col IS NULL",
+  "expected" : {
+    "rowCount" : 3,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

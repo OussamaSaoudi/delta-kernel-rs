@@ -1,0 +1,26 @@
+{
+  "type" : "snapshot",
+  "version" : 1,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors", "timestampNtz" ],
+      "writerFeatures" : [ "deletionVectors", "timestampNtz", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"c1\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c2\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c3\",\"type\":\"float\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c4\",\"type\":\"double\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c5\",\"type\":\"timestamp\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c6\",\"type\":\"timestamp_ntz\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c7\",\"type\":\"date\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c8\",\"type\":\"binary\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c9\",\"type\":\"boolean\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c10\",\"type\":\"decimal(3,2)\",\"nullable\":true,\"metadata\":{}}]}",
+      "createdTime" : 1773116301701,
+      "id" : "ebf709cf-6ef6-4015-b1cc-d331d0208b68",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.dataSkippingStatsColumns" : "c1,c2,c3,c4,c5,c6,c7,c10",
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

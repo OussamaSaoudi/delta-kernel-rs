@@ -1,0 +1,7 @@
+{
+  "testName" : "Boolean column with filter",
+  "workloadCount" : 2,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cr_boolean_filter"
+}

@@ -1,0 +1,41 @@
+{
+  "name" : "rt_conflicting_columns",
+  "description" : "write and read with conflicting columns",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "domainMetadata", "invariants", "rowTracking" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 1000,
+    "numCommits" : 1,
+    "numActions" : 6,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 0,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableRowTracking" : "true",
+    "delta.enableDeletionVectors" : "true",
+    "delta.rowTracking.materializedRowIdColumnName" : "_row-id-col-ba4eaeeb-5968-4e11-8e61-1feb8b4f49fe",
+    "delta.rowTracking.materializedRowCommitVersionColumnName" : "_row-commit-version-col-f3c058d5-fd30-4b3c-8a75-fca7e1740d50"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "rowTracking" ]
+}

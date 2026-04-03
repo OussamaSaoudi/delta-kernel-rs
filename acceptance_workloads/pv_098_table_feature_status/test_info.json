@@ -1,0 +1,7 @@
+{
+  "testName" : "Table with DVs and row tracking features",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "2294-2312",
+  "testId" : "pv_098_table_feature_status"
+}

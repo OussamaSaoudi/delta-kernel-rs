@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "(a = 5 OR a = 7) AND b < 5",
+  "expected" : {
+    "rowCount" : 10,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

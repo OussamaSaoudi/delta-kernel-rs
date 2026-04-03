@@ -1,0 +1,7 @@
+{
+  "testName" : "Variant stats with multiple partitions",
+  "workloadCount" : 2,
+  "sourceFile" : "VariantDataSkippingStatsSuite.scala",
+  "sourceLines" : "388-462",
+  "testId" : "var_007_partitions"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Domain metadata reconstruction: with checkpoint, with CRC",
+  "sourceFile" : "DomainMetadataSuiteCapture.scala",
+  "sourceLines" : "test-13",
+  "testId" : "dm_state_ckpt_crc",
+  "is_domain_metadata_test" : true
+}

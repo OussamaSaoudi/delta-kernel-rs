@@ -1,0 +1,11 @@
+{
+  "type" : "domain_metadata",
+  "version" : 2,
+  "expected" : {
+    "domain" : "domain_v2",
+    "configuration" : "{\"version\":\"v2\"}",
+    "removed" : false
+  },
+  "name" : "dm_version_read_domain_metadata",
+  "description" : "Read domain metadata at specific version"
+}

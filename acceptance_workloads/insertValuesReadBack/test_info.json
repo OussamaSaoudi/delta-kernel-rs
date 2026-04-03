@@ -1,0 +1,7 @@
+{
+  "testName" : "INSERT INTO VALUES",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaInsertIntoSuite.scala",
+  "sourceLines" : "INS-005",
+  "testId" : "insertValuesReadBack"
+}

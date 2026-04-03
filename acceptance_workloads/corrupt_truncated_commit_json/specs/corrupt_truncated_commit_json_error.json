@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "corrupt_truncated_commit_json",
+  "error" : {
+    "errorCode" : "_LEGACY_ERROR_TEMP_DELTA_0011",
+    "errorMessage" : "org.apache.spark.SparkException: Exception thrown in awaitResult: org.apache.hadoop.fs.ChecksumException: Checksum error: file:/tmp/spark%dir%prefix-21719984-fee5-4da0-9181-d060c5714dfe/_delta_log/00000000000000000000.json at 512 exp: -659099042 got: -2006418618"
+  }
+}

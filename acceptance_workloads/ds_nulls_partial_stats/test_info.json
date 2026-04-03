@@ -1,0 +1,7 @@
+{
+  "testName" : "non-nulls only, partial stats",
+  "workloadCount" : 9,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "868-887",
+  "testId" : "ds_nulls_partial_stats"
+}

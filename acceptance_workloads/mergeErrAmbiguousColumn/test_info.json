@@ -1,0 +1,7 @@
+{
+  "testName" : "Table state after failed MERGE with ambiguous column",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-ERR-004",
+  "testId" : "mergeErrAmbiguousColumn"
+}

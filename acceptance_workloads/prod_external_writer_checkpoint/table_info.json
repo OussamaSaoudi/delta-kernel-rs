@@ -1,0 +1,38 @@
+{
+  "name" : "prod_external_writer_checkpoint",
+  "description" : "Checkpoint written by external tool",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 22,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 11459,
+    "numCommits" : 0,
+    "numActions" : 47,
+    "lastCheckpointVersion" : 10,
+    "lastCrcVersion" : 10,
+    "numParallelCheckpointFiles" : 1
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "production", "edgeCase" ]
+}

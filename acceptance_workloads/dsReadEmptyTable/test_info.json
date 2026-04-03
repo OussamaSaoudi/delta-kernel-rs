@@ -1,0 +1,7 @@
+{
+  "testName" : "Error reading from path with no delta table",
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "dsReadEmptyTable"
+}

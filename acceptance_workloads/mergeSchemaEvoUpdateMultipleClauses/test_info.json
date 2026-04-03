@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple WHEN MATCHED clauses with schema evolution",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-014",
+  "testId" : "mergeSchemaEvoUpdateMultipleClauses"
+}

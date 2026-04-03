@@ -1,0 +1,7 @@
+{
+  "testName" : "Checkpoint with struct, array, and map columns",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "synthetic complex types checkpoint test",
+  "testId" : "ckp_struct_array_map"
+}

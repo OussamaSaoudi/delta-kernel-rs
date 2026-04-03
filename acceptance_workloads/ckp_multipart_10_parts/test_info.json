@@ -1,0 +1,7 @@
+{
+  "testName" : "Multi-part checkpoint with 10+ parts",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "synthetic multi-part 10+ parts test",
+  "testId" : "ckp_multipart_10_parts"
+}

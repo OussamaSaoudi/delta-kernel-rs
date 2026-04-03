@@ -1,0 +1,7 @@
+{
+  "testName" : "Empty _delta_log directory",
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "corrupt-table-gaps",
+  "isErrorTest" : true,
+  "testId" : "ct_empty_delta_log"
+}

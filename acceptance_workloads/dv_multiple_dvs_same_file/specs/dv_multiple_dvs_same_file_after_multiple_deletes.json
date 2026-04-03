@@ -1,0 +1,8 @@
+{
+  "type" : "read",
+  "expected" : {
+    "rowCount" : 7,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

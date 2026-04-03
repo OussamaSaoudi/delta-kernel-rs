@@ -1,0 +1,7 @@
+{
+  "testName" : "Error: path exists but _delta_log is missing",
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "dsReadMissingDeltaLog"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Error reading from non-existent delta table at path with spaces",
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "dsReadPathWithSpaces"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Struct with all-NULL fields",
+  "workloadCount" : 1,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cr_struct_all_null"
+}

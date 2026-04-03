@@ -1,0 +1,7 @@
+{
+  "testName" : "Parquet file referenced in log but deleted",
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "corrupt-table-gaps",
+  "isErrorTest" : true,
+  "testId" : "ct_missing_data_file"
+}

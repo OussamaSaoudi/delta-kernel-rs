@@ -1,0 +1,7 @@
+{
+  "testName" : "Table with automatically-enabled feature (generated columns)",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "1448-1466",
+  "testId" : "pv_040_create_auto_enabled_feature"
+}

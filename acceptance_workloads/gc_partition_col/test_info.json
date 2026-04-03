@@ -1,0 +1,7 @@
+{
+  "testName" : "Generated partition column with filter",
+  "workloadCount" : 3,
+  "sourceFile" : "GeneratedColumnSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "gc_partition_col"
+}

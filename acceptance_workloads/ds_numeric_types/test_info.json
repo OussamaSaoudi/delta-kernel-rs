@@ -1,0 +1,7 @@
+{
+  "testName" : "Numeric type comparisons",
+  "workloadCount" : 6,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "numeric tests",
+  "testId" : "ds_numeric_types"
+}

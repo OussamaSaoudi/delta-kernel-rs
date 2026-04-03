@@ -1,0 +1,7 @@
+{
+  "testName" : "Drop and re-add column with different type",
+  "workloadCount" : 1,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "se_drop_and_readd_same_name"
+}

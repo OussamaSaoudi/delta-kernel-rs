@@ -1,0 +1,43 @@
+{
+  "name" : "dsReadByteShortType",
+  "description" : "Read table with byte and short integer types",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "bval",
+      "type" : "byte",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "sval",
+      "type" : "short",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 1,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 741,
+    "numCommits" : 1,
+    "numActions" : 4,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 0,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "types" ]
+}

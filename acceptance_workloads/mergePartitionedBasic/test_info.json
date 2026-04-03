@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE on partitioned table",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-016",
+  "testId" : "mergePartitionedBasic"
+}

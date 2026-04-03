@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "a >= 2 or b like '2016-08-%'",
+  "expected" : {
+    "rowCount" : 1,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

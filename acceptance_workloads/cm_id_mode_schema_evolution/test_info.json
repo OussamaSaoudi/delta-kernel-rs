@@ -1,0 +1,7 @@
+{
+  "testName" : "Add column in id mode",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic id mode schema evolution test",
+  "testId" : "cm_id_mode_schema_evolution"
+}

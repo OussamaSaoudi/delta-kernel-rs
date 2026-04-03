@@ -1,0 +1,7 @@
+{
+  "testName" : "Read table with classic (single-file) checkpoint",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "synthetic checkpoint test",
+  "testId" : "cp_classic_checkpoint"
+}

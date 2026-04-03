@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "time_col > TIME '12:00:00'",
+  "expected" : {
+    "rowCount" : 3,
+    "fileCount" : 1,
+    "filesSkipped" : 1
+  }
+}

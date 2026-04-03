@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with only INSERT clause",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-001",
+  "testId" : "mergeBasicInsert"
+}

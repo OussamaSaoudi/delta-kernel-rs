@@ -1,0 +1,7 @@
+{
+  "testName" : "Project array/map types with column mapping",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic complex projection test",
+  "testId" : "cm_projection_complex_types"
+}

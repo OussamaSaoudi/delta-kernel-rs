@@ -1,0 +1,7 @@
+{
+  "testName" : "V2 checkpoint with JSON format",
+  "workloadCount" : 1,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "145-158",
+  "testId" : "cp_v2_json"
+}

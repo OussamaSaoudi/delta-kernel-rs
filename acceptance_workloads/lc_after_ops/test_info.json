@@ -1,0 +1,7 @@
+{
+  "testName" : "Last checkpoint after table operations",
+  "workloadCount" : 1,
+  "sourceFile" : "LastCheckpointInfoSuite.scala",
+  "sourceLines" : "custom",
+  "testId" : "lc_after_ops"
+}

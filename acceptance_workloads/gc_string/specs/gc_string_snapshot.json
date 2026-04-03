@@ -1,0 +1,25 @@
+{
+  "type" : "snapshot",
+  "version" : 1,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors" ],
+      "writerFeatures" : [ "deletionVectors", "generatedColumns", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"email\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"domain\",\"type\":\"string\",\"nullable\":true,\"metadata\":{\"delta.generationExpression\":\"SUBSTRING_INDEX(email, '@', -1)\"}},{\"name\":\"name_part\",\"type\":\"string\",\"nullable\":true,\"metadata\":{\"delta.generationExpression\":\"SUBSTRING_INDEX(email, '@', 1)\"}}]}",
+      "createdTime" : 1773117171039,
+      "id" : "961385d8-7e01-4279-9f9e-41af2ba9046d",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

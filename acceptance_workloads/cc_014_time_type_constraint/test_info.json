@@ -1,0 +1,7 @@
+{
+  "testName" : "CHECK constraints with TIME type columns",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "1053-1082",
+  "testId" : "cc_014_time_type_constraint"
+}

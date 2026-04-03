@@ -1,0 +1,7 @@
+{
+  "testName" : "Read CDC data with MERGE operations",
+  "workloadCount" : 6,
+  "sourceFile" : "DeltaCDCSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cdc_merge"
+}

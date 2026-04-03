@@ -1,0 +1,8 @@
+{
+  "testName" : "Enable ICT on existing table",
+  "workloadCount" : 3,
+  "sourceFile" : "InCommitTimestampSuite.scala",
+  "sourceLines" : "123-154",
+  "hasSchemaEvolution" : true,
+  "testId" : "ict_enable_later"
+}

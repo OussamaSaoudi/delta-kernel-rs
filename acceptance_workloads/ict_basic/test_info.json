@@ -1,0 +1,7 @@
+{
+  "testName" : "Basic ICT read",
+  "workloadCount" : 1,
+  "sourceFile" : "InCommitTimestampSuite.scala",
+  "sourceLines" : "112-120",
+  "testId" : "ict_basic"
+}

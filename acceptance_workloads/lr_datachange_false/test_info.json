@@ -1,0 +1,7 @@
+{
+  "testName" : "Log replay - dataChange=false from compaction",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-19",
+  "testId" : "lr_datachange_false"
+}

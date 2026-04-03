@@ -1,0 +1,7 @@
+{
+  "testName" : "Partition column with NULL values",
+  "workloadCount" : 2,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cr_partition_null"
+}

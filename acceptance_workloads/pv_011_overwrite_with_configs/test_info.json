@@ -1,0 +1,7 @@
+{
+  "testName" : "Table after overwrite with additional configs",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "365-381",
+  "testId" : "pv_011_overwrite_with_configs"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "BETWEEN predicate for range queries",
+  "workloadCount" : 5,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "ds_between"
+}

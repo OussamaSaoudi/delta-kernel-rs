@@ -1,0 +1,7 @@
+{
+  "testName" : "Time travel after VACUUM removes old files",
+  "sourceFile" : "TimeTravelSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "isErrorTest" : true,
+  "testId" : "tt_after_vacuum"
+}

@@ -1,0 +1,81 @@
+{
+  "name" : "cm_nested_rename_3_levels",
+  "description" : "Rename deeply nested struct field",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-6fdbeb12-9158-44a7-9c30-86e942f1d65d"
+      }
+    }, {
+      "name" : "info",
+      "type" : {
+        "type" : "struct",
+        "fields" : [ {
+          "name" : "addr",
+          "type" : {
+            "type" : "struct",
+            "fields" : [ {
+              "name" : "town",
+              "type" : "string",
+              "nullable" : true,
+              "metadata" : {
+                "delta.columnMapping.id" : 4,
+                "delta.columnMapping.physicalName" : "col-1e6b2502-f9c3-4898-b8b4-4f1ad3a20184"
+              }
+            }, {
+              "name" : "zip",
+              "type" : "string",
+              "nullable" : true,
+              "metadata" : {
+                "delta.columnMapping.id" : 5,
+                "delta.columnMapping.physicalName" : "col-48cf1134-390a-4829-acc7-f4122f84d370"
+              }
+            } ]
+          },
+          "nullable" : true,
+          "metadata" : {
+            "delta.columnMapping.id" : 3,
+            "delta.columnMapping.physicalName" : "col-dcccf9fa-f982-4217-8d74-576572ba5183"
+          }
+        } ]
+      },
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-61951b33-25a1-47ea-8cd6-e4edf9ddf15a"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "columnMapping", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 4933,
+    "numCommits" : 4,
+    "numActions" : 9,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 3,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.columnMapping.mode" : "name",
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.maxColumnId" : "5"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "columnMapping" ]
+}

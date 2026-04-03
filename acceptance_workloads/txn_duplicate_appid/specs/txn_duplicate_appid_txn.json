@@ -1,0 +1,10 @@
+{
+  "type" : "txn",
+  "expected" : {
+    "appId" : "app-dup",
+    "txnVersion" : 5,
+    "lastUpdated" : 2
+  },
+  "name" : "txn_duplicate_appid_txn",
+  "description" : "Two SetTransaction for same appId in separate commits"
+}

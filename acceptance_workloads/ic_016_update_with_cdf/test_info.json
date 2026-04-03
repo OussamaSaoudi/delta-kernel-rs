@@ -1,0 +1,8 @@
+{
+  "testName" : "UPDATE with CDF enabled",
+  "workloadCount" : 3,
+  "sourceFile" : "IdentityColumnDMLSuite.scala",
+  "sourceLines" : "627-658",
+  "hasSchemaEvolution" : true,
+  "testId" : "ic_016_update_with_cdf"
+}

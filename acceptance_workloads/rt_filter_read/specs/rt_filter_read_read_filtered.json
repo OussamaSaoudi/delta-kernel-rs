@@ -1,0 +1,10 @@
+{
+  "type" : "read",
+  "version" : 0,
+  "predicate" : "test_data < 50",
+  "expected" : {
+    "rowCount" : 50,
+    "fileCount" : 1,
+    "filesSkipped" : 1
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Table with only checkpoint, no JSON commits after",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "log-replay-gaps",
+  "testId" : "cp_checkpoint_only_table"
+}

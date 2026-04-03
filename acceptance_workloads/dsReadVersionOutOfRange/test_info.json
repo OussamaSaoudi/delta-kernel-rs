@@ -1,0 +1,7 @@
+{
+  "testName" : "Error: time travel to version beyond latest",
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "dsReadVersionOutOfRange"
+}

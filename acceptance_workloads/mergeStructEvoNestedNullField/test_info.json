@@ -1,0 +1,7 @@
+{
+  "testName" : "Nested struct gets new nullable field via merge",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoStructEvolutionNullnessSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "mergeStructEvoNestedNullField"
+}

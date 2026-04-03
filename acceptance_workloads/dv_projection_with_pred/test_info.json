@@ -1,0 +1,7 @@
+{
+  "testName" : "Predicate + projection + DV (triple combo)",
+  "workloadCount" : 2,
+  "sourceFile" : "DeletionVectorsSuiteCapture.scala",
+  "sourceLines" : "feature-interaction",
+  "testId" : "dv_projection_with_pred"
+}

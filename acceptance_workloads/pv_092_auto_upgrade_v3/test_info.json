@@ -1,0 +1,8 @@
+{
+  "testName" : "Table after auto upgrade to version 3 (check constraint)",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "2200-2212",
+  "hasSchemaEvolution" : true,
+  "testId" : "pv_092_auto_upgrade_v3"
+}

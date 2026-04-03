@@ -1,0 +1,8 @@
+{
+  "testName" : "Cross-physical-type decimal widening (INT32->INT64->FIXED)",
+  "workloadCount" : 3,
+  "sourceFile" : "TypeWideningTestCasesShims.scala",
+  "sourceLines" : "69-79",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_cross_physical_decimal"
+}

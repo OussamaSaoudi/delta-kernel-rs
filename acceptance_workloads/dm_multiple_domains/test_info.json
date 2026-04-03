@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple domain metadata entries - testDomain1",
+  "sourceFile" : "DomainMetadataSuite.scala",
+  "sourceLines" : "69-120",
+  "testId" : "dm_multiple_domains",
+  "is_domain_metadata_test" : true
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Commit with two Protocol actions",
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "corrupt-table-gaps",
+  "isErrorTest" : true,
+  "testId" : "ct_duplicate_protocol"
+}

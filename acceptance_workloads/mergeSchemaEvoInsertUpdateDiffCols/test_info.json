@@ -1,0 +1,7 @@
+{
+  "testName" : "INSERT adds col A, UPDATE adds col B",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-016",
+  "testId" : "mergeSchemaEvoInsertUpdateDiffCols"
+}

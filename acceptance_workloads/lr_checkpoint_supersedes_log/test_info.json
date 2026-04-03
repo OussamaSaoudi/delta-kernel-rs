@@ -1,0 +1,7 @@
+{
+  "testName" : "Log replay - checkpoint supersedes log",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-16",
+  "testId" : "lr_checkpoint_supersedes_log"
+}

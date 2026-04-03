@@ -1,0 +1,7 @@
+{
+  "testName" : "Log replay - add then remove",
+  "workloadCount" : 3,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-15",
+  "testId" : "lr_add_then_remove"
+}

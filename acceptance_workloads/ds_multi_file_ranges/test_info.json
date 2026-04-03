@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple files with different ranges",
+  "workloadCount" : 8,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "synthetic multi-file test",
+  "testId" : "ds_multi_file_ranges"
+}

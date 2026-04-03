@@ -1,0 +1,7 @@
+{
+  "testName" : "Variant with SQL NULL top-level value",
+  "workloadCount" : 3,
+  "sourceFile" : "VariantSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "var_null_top_level"
+}

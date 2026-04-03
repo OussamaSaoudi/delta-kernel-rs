@@ -1,0 +1,8 @@
+{
+  "testName" : "Array element type widening (array<int> -> array<long>)",
+  "workloadCount" : 1,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic array element test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_array_element"
+}

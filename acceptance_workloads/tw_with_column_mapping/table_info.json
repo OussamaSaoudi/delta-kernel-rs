@@ -1,0 +1,56 @@
+{
+  "name" : "tw_with_column_mapping",
+  "description" : "Column mapping + type widening combined",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-082e7412-14b6-441c-9473-2a153f035bd2"
+      }
+    }, {
+      "name" : "score",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : {
+        "delta.typeChanges" : [ {
+          "toType" : "long",
+          "fromType" : "integer"
+        } ],
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-04d6defc-2f71-463b-b256-f7f4d0329e93"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors", "typeWidening" ],
+    "writerFeatures" : [ "appendOnly", "columnMapping", "deletionVectors", "invariants", "typeWidening" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 2442,
+    "numCommits" : 5,
+    "numActions" : 11,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 4,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableDeletionVectors" : "true",
+    "delta.enableTypeWidening" : "true",
+    "delta.columnMapping.mode" : "name",
+    "delta.columnMapping.maxColumnId" : "2"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "typeWidening", "columnMapping" ]
+}

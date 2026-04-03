@@ -1,0 +1,7 @@
+{
+  "testName" : "State reconstruction without Metadata action",
+  "sourceFile" : "synthetic",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "log_err_missing_metadata"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Read identity with default configuration",
+  "workloadCount" : 2,
+  "sourceFile" : "IdentityColumnSuite.scala",
+  "sourceLines" : "150-166",
+  "testId" : "ic_002_default_config"
+}

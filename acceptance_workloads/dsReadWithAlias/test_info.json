@@ -1,0 +1,7 @@
+{
+  "testName" : "Read using DataFrame alias",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dsReadWithAlias"
+}

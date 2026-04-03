@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "c7 = '2003-02-02'",
+  "expected" : {
+    "rowCount" : 0,
+    "fileCount" : 0,
+    "filesSkipped" : 1
+  }
+}

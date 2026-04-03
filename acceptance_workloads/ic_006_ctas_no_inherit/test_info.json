@@ -1,0 +1,7 @@
+{
+  "testName" : "CTAS does not inherit identity column",
+  "workloadCount" : 2,
+  "sourceFile" : "IdentityColumnSuite.scala",
+  "sourceLines" : "494-524",
+  "testId" : "ic_006_ctas_no_inherit"
+}

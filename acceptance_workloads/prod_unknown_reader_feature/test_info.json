@@ -1,0 +1,7 @@
+{
+  "testName" : "Protocol with unknown reader feature",
+  "sourceFile" : "ProductionEdgeCaseSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "prod_unknown_reader_feature"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "CTAS with generated columns",
+  "workloadCount" : 2,
+  "sourceFile" : "GeneratedColumnSuite.scala",
+  "sourceLines" : "various",
+  "testId" : "gc_ctas"
+}

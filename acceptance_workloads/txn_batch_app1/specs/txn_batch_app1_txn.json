@@ -1,0 +1,10 @@
+{
+  "type" : "txn",
+  "expected" : {
+    "appId" : "app-1",
+    "txnVersion" : 100,
+    "lastUpdated" : 1
+  },
+  "name" : "txn_batch_app1_txn",
+  "description" : "Multiple SetTransactions in single commit - app-1"
+}

@@ -1,0 +1,10 @@
+{
+  "type" : "txn",
+  "expected" : {
+    "appId" : "app-checkpoint",
+    "txnVersion" : 20,
+    "lastUpdated" : 200
+  },
+  "name" : "txn_after_checkpoint_txn",
+  "description" : "SetTransaction survives checkpoint"
+}

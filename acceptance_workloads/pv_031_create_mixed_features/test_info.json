@@ -1,0 +1,7 @@
+{
+  "testName" : "Table with features from both session and table properties",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "1054-1212",
+  "testId" : "pv_031_create_mixed_features"
+}

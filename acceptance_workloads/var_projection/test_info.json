@@ -1,0 +1,7 @@
+{
+  "testName" : "Column projection on variant table",
+  "workloadCount" : 2,
+  "sourceFile" : "VariantSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "var_projection"
+}

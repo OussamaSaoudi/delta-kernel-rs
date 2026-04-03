@@ -1,0 +1,7 @@
+{
+  "testName" : "Partition value encoding: spaces, unicode, special chars",
+  "workloadCount" : 4,
+  "sourceFile" : "PartitionSuiteCapture.scala",
+  "sourceLines" : "protocol-spec",
+  "testId" : "pve_special_chars_partition"
+}

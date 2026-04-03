@@ -1,0 +1,7 @@
+{
+  "testName" : "Generated column with DATE_FORMAT expression",
+  "workloadCount" : 2,
+  "sourceFile" : "GeneratedColumnSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "gc_date_format_expr"
+}

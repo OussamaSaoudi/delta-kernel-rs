@@ -1,0 +1,7 @@
+{
+  "testName" : "Low shuffle with INSERT+UPDATE+DELETE",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoLowShuffleSuite.scala",
+  "sourceLines" : "P2-LS-003",
+  "testId" : "mergeLowShuffleMultiClause"
+}

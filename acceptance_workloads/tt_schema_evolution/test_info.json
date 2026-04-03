@@ -1,0 +1,8 @@
+{
+  "testName" : "time travel with schema changes - should instantiate old schema",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "776-791",
+  "hasSchemaEvolution" : true,
+  "testId" : "tt_schema_evolution"
+}

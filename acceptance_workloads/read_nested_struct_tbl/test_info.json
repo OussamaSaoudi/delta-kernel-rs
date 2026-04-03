@@ -1,0 +1,5 @@
+{
+  "test_id" : "read_nested_struct_tbl",
+  "test_name" : "read_nested_struct — tbl",
+  "workload_count" : 2
+}

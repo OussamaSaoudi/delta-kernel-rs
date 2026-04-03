@@ -1,0 +1,7 @@
+{
+  "testName" : "Multiple partition columns",
+  "workloadCount" : 3,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cr_multi_partition"
+}

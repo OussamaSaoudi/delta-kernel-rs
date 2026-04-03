@@ -1,0 +1,7 @@
+{
+  "testName" : "Identity metadata not exposed to readers",
+  "workloadCount" : 3,
+  "sourceFile" : "IdentityColumnSuite.scala",
+  "sourceLines" : "317-387",
+  "testId" : "ic_005_identity_not_exposed"
+}

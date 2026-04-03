@@ -1,0 +1,7 @@
+{
+  "testName" : "Merge adds field to existing struct",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSchemaEvolutionSuite.scala",
+  "sourceLines" : "SE-017",
+  "testId" : "mergeSchemaEvoStructAddField"
+}

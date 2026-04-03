@@ -1,0 +1,7 @@
+{
+  "testName" : "IcebergCompatV2 with partition columns",
+  "workloadCount" : 2,
+  "sourceFile" : "IcebergCompatSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "ice_partition_evolution"
+}

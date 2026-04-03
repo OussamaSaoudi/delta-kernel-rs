@@ -1,0 +1,7 @@
+{
+  "testName" : "Map with struct value",
+  "workloadCount" : 1,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cr_map_complex_value"
+}

@@ -1,0 +1,8 @@
+{
+  "testName" : "Read after int to long widening",
+  "workloadCount" : 3,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic int->long test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_int_to_long"
+}

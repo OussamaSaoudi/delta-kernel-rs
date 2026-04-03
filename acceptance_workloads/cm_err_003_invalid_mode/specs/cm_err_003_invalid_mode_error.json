@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "cm_err_003_invalid_mode",
+  "error" : {
+    "errorCode" : "DELTA_UNSUPPORTED_COLUMN_MAPPING_MODE",
+    "errorMessage" : "org.apache.spark.SparkException: Exception thrown in awaitResult: org.apache.hadoop.fs.ChecksumException: Checksum error: file:/tmp/spark%dir%prefix-f8587bf2-92f7-4fb3-b97b-5fd8ebd20fbe/_delta_log/00000000000000000000.json at 512 exp: 360651539 got: 1790992071"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "long_val < 50000000000",
+  "expected" : {
+    "rowCount" : 50,
+    "fileCount" : 1,
+    "filesSkipped" : 0
+  }
+}

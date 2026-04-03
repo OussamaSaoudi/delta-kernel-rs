@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "_metadata.default_row_commit_version > 1",
+  "name" : "ds_err_001_field_not_found",
+  "error" : {
+    "errorCode" : "FIELD_NOT_FOUND",
+    "errorMessage" : "[FIELD_NOT_FOUND] No such struct field `default_row_commit_version` in `file_path`, `file_name`, `file_size`, `file_block_start`, `file_block_length`, `file_modification_time`, `row_index`. SQLSTATE: 42704; line 1 pos 0"
+  }
+}

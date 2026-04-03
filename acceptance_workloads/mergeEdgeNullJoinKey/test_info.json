@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with null values in join key",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSuiteBaseEdge.scala",
+  "sourceLines" : "P2-010",
+  "testId" : "mergeEdgeNullJoinKey"
+}

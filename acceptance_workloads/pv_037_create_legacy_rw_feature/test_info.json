@@ -1,0 +1,7 @@
+{
+  "testName" : "Table with legacy reader-writer feature (columnMapping)",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "1348-1362",
+  "testId" : "pv_037_create_legacy_rw_feature"
+}

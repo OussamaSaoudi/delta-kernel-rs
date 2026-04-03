@@ -1,0 +1,7 @@
+{
+  "testName" : "DELETE with DVs - existing table already has DVs",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "340-371",
+  "testId" : "DV-007"
+}

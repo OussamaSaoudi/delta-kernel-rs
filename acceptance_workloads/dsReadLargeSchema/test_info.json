@@ -1,0 +1,7 @@
+{
+  "testName" : "Read table with many columns (25)",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dsReadLargeSchema"
+}

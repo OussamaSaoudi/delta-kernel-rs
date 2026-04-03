@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "date_add(dt, 1) > '2024-07-01'",
+  "expected" : {
+    "rowCount" : 0,
+    "fileCount" : 2,
+    "filesSkipped" : 0
+  }
+}

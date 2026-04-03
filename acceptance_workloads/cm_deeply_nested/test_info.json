@@ -1,0 +1,7 @@
+{
+  "testName" : "3+ level nested schema with CM",
+  "workloadCount" : 2,
+  "sourceFile" : "ColumnMappingSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cm_deeply_nested"
+}

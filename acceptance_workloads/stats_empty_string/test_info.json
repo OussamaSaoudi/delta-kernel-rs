@@ -1,0 +1,7 @@
+{
+  "testName" : "Add action with stats as empty string",
+  "workloadCount" : 2,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "stats-edge-cases",
+  "testId" : "stats_empty_string"
+}

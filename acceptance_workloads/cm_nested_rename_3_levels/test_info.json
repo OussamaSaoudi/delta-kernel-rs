@@ -1,0 +1,7 @@
+{
+  "testName" : "Rename deeply nested struct field",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic nested rename test",
+  "testId" : "cm_nested_rename_3_levels"
+}

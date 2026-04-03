@@ -1,0 +1,7 @@
+{
+  "testName" : "Timestamp before retention window error",
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "999-1013",
+  "isErrorTest" : true,
+  "testId" : "tt_timestamp_before_retention_error"
+}

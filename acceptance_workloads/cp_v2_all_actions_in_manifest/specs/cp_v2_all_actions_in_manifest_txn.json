@@ -1,0 +1,9 @@
+{
+  "type" : "txn",
+  "expected" : {
+    "appId" : "app-1",
+    "txnVersion" : 2
+  },
+  "name" : "cp_v2_all_actions_in_manifest_txn",
+  "description" : "SetTransaction(app-1, 2)"
+}

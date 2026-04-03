@@ -1,0 +1,7 @@
+{
+  "testName" : "Negative interval values",
+  "workloadCount" : 1,
+  "sourceFile" : "IntervalTypeSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "intv_004_interval_negative"
+}

@@ -1,0 +1,3 @@
+{"commitInfo":{"timestamp":1773114681494,"operation":"WRITE","operationParameters":{"mode":"Append","statsOnLoad":false},"readVersion":0,"isolationLevel":"WriteSerializable","isBlindAppend":true,"operationMetrics":{},"tags":{"restoresDeletedRows":"false"},"engineInfo":"Databricks-Runtime/<unknown>","txnId":"d9425c62-50c0-45ee-a6ac-2fab052e261f"}}
+{"txn":{"appId":"app-checkpoint","version":10,"lastUpdated":100}}
+{"add":{"path":"file-1d014f7e-f697-4098-bcb3-a902e8d68b40","partitionValues":{},"size":1,"modificationTime":1,"dataChange":true,"stats":"{\"numRecords\": 1}"}}

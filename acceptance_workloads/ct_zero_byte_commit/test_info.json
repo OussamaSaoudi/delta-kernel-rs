@@ -1,0 +1,7 @@
+{
+  "testName" : "Zero-byte commit 0 file (graceful degradation)",
+  "workloadCount" : 1,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "corrupt-table-gaps",
+  "testId" : "ct_zero_byte_commit"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Non-objects in variant",
+  "workloadCount" : 2,
+  "sourceFile" : "VariantDataSkippingStatsSuite.scala",
+  "sourceLines" : "309-319",
+  "testId" : "var_004_non_objects"
+}

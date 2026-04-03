@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "ct_duplicate_metadata",
+  "error" : {
+    "errorCode" : "DELTA_MULTIPLE_METADATA_ACTIONS",
+    "errorMessage" : "org.apache.spark.SparkException: Exception thrown in awaitResult: org.apache.hadoop.fs.ChecksumException: Checksum error: file:/tmp/spark%dir%prefix-5b56e4ca-81ef-4740-8076-9b8e56e0dc35/_delta_log/00000000000000000000.json at 1536 exp: 774942276 got: -423405997"
+  }
+}

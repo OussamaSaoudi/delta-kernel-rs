@@ -1,0 +1,7 @@
+{
+  "testName" : "Basic merge on DV-enabled table with INSERT+UPDATE",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoLowShuffleDvSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "mergeDvBasicInsertUpdate"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Data skipping with string values",
+  "workloadCount" : 2,
+  "sourceFile" : "VariantDataSkippingStatsSuite.scala",
+  "sourceLines" : "2150-2223",
+  "testId" : "var_015_string_skipping"
+}

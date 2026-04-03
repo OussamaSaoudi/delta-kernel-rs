@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "ct_invalid_json",
+  "error" : {
+    "errorCode" : "DELTA_INVALID_JSON_COMMIT_FILE",
+    "errorMessage" : "org.apache.spark.SparkException: Exception thrown in awaitResult: org.apache.hadoop.fs.ChecksumException: Checksum error: file:/tmp/spark%dir%prefix-e2f6f084-1798-41ed-aaa1-1c241bffdb9e/_delta_log/00000000000000000000.json at 0 exp: 609343703 got: 66904774"
+  }
+}

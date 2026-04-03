@@ -1,0 +1,7 @@
+{
+  "testName" : "_last_checkpoint points to non-existent version",
+  "workloadCount" : 2,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "test-7",
+  "testId" : "corrupt_wrong_last_checkpoint"
+}

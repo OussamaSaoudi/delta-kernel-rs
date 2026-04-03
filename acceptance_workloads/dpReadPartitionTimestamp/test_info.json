@@ -1,0 +1,7 @@
+{
+  "testName" : "Read table partitioned by timestamp column",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaPartitionSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dpReadPartitionTimestamp"
+}

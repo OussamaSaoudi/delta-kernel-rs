@@ -1,0 +1,7 @@
+{
+  "testName" : "CREATE TABLE with explicit protocol ignoring session defaults",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "862-898",
+  "testId" : "pv_024_create_ignore_defaults"
+}

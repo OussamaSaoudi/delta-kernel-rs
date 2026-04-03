@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with NOT MATCHED BY SOURCE update",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeReadBackSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "mrb_not_matched_by_source_update"
+}

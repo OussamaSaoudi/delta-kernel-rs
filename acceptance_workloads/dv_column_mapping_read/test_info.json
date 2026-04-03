@@ -1,0 +1,7 @@
+{
+  "testName" : "DV + column mapping (name mode) combined",
+  "workloadCount" : 3,
+  "sourceFile" : "DeletionVectorsSuiteCapture.scala",
+  "sourceLines" : "feature-interaction",
+  "testId" : "dv_column_mapping_read"
+}

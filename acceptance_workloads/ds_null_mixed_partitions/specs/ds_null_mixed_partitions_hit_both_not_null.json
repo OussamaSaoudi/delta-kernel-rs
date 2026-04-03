@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "category IS NOT NULL AND region IS NOT NULL",
+  "expected" : {
+    "rowCount" : 1,
+    "fileCount" : 1,
+    "filesSkipped" : 2
+  }
+}

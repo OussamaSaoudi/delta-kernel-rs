@@ -1,0 +1,7 @@
+{
+  "testName" : "Partition value encoding: timestamp with microseconds",
+  "workloadCount" : 3,
+  "sourceFile" : "PartitionSuiteCapture.scala",
+  "sourceLines" : "protocol-spec",
+  "testId" : "pve_timestamp_partition"
+}

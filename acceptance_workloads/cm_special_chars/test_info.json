@@ -1,0 +1,7 @@
+{
+  "testName" : "Column names with spaces, dots, backticks",
+  "workloadCount" : 1,
+  "sourceFile" : "ColumnMappingSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cm_special_chars"
+}

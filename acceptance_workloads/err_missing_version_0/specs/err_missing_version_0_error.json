@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "err_missing_version_0",
+  "error" : {
+    "errorCode" : "DELTA_MISSING_DELTA_TABLE",
+    "errorMessage" : "[DELTA_TRUNCATED_TRANSACTION_LOG] file:/tmp/spark%dir%prefix-8fc01e08-a3bd-4805-8efd-fefa42bc7c61/_delta_log/00000000000000000000.json: Unable to reconstruct state at version 1 as the transaction log has been truncated due to manual deletion or the log retention policy (delta.logRetentionDuration=30 days) and checkpoint retention policy (delta.checkpointRetentionDuration=2 days)."
+  }
+}

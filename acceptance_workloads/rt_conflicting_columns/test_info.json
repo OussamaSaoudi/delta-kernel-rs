@@ -1,0 +1,7 @@
+{
+  "testName" : "write and read with conflicting columns",
+  "workloadCount" : 1,
+  "sourceFile" : "RowTrackingReadWriteSuite.scala",
+  "sourceLines" : "349-379",
+  "testId" : "rt_conflicting_columns"
+}

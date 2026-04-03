@@ -1,0 +1,7 @@
+{
+  "testName" : "Domain metadata survives checkpoint reconstruction",
+  "sourceFile" : "DomainMetadataSuite.scala",
+  "sourceLines" : "510-512",
+  "testId" : "dm_with_checkpoint",
+  "is_domain_metadata_test" : true
+}

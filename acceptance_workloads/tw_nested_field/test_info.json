@@ -1,0 +1,8 @@
+{
+  "testName" : "Nested field type widening (struct.count: int -> long)",
+  "workloadCount" : 2,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic nested field test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_nested_field"
+}

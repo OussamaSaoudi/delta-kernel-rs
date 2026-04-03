@@ -1,0 +1,8 @@
+{
+  "testName" : "Full widening chain: byte -> short -> int -> long",
+  "workloadCount" : 4,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic full numeric chain test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_full_numeric_chain"
+}

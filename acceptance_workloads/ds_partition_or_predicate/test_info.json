@@ -1,0 +1,7 @@
+{
+  "testName" : "OR predicate on partition column",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingSuiteCapture.scala",
+  "sourceLines" : "data-skipping-gaps",
+  "testId" : "ds_partition_or_predicate"
+}

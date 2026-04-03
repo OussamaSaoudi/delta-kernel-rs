@@ -1,0 +1,7 @@
+{
+  "testName" : "Date boundary values",
+  "workloadCount" : 1,
+  "sourceFile" : "CoreReadsSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "cr_date_boundaries"
+}

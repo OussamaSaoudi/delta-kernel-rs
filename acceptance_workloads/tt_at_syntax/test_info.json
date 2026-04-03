@@ -1,0 +1,7 @@
+{
+  "testName" : "don't time travel a valid delta path with @ syntax",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "701-717",
+  "testId" : "tt_at_syntax"
+}

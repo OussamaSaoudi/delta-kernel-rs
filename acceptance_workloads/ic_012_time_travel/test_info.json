@@ -1,0 +1,8 @@
+{
+  "testName" : "Time travel with identity columns",
+  "workloadCount" : 3,
+  "sourceFile" : "IdentityColumnSuite.scala",
+  "sourceLines" : "multiple tests",
+  "hasSchemaEvolution" : true,
+  "testId" : "ic_012_time_travel"
+}

@@ -1,0 +1,8 @@
+{
+  "testName" : "Table after writer feature removal (appendOnly disabled)",
+  "workloadCount" : 2,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "2735-2746",
+  "hasSchemaEvolution" : true,
+  "testId" : "pv_104_remove_writer_feature"
+}

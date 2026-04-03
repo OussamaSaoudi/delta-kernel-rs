@@ -1,0 +1,25 @@
+{
+  "type" : "snapshot",
+  "version" : 1,
+  "expected" : {
+    "protocol" : {
+      "minReaderVersion" : 3,
+      "minWriterVersion" : 7,
+      "readerFeatures" : [ "deletionVectors" ],
+      "writerFeatures" : [ "deletionVectors", "appendOnly", "invariants" ]
+    },
+    "metadata" : {
+      "format" : {
+        "provider" : "parquet",
+        "options" : { }
+      },
+      "schemaString" : "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_1\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_2\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_3\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_4\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_5\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_6\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_7\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_8\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_9\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_10\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_11\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_12\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_13\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_14\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_15\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_16\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_17\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_18\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_19\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"col_20\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}",
+      "createdTime" : 1773118090226,
+      "id" : "2d8446a1-f3b7-496a-a7a3-cbbc4f57dc77",
+      "partitionColumns" : [ ],
+      "configuration" : {
+        "delta.enableDeletionVectors" : "true"
+      }
+    }
+  }
+}

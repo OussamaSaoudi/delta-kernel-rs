@@ -1,0 +1,7 @@
+{
+  "testName" : "Read after writing empty DataFrame (table exists, 0 rows)",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dsReadEmptyDataFrame"
+}

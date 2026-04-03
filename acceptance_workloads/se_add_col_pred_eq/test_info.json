@@ -1,0 +1,7 @@
+{
+  "testName" : "Equality predicate on column missing stats in old files",
+  "workloadCount" : 3,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "se_add_col_pred_eq"
+}

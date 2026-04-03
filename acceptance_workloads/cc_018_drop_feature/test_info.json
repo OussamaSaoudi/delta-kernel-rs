@@ -1,0 +1,8 @@
+{
+  "testName" : "Drop constraint before drop feature",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "745-788",
+  "hasSchemaEvolution" : true,
+  "testId" : "cc_018_drop_feature"
+}

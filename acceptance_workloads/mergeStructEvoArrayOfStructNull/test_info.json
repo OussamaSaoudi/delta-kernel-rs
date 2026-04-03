@@ -1,0 +1,7 @@
+{
+  "testName" : "Array of structs with null fields after merge evolution",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoStructEvolutionNullnessSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "mergeStructEvoArrayOfStructNull"
+}

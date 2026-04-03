@@ -1,0 +1,109 @@
+{
+  "name" : "ds_indexed_names_subset",
+  "description" : "index subset of leaf columns",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "a",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "b",
+      "type" : {
+        "type" : "struct",
+        "fields" : [ {
+          "name" : "c",
+          "type" : {
+            "type" : "struct",
+            "fields" : [ {
+              "name" : "d",
+              "type" : "long",
+              "nullable" : true,
+              "metadata" : { }
+            }, {
+              "name" : "e",
+              "type" : "long",
+              "nullable" : true,
+              "metadata" : { }
+            }, {
+              "name" : "f",
+              "type" : {
+                "type" : "struct",
+                "fields" : [ {
+                  "name" : "g",
+                  "type" : "long",
+                  "nullable" : true,
+                  "metadata" : { }
+                }, {
+                  "name" : "h",
+                  "type" : "long",
+                  "nullable" : true,
+                  "metadata" : { }
+                }, {
+                  "name" : "i",
+                  "type" : "long",
+                  "nullable" : true,
+                  "metadata" : { }
+                } ]
+              },
+              "nullable" : true,
+              "metadata" : { }
+            }, {
+              "name" : "j",
+              "type" : "long",
+              "nullable" : true,
+              "metadata" : { }
+            }, {
+              "name" : "k",
+              "type" : "long",
+              "nullable" : true,
+              "metadata" : { }
+            } ]
+          },
+          "nullable" : true,
+          "metadata" : { }
+        }, {
+          "name" : "l",
+          "type" : "long",
+          "nullable" : true,
+          "metadata" : { }
+        } ]
+      },
+      "nullable" : true,
+      "metadata" : { }
+    }, {
+      "name" : "m",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 1,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 3071,
+    "numCommits" : 1,
+    "numActions" : 4,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 0,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.dataSkippingNumIndexedCols" : "3",
+    "delta.dataSkippingStatsColumns" : "b.c.e, b.c.f.h, b.c.k, b.l",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "dataSkipping" ]
+}

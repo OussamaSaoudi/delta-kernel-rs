@@ -1,0 +1,8 @@
+{
+  "testName" : "Row IDs preserved after ADD COLUMN",
+  "workloadCount" : 3,
+  "sourceFile" : "RowTrackingSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "hasSchemaEvolution" : true,
+  "testId" : "rt_across_schema_evolution"
+}

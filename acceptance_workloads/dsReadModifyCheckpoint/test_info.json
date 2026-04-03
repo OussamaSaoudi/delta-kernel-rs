@@ -1,0 +1,7 @@
+{
+  "testName" : "Error: read table with corrupted checkpoint file",
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "isErrorTest" : true,
+  "testId" : "dsReadModifyCheckpoint"
+}

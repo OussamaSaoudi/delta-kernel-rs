@@ -1,0 +1,7 @@
+{
+  "testName" : "Read selecting only subset of columns (projection)",
+  "workloadCount" : 3,
+  "sourceFile" : "DeltaSuiteEdge.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dseReadWithColumnPruning"
+}

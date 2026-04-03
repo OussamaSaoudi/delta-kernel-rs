@@ -1,0 +1,7 @@
+{
+  "testName" : "Generated column expression producing NULL",
+  "workloadCount" : 3,
+  "sourceFile" : "GeneratedColumnSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "gc_null_expression_result"
+}

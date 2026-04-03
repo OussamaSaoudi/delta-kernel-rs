@@ -1,0 +1,49 @@
+{
+  "name" : "tw_array_element",
+  "description" : "Array element type widening (array<int> -> array<long>)",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "values",
+      "type" : {
+        "type" : "array",
+        "elementType" : "long",
+        "containsNull" : true
+      },
+      "nullable" : true,
+      "metadata" : {
+        "delta.typeChanges" : [ {
+          "toType" : "long",
+          "fromType" : "integer",
+          "fieldPath" : "element"
+        } ]
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors", "typeWidening" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "invariants", "typeWidening" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 1851,
+    "numCommits" : 5,
+    "numActions" : 11,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 4,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableTypeWidening" : "true",
+    "delta.enableDeletionVectors" : "true"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "typeWidening" ]
+}

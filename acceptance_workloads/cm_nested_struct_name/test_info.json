@@ -1,0 +1,7 @@
+{
+  "testName" : "Column mapping with nested struct (name mode) + projection",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaColumnMappingSuite.scala",
+  "sourceLines" : "synthetic nested struct name mode test",
+  "testId" : "cm_nested_struct_name"
+}

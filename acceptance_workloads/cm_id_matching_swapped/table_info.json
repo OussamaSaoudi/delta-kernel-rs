@@ -1,0 +1,71 @@
+{
+  "name" : "cm_id_matching_swapped",
+  "description" : "ID mode: swapped field ID reads other column data",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "a",
+      "type" : "string",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 5,
+        "delta.columnMapping.physicalName" : "col-1d9947b2-4c7a-4ab5-869b-1d31e43f4f4a",
+        "parquet.field.id" : 5
+      }
+    }, {
+      "name" : "b",
+      "type" : {
+        "type" : "struct",
+        "fields" : [ {
+          "name" : "c",
+          "type" : "string",
+          "nullable" : true,
+          "metadata" : {
+            "delta.columnMapping.id" : 3,
+            "delta.columnMapping.physicalName" : "col-2d094fca-6bb0-425b-8a2b-d35f6d2e0d54"
+          }
+        }, {
+          "name" : "d",
+          "type" : "integer",
+          "nullable" : true,
+          "metadata" : {
+            "delta.columnMapping.id" : 4,
+            "delta.columnMapping.physicalName" : "col-2c4451b9-ba77-4d2b-8600-25d7848f03ce"
+          }
+        } ]
+      },
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-4a00d2c5-50ec-47e4-8d58-cf1c01ef6611"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "columnMapping", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 1,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 2544,
+    "numCommits" : 4,
+    "numActions" : 9,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 3,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.columnMapping.mode" : "id",
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.maxColumnId" : "10000"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "columnMapping", "columnMappingId" ]
+}

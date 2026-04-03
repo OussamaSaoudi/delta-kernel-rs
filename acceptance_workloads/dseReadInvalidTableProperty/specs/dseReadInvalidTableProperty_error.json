@@ -1,0 +1,8 @@
+{
+  "type" : "snapshot",
+  "name" : "dseReadInvalidTableProperty",
+  "error" : {
+    "errorCode" : "DELTA_UNSUPPORTED_READER_VERSION",
+    "errorMessage" : "[EXPRESSION_DECODING_FAILED] Failed to decode a row to a value of the expressions: . SQLSTATE: 42846"
+  }
+}

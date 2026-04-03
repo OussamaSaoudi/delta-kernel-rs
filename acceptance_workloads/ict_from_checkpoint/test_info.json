@@ -1,0 +1,7 @@
+{
+  "testName" : "ICT from checkpoint",
+  "workloadCount" : 1,
+  "sourceFile" : "InCommitTimestampSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "ict_from_checkpoint"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "SPARK-41154: Correct relation caching for queries with time travel spec",
+  "workloadCount" : 4,
+  "sourceFile" : "DeltaTimeTravelSuite.scala",
+  "sourceLines" : "918-931",
+  "testId" : "tt_relation_caching"
+}

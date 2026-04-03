@@ -1,0 +1,8 @@
+{
+  "testName" : "Project only the widened column",
+  "workloadCount" : 3,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic project widened test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_project_widened"
+}

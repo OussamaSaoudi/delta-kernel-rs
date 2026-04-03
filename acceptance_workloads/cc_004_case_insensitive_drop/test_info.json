@@ -1,0 +1,8 @@
+{
+  "testName" : "Drop constraint is case insensitive",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "371-398",
+  "hasSchemaEvolution" : true,
+  "testId" : "cc_004_case_insensitive_drop"
+}

@@ -1,0 +1,9 @@
+{
+  "type" : "read",
+  "predicate" : "id BETWEEN 0 AND 99",
+  "expected" : {
+    "rowCount" : 100,
+    "fileCount" : 2,
+    "filesSkipped" : 0
+  }
+}

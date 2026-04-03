@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with source as subquery",
+  "workloadCount" : 1,
+  "sourceFile" : "MergeIntoSuiteBase.scala",
+  "sourceLines" : "MERGE-024",
+  "testId" : "mergeSourceSubquery"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE with DVs - merge into DV table",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "511-547",
+  "testId" : "DV-013"
+}

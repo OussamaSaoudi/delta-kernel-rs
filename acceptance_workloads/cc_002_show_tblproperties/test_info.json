@@ -1,0 +1,8 @@
+{
+  "testName" : "See constraints in table properties",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckConstraintsSuite.scala",
+  "sourceLines" : "400-436",
+  "hasSchemaEvolution" : true,
+  "testId" : "cc_002_show_tblproperties"
+}

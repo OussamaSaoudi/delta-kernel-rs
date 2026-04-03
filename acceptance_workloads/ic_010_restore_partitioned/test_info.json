@@ -1,0 +1,8 @@
+{
+  "testName" : "Restore on partitioned table",
+  "workloadCount" : 3,
+  "sourceFile" : "IdentityColumnSuite.scala",
+  "sourceLines" : "646-684",
+  "hasSchemaEvolution" : true,
+  "testId" : "ic_010_restore_partitioned"
+}

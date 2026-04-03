@@ -1,0 +1,7 @@
+{
+  "testName" : "DV + colMapping + v2Checkpoint combined",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaProtocolVersionSuite.scala",
+  "sourceLines" : "protocol spec",
+  "testId" : "pv_multiple_reader_features"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Read after many appends (5+ appends)",
+  "workloadCount" : 1,
+  "sourceFile" : "DeltaSuite.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "dsReadMultipleAppends"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "MERGE where every source row matches target",
+  "workloadCount" : 2,
+  "sourceFile" : "MergeIntoSuiteBaseEdge.scala",
+  "sourceLines" : "P2-006",
+  "testId" : "mergeEdgeAllMatched"
+}

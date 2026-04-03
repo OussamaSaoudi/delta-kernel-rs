@@ -1,0 +1,8 @@
+{
+  "testName" : "Decimal precision widening (5,2) -> (10,2)",
+  "workloadCount" : 2,
+  "sourceFile" : "TypeWideningMetadataSuite.scala",
+  "sourceLines" : "synthetic decimal precision test",
+  "hasSchemaEvolution" : true,
+  "testId" : "tw_decimal_precision"
+}

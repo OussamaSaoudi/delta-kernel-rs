@@ -1,0 +1,7 @@
+{
+  "testName" : "Extreme values in variant",
+  "workloadCount" : 1,
+  "sourceFile" : "VariantDataSkippingStatsSuite.scala",
+  "sourceLines" : "703-772",
+  "testId" : "var_013_extreme_values"
+}

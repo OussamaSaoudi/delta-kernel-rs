@@ -1,0 +1,5 @@
+{
+  "test_id" : "read_after_update_tbl",
+  "test_name" : "read_after_update — tbl",
+  "workload_count" : 3
+}

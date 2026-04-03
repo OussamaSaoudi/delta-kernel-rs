@@ -1,0 +1,7 @@
+{
+  "testName" : "Same file added, removed, re-added across txns",
+  "workloadCount" : 4,
+  "sourceFile" : "CorruptTableSuiteCapture.scala",
+  "sourceLines" : "log-replay-gaps",
+  "testId" : "log_replay_add_remove_readd"
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "Add top-level column via auto merge",
+  "workloadCount" : 2,
+  "sourceFile" : "SchemaEvolutionSuiteCapture.scala",
+  "sourceLines" : "synthetic",
+  "testId" : "se_add_top_level_column"
+}

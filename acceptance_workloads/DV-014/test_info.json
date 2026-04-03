@@ -1,0 +1,7 @@
+{
+  "testName" : "UPDATE with DVs - update rewrite files with DVs",
+  "workloadCount" : 1,
+  "sourceFile" : "DeletionVectorsSuite.scala",
+  "sourceLines" : "550-569",
+  "testId" : "DV-014"
+}

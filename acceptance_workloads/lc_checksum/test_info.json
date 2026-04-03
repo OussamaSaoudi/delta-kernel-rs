@@ -1,0 +1,7 @@
+{
+  "testName" : "Checkpoint with checksum validation",
+  "workloadCount" : 1,
+  "sourceFile" : "LastCheckpointInfoSuite.scala",
+  "sourceLines" : "296-300",
+  "testId" : "lc_checksum"
+}

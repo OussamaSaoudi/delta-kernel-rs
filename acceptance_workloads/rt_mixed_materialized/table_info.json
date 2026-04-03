@@ -1,0 +1,41 @@
+{
+  "name" : "rt_mixed_materialized",
+  "description" : "write and read table with mixed materialized columns",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "test_data",
+      "type" : "long",
+      "nullable" : true,
+      "metadata" : { }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "deletionVectors", "domainMetadata", "invariants", "rowTracking" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 2,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 1471,
+    "numCommits" : 1,
+    "numActions" : 6,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 0,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.enableRowTracking" : "true",
+    "delta.enableDeletionVectors" : "true",
+    "delta.rowTracking.materializedRowIdColumnName" : "_row-id-col-55f3d90b-59b8-4235-aa7e-85fe922bdf47",
+    "delta.rowTracking.materializedRowCommitVersionColumnName" : "_row-commit-version-col-ae3ef923-b396-4589-8035-3de09e3d177a"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "rowTracking" ]
+}

@@ -1,0 +1,7 @@
+{
+  "testName" : "NOT with AND (De Morgan's Law)",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "364-378",
+  "testId" : "ds_not_and"
+}

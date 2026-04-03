@@ -1,0 +1,86 @@
+{
+  "name" : "cm_nested_struct_name",
+  "description" : "Column mapping with nested struct (name mode) + projection",
+  "schema" : {
+    "type" : "struct",
+    "fields" : [ {
+      "name" : "id",
+      "type" : "integer",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 1,
+        "delta.columnMapping.physicalName" : "col-666374c7-1da2-4c21-9db1-b0cefc49daef"
+      }
+    }, {
+      "name" : "person",
+      "type" : {
+        "type" : "struct",
+        "fields" : [ {
+          "name" : "first_name",
+          "type" : "string",
+          "nullable" : true,
+          "metadata" : {
+            "delta.columnMapping.id" : 3,
+            "delta.columnMapping.physicalName" : "col-cbb8387a-c25b-4741-bffc-b21b0d584b65"
+          }
+        }, {
+          "name" : "last_name",
+          "type" : "string",
+          "nullable" : true,
+          "metadata" : {
+            "delta.columnMapping.id" : 4,
+            "delta.columnMapping.physicalName" : "col-2a898e35-b776-427f-99ef-28de2b395f92"
+          }
+        }, {
+          "name" : "age",
+          "type" : "integer",
+          "nullable" : true,
+          "metadata" : {
+            "delta.columnMapping.id" : 5,
+            "delta.columnMapping.physicalName" : "col-f03dd0a1-5a52-4cea-82d6-490a7127fc7b"
+          }
+        } ]
+      },
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 2,
+        "delta.columnMapping.physicalName" : "col-d033f046-c761-432e-9c3a-98b45c85c76f"
+      }
+    }, {
+      "name" : "score",
+      "type" : "double",
+      "nullable" : true,
+      "metadata" : {
+        "delta.columnMapping.id" : 6,
+        "delta.columnMapping.physicalName" : "col-c75b4946-2d58-4d3b-8105-44a963e0b1d9"
+      }
+    } ]
+  },
+  "protocol" : {
+    "minReaderVersion" : 3,
+    "minWriterVersion" : 7,
+    "readerFeatures" : [ "columnMapping", "deletionVectors" ],
+    "writerFeatures" : [ "appendOnly", "columnMapping", "deletionVectors", "invariants" ]
+  },
+  "logInfo" : {
+    "numAddFiles" : 3,
+    "numRemoveFiles" : 0,
+    "sizeInBytes" : 9185,
+    "numCommits" : 4,
+    "numActions" : 9,
+    "lastCheckpointVersion" : -1,
+    "lastCrcVersion" : 3,
+    "numParallelCheckpointFiles" : 0
+  },
+  "properties" : {
+    "delta.columnMapping.mode" : "name",
+    "delta.enableDeletionVectors" : "true",
+    "delta.columnMapping.maxColumnId" : "6"
+  },
+  "dataLayout" : {
+    "numClusteringColumns" : 0,
+    "numPartitionColumns" : 0,
+    "numDistinctPartitions" : 0
+  },
+  "tags" : [ "columnMapping", "columnMappingName", "projection" ]
+}

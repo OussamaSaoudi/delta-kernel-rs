@@ -1,0 +1,7 @@
+{
+  "testName" : "Checkpoint after 100+ commits",
+  "workloadCount" : 2,
+  "sourceFile" : "CheckpointsSuite.scala",
+  "sourceLines" : "synthetic large log replay test",
+  "testId" : "ckp_after_100_commits"
+}

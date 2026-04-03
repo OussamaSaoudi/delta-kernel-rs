@@ -1,0 +1,7 @@
+{
+  "testName" : "Generated column with COALESCE expression",
+  "workloadCount" : 3,
+  "sourceFile" : "GeneratedColumnSuiteCapture.scala",
+  "sourceLines" : "custom",
+  "testId" : "gc_coalesce_null"
+}

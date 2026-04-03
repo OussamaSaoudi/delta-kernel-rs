@@ -1,0 +1,7 @@
+{
+  "testName" : "and statements - simple",
+  "workloadCount" : 3,
+  "sourceFile" : "DataSkippingDeltaTests.scala",
+  "sourceLines" : "254-267",
+  "testId" : "ds_and_simple"
+}

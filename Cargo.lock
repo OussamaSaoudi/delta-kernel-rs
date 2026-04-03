@@ -12,6 +12,7 @@ dependencies = [
  "flate2",
  "futures",
  "itertools 0.14.0",
+ "parquet 57.3.0",
  "serde",
  "serde_json",
  "tar",
