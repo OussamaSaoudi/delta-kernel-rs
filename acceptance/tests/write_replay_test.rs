@@ -144,3 +144,15 @@ fn write_replay_create_and_read() {
 fn write_replay_create_with_properties() {
     replay_and_validate("create_with_properties");
 }
+
+// Test: create + insert + delete with DVs — kernel writes DVs from scratch
+#[test]
+fn write_replay_delete_basic() {
+    replay_and_validate("delete_basic");
+}
+
+// Test: delete with DVs enabled
+#[test]
+fn write_replay_delete_with_dvs() {
+    replay_and_validate("delete_with_dvs");
+}

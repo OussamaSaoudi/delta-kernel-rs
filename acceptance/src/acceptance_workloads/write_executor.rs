@@ -7,20 +7,21 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use delta_kernel::actions::deletion_vector::{KernelDeletionVector, StreamingDeletionVectorWriter};
+use delta_kernel::actions::deletion_vector_writer::{
+    KernelDeletionVector, StreamingDeletionVectorWriter,
+};
 use delta_kernel::arrow::array::{
     ArrayRef, BooleanArray, Int64Array, MapArray, StringArray, StructArray,
 };
 use delta_kernel::arrow::buffer::OffsetBuffer;
-use delta_kernel::arrow::compute::filter_record_batch;
 use delta_kernel::arrow::datatypes::{DataType as ArrowDataType, Field};
 use delta_kernel::arrow::record_batch::RecordBatch;
 use delta_kernel::committer::FileSystemCommitter;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::arrow_expression::evaluate_expression::evaluate_predicate;
-use delta_kernel::schema::SchemaRef;
+use delta_kernel::schema::{SchemaRef, StructType};
 use delta_kernel::snapshot::Snapshot;
-use delta_kernel::{Engine, StructType};
+use delta_kernel::Engine;
 use delta_kernel_benchmarks::predicate_parser::parse_predicate;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::Deserialize;
@@ -204,11 +205,9 @@ fn execute_delete(
     table_root: &Url,
     engine: &dyn Engine,
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
-    use delta_kernel::object_store::path::Path as ObjectStorePath;
-
     let predicate_str = commit.predicate.as_ref().ok_or("delete: missing predicate")?;
 
-    let snapshot = Arc::new(Snapshot::builder_for(table_root.clone()).build(engine)?);
+    let snapshot = Snapshot::builder_for(table_root.clone()).build(engine)?;
     let dvs_enabled = snapshot
         .table_configuration()
         .is_feature_supported(&delta_kernel::table_features::TableFeature::DeletionVectors);
@@ -221,47 +220,40 @@ fn execute_delete(
     let predicate = parse_predicate(predicate_str)
         .map_err(|e| format!("delete: failed to parse predicate '{}': {}", predicate_str, e))?;
 
-    // Scan the table: read each file's data and evaluate predicate to find matching row indexes
-    let scan = snapshot.scan_builder().build()?;
-    let scan_result = scan.execute(Arc::new(engine) as Arc<dyn Engine>)?;
-
-    // We need file-level granularity. Scan the table to get file paths,
-    // then read each file individually to get row indexes.
-    // Use scan_metadata to get file paths, then read parquet directly.
-    let scan2 = snapshot.scan_builder().build()?;
-    let scan_metadata: Vec<_> = scan2.scan_metadata(engine)?.collect::<Result<Vec<_>, _>>()?;
-    let scan_files: Vec<_> = scan_metadata.into_iter().map(|sm| sm.scan_files).collect();
+    let table_dir = table_root
+        .to_file_path()
+        .map_err(|_| "Cannot convert table URL to file path")?;
 
     // Get write context for DV path generation
     let write_context = {
-        let txn_tmp = snapshot.as_ref().clone()
-            .transaction(Box::new(FileSystemCommitter::new()), engine)?;
+        let txn_tmp = snapshot.transaction(Box::new(FileSystemCommitter::new()), engine)?;
         txn_tmp.get_write_context()
     };
 
-    // For each file, read the parquet, evaluate predicate, collect matching row indexes
-    let table_dir = table_root.to_file_path()
-        .map_err(|_| "Cannot convert table URL to file path")?;
-
-    let mut dv_map = HashMap::new();
-
-    // Read the delta log to get file paths
+    // Scan the delta log to get current active file paths
     let log_dir = table_dir.join("_delta_log");
-    let mut all_add_paths = Vec::new();
+    let mut add_paths = std::collections::HashSet::new();
+    let mut remove_paths = std::collections::HashSet::new();
     if log_dir.exists() {
-        for entry in std::fs::read_dir(&log_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().map_or(false, |e| e == "json") {
-                let content = std::fs::read_to_string(&path)?;
-                for line in content.lines() {
-                    if line.contains("\"add\"") {
-                        if let Ok(node) = serde_json::from_str::<serde_json::Value>(line) {
-                            if let Some(add) = node.get("add") {
-                                if let Some(p) = add.get("path").and_then(|p| p.as_str()) {
-                                    all_add_paths.push(p.to_string());
-                                }
-                            }
+        let mut entries: Vec<_> = std::fs::read_dir(&log_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let content = std::fs::read_to_string(entry.path())?;
+            for line in content.lines() {
+                if let Ok(node) = serde_json::from_str::<serde_json::Value>(line) {
+                    if let Some(add) = node.get("add") {
+                        if let Some(p) = add.get("path").and_then(|p| p.as_str()) {
+                            add_paths.insert(p.to_string());
+                            remove_paths.remove(p);
+                        }
+                    }
+                    if let Some(rem) = node.get("remove") {
+                        if let Some(p) = rem.get("path").and_then(|p| p.as_str()) {
+                            remove_paths.insert(p.to_string());
+                            add_paths.remove(p);
                         }
                     }
                 }
@@ -269,26 +261,19 @@ fn execute_delete(
         }
     }
 
-    // Deduplicate (a file might be added then removed — only keep current ones)
-    // For simplicity, just try all add paths and skip ones that don't exist
-    let store = engine.object_store(table_root)?;
+    // For each active file, read parquet, evaluate predicate, collect matching row indexes
+    let mut dv_map = HashMap::new();
 
-    for file_path in &all_add_paths {
+    for file_path in &add_paths {
         let full_path = table_dir.join(file_path);
         if !full_path.exists() {
             continue;
         }
 
-        // Read parquet file
-        let file = std::fs::File::open(&full_path)?;
-        let reader = SerializedFileReader::new(file)?;
-        let arrow_reader = parquet::arrow::arrow_reader::ParquetFileArrowReader::new(
-            Arc::new(reader),
-        );
-
-        // Actually, use arrow's parquet reader for RecordBatch
+        // Read parquet as RecordBatches
         let parquet_file = std::fs::File::open(&full_path)?;
-        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(parquet_file)?;
+        let builder =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(parquet_file)?;
         let mut batch_reader = builder.build()?;
 
         let mut row_offset: u64 = 0;
@@ -296,9 +281,7 @@ fn execute_delete(
 
         while let Some(batch) = batch_reader.next() {
             let batch = batch?;
-            // Evaluate predicate against this batch
             let selection = evaluate_predicate(&predicate, &batch, false)?;
-            // Collect indexes where predicate is true
             for (i, val) in selection.iter().enumerate() {
                 if val == Some(true) {
                     deleted_indexes.push(row_offset + i as u64);
@@ -308,25 +291,26 @@ fn execute_delete(
         }
 
         if !deleted_indexes.is_empty() {
-            // Build DV for this file
             let mut dv = KernelDeletionVector::new();
             dv.add_deleted_row_indexes(deleted_indexes);
 
-            // Write DV to store
+            // Generate DV path and write binary directly to filesystem
             let dv_path = write_context.new_deletion_vector_path(String::new());
-            let dv_absolute_path = dv_path.absolute_path()?;
-            let dv_object_path = ObjectStorePath::parse(dv_absolute_path.path())?;
+            let dv_absolute = dv_path.absolute_path()?;
+            let dv_fs_path = dv_absolute
+                .to_file_path()
+                .map_err(|_| "Cannot convert DV URL to file path")?;
 
+            // Write DV binary
             let mut dv_buffer = Vec::new();
             let mut dv_writer = StreamingDeletionVectorWriter::new(&mut dv_buffer);
             let dv_write_result = dv_writer.write_deletion_vector(dv)?;
             dv_writer.finalize()?;
 
-            // Write DV file synchronously via blocking
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            rt.block_on(store.put(&dv_object_path, dv_buffer.into()))?;
+            if let Some(parent) = dv_fs_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&dv_fs_path, &dv_buffer)?;
 
             let descriptor = dv_write_result.to_descriptor(&dv_path);
             dv_map.insert(file_path.clone(), descriptor);
@@ -338,20 +322,21 @@ fn execute_delete(
         return Ok(Outcome::Applied);
     }
 
-    // Commit the DVs
-    let snapshot = Snapshot::builder_for(table_root.clone()).build(engine)?;
-    let mut txn = snapshot
+    // Commit DVs via update_deletion_vectors (internal API)
+    // Need two snapshots: one for the transaction, one for scan_metadata
+    let snapshot_for_scan = Snapshot::builder_for(table_root.clone()).build(engine)?;
+    let scan = snapshot_for_scan.scan_builder().build()?;
+    let scan_metadata: Vec<_> = scan
+        .scan_metadata(engine)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let scan_files: Vec<_> = scan_metadata.into_iter().map(|sm| sm.scan_files).collect();
+
+    let snapshot_for_txn = Snapshot::builder_for(table_root.clone()).build(engine)?;
+    let mut txn = snapshot_for_txn
         .transaction(Box::new(FileSystemCommitter::new()), engine)?
         .with_operation("DELETE".to_string());
 
-    let scan_for_commit = {
-        let snap = Snapshot::builder_for(table_root.clone()).build(engine)?;
-        let scan = snap.scan_builder().build()?;
-        let metadata: Vec<_> = scan.scan_metadata(engine)?.collect::<Result<Vec<_>, _>>()?;
-        metadata.into_iter().map(|sm| sm.scan_files).collect::<Vec<_>>()
-    };
-
-    txn.update_deletion_vectors(dv_map, scan_for_commit.into_iter().map(Ok))?;
+    txn.update_deletion_vectors(dv_map, scan_files.into_iter().map(Ok))?;
     let result = txn.commit(engine)?;
 
     if result.is_committed() {
