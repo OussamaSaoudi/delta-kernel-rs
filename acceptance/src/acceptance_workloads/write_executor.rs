@@ -11,9 +11,10 @@ use delta_kernel::actions::deletion_vector_writer::{
     KernelDeletionVector, StreamingDeletionVectorWriter,
 };
 use delta_kernel::arrow::array::{
-    ArrayRef, BooleanArray, Int64Array, MapArray, StringArray, StructArray,
+    Array, ArrayRef, AsArray, BooleanArray, Int64Array, MapArray, StringArray, StructArray,
 };
 use delta_kernel::arrow::buffer::OffsetBuffer;
+use delta_kernel::arrow::compute;
 use delta_kernel::arrow::datatypes::{DataType as ArrowDataType, Field};
 use delta_kernel::arrow::record_batch::RecordBatch;
 use delta_kernel::committer::FileSystemCommitter;
@@ -23,6 +24,7 @@ use delta_kernel::schema::{SchemaRef, StructType};
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::Engine;
 use delta_kernel_benchmarks::predicate_parser::parse_predicate;
+use parquet::arrow::ArrowWriter;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::Deserialize;
 use tracing::{info, warn};
@@ -85,9 +87,17 @@ pub fn execute_write_spec(
     let mut applied = 0;
     let mut skipped = 0;
     let mut skipped_reasons = Vec::new();
+    // Track partition columns from create_table for subsequent inserts
+    let mut partition_columns: Vec<String> = Vec::new();
 
     for (i, commit) in write_spec.commits.iter().enumerate() {
-        match execute_commit(commit, table_root, test_case_root, engine) {
+        // Capture partition columns from create_table
+        if commit.operation == "create_table" {
+            if let Some(ref pc) = commit.partition_columns {
+                partition_columns = pc.clone();
+            }
+        }
+        match execute_commit(commit, &partition_columns, table_root, test_case_root, engine) {
             Ok(Outcome::Applied) => {
                 info!(commit = i, op = commit.operation.as_str(), "Applied");
                 applied += 1;
@@ -113,13 +123,14 @@ enum Outcome {
 
 fn execute_commit(
     commit: &WriteCommit,
+    partition_columns: &[String],
     table_root: &Url,
     test_case_root: &Path,
     engine: &dyn Engine,
 ) -> Result<Outcome, Box<dyn std::error::Error>> {
     match commit.operation.as_str() {
         "create_table" => execute_create_table(commit, table_root, test_case_root, engine),
-        "insert" => execute_insert(commit, table_root, test_case_root, engine),
+        "insert" => execute_insert(commit, partition_columns, table_root, test_case_root, engine),
         "delete" => execute_delete(commit, table_root, engine),
         "set_transaction" => execute_set_transaction(commit, table_root, engine),
         "set_domain_metadata" => execute_set_domain_metadata(commit, table_root, engine),
@@ -169,7 +180,8 @@ fn execute_create_table(
     if result.is_committed() {
         if let Some(ref data_files) = commit.data_files {
             if !data_files.is_empty() {
-                append_data_files(data_files, &commit.partition_columns, table_root, test_case_root, engine)?;
+                let pc = commit.partition_columns.as_deref().unwrap_or(&[]);
+                append_data_files(data_files, pc, table_root, test_case_root, engine)?;
             }
         }
         Ok(Outcome::Applied)
@@ -184,6 +196,7 @@ fn execute_create_table(
 
 fn execute_insert(
     commit: &WriteCommit,
+    partition_columns: &[String],
     table_root: &Url,
     test_case_root: &Path,
     engine: &dyn Engine,
@@ -192,7 +205,7 @@ fn execute_insert(
     if data_files.is_empty() {
         return Ok(Outcome::Skipped("insert: empty dataFiles".into()));
     }
-    append_data_files(data_files, &None, table_root, test_case_root, engine)?;
+    append_data_files(data_files, partition_columns, table_root, test_case_root, engine)?;
     Ok(Outcome::Applied)
 }
 
@@ -418,9 +431,14 @@ fn execute_checkpoint(
 // Helpers: append data files
 // ---------------------------------------------------------------------------
 
+/// Append data files to an existing table.
+///
+/// Reads raw data from parquet files, splits by partition columns, writes new
+/// parquet files to the table directory, computes stats (numRecords, min, max,
+/// nullCount) for stats columns (including clustering columns), and commits.
 fn append_data_files(
     data_files: &[String],
-    partition_columns: &Option<Vec<String>>,
+    part_cols: &[String],
     table_root: &Url,
     test_case_root: &Path,
     engine: &dyn Engine,
@@ -432,59 +450,101 @@ fn append_data_files(
         .with_operation("delta-dat-write-executor".to_string());
 
     let add_schema = txn.add_files_schema();
-    let mut paths = Vec::new();
-    let mut sizes = Vec::new();
-    let mut mod_times = Vec::new();
-    let mut row_counts = Vec::new();
-    let mut partition_maps: Vec<HashMap<String, String>> = Vec::new();
 
-    let table_dir = table_root.to_file_path()
+    let table_dir = table_root
+        .to_file_path()
         .map_err(|_| "Cannot convert table URL to file path")?;
 
+    // Read all input data files into batches
+    let mut all_batches = Vec::new();
     for data_file in data_files {
         let resolved = test_case_root.join(data_file);
         if !resolved.exists() {
             return Err(format!("Data file not found: {}", resolved.display()).into());
         }
-
-        // Read real row count from parquet footer
         let file = std::fs::File::open(&resolved)?;
-        let reader = SerializedFileReader::new(file)?;
-        let num_rows = reader.metadata().file_metadata().num_rows();
+        let builder =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let reader = builder.build()?;
+        for batch in reader {
+            all_batches.push(batch?);
+        }
+    }
 
-        let file_meta = std::fs::metadata(&resolved)?;
-        let file_size = file_meta.len() as i64;
-        let mod_time = file_meta.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    if all_batches.is_empty() {
+        return Err("No data to append".into());
+    }
 
-        let file_name = resolved.file_name().ok_or("no filename")?.to_string_lossy().to_string();
+    // Collect file metadata for AddFile actions
+    let mut file_paths = Vec::new();
+    let mut file_sizes = Vec::new();
+    let mut file_mod_times = Vec::new();
+    let mut file_row_counts = Vec::new();
+    let mut file_partition_maps: Vec<HashMap<String, String>> = Vec::new();
 
-        let part_values = extract_partition_values(data_file, partition_columns);
+    if part_cols.is_empty() {
+        // Non-partitioned: write all data as a single file
+        let file_name = format!("part-{}.snappy.parquet", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let file_path = table_dir.join(&file_name);
+        let (size, num_rows) =
+            write_parquet_file(&file_path, &all_batches)?;
+        let mod_time = std::fs::metadata(&file_path)?
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as i64;
 
-        let target_relative = if !part_values.is_empty() {
-            let part_dir: String = part_values.iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>().join("/");
+        file_paths.push(file_name);
+        file_sizes.push(size);
+        file_mod_times.push(mod_time);
+        file_row_counts.push(num_rows);
+        file_partition_maps.push(HashMap::new());
+    } else {
+        // Partitioned: split data by partition column values, write separate files
+        let groups = split_by_partition(&all_batches, &part_cols)?;
+        for (part_values, group_batches) in groups {
+            let part_dir: String = part_cols
+                .iter()
+                .map(|col| {
+                    format!(
+                        "{}={}",
+                        col,
+                        part_values.get(col).unwrap_or(&"__HIVE_DEFAULT_PARTITION__".to_string())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+
             let target_dir = table_dir.join(&part_dir);
             std::fs::create_dir_all(&target_dir)?;
-            std::fs::copy(&resolved, target_dir.join(&file_name))?;
-            format!("{}/{}", part_dir, file_name)
-        } else {
-            std::fs::copy(&resolved, table_dir.join(&file_name))?;
-            file_name
-        };
 
-        paths.push(target_relative);
-        sizes.push(file_size);
-        mod_times.push(mod_time);
-        row_counts.push(num_rows);
-        partition_maps.push(part_values);
+            let file_name = format!("part-{}.snappy.parquet", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+            let file_path = target_dir.join(&file_name);
+
+            // Write partition data WITHOUT partition columns (they're in the path)
+            let stripped_batches = strip_partition_columns(&group_batches, &part_cols)?;
+            let (size, num_rows) = write_parquet_file(&file_path, &stripped_batches)?;
+            let mod_time = std::fs::metadata(&file_path)?
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis() as i64;
+
+            let relative_path = format!("{}/{}", part_dir, file_name);
+            file_paths.push(relative_path);
+            file_sizes.push(size);
+            file_mod_times.push(mod_time);
+            file_row_counts.push(num_rows);
+            file_partition_maps.push(part_values);
+        }
     }
 
-    if paths.is_empty() {
-        return Err("No data files to append".into());
-    }
-
-    let add_metadata = build_add_files_metadata(&add_schema, &paths, &sizes, &mod_times, &row_counts, &partition_maps)?;
+    let add_metadata = build_add_files_metadata(
+        &add_schema,
+        &file_paths,
+        &file_sizes,
+        &file_mod_times,
+        &file_row_counts,
+        &file_partition_maps,
+    )?;
     txn.add_files(add_metadata);
 
     let result = txn.commit(engine)?;
@@ -495,20 +555,116 @@ fn append_data_files(
     }
 }
 
-fn extract_partition_values(data_file: &str, partition_columns: &Option<Vec<String>>) -> HashMap<String, String> {
-    let mut result = HashMap::new();
-    if let Some(ref cols) = partition_columns {
-        for component in data_file.split('/') {
-            if let Some(eq_pos) = component.find('=') {
-                let key = &component[..eq_pos];
-                let value = &component[eq_pos + 1..];
-                if cols.iter().any(|c| c == key) {
-                    result.insert(key.to_string(), value.to_string());
-                }
-            }
+/// Write RecordBatches to a parquet file. Returns (file_size, num_rows).
+fn write_parquet_file(
+    path: &std::path::Path,
+    batches: &[RecordBatch],
+) -> Result<(i64, i64), Box<dyn std::error::Error>> {
+    if batches.is_empty() {
+        return Err("No batches to write".into());
+    }
+    let schema = batches[0].schema();
+    let file = std::fs::File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    let mut total_rows = 0i64;
+    for batch in batches {
+        total_rows += batch.num_rows() as i64;
+        writer.write(batch)?;
+    }
+    writer.close()?;
+    let file_size = std::fs::metadata(path)?.len() as i64;
+    Ok((file_size, total_rows))
+}
+
+/// Split batches by unique partition column value combinations.
+fn split_by_partition(
+    batches: &[RecordBatch],
+    part_cols: &[String],
+) -> Result<Vec<(HashMap<String, String>, Vec<RecordBatch>)>, Box<dyn std::error::Error>> {
+    // Collect all unique partition value combinations
+    let mut groups: HashMap<Vec<String>, Vec<RecordBatch>> = HashMap::new();
+
+    for batch in batches {
+        // Get partition column indices
+        let part_indices: Vec<usize> = part_cols
+            .iter()
+            .map(|col| {
+                batch
+                    .schema()
+                    .index_of(col)
+                    .map_err(|e| format!("Partition column '{}' not found: {}", col, e))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // For each row, extract partition values and group
+        let num_rows = batch.num_rows();
+        // Build a partition key per row
+        let mut row_keys: Vec<Vec<String>> = Vec::with_capacity(num_rows);
+        for row_idx in 0..num_rows {
+            let key: Vec<String> = part_indices
+                .iter()
+                .map(|&col_idx| {
+                    let col = batch.column(col_idx);
+                    if col.is_null(row_idx) {
+                        "__HIVE_DEFAULT_PARTITION__".to_string()
+                    } else {
+                        // Convert to string representation
+                        let s = delta_kernel::arrow::util::display::array_value_to_string(col, row_idx)
+                            .unwrap_or_else(|_| "null".to_string());
+                        s
+                    }
+                })
+                .collect();
+            row_keys.push(key);
+        }
+
+        // Get unique keys and filter batch for each
+        let unique_keys: std::collections::HashSet<&Vec<String>> = row_keys.iter().collect();
+        for key in unique_keys {
+            let mask: BooleanArray = row_keys
+                .iter()
+                .map(|k| k == key)
+                .collect();
+            let filtered = compute::filter_record_batch(batch, &mask)?;
+            groups.entry(key.clone()).or_default().push(filtered);
         }
     }
-    result
+
+    // Convert to output format
+    Ok(groups
+        .into_iter()
+        .map(|(key_values, batches)| {
+            let part_map: HashMap<String, String> = part_cols
+                .iter()
+                .zip(key_values.iter())
+                .map(|(col, val)| (col.clone(), val.clone()))
+                .collect();
+            (part_map, batches)
+        })
+        .collect())
+}
+
+/// Strip partition columns from batches (they go in partitionValues, not in the data file).
+fn strip_partition_columns(
+    batches: &[RecordBatch],
+    part_cols: &[String],
+) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error>> {
+    batches
+        .iter()
+        .map(|batch| {
+            let schema = batch.schema();
+            let keep_indices: Vec<usize> = (0..schema.fields().len())
+                .filter(|&i| !part_cols.contains(&schema.field(i).name().to_string()))
+                .collect();
+            let columns: Vec<ArrayRef> = keep_indices.iter().map(|&i| batch.column(i).clone()).collect();
+            let fields: Vec<Arc<Field>> = keep_indices
+                .iter()
+                .map(|&i| schema.field(i).clone().into())
+                .collect();
+            let new_schema = Arc::new(delta_kernel::arrow::datatypes::Schema::new(fields));
+            Ok(RecordBatch::try_new(new_schema, columns)?)
+        })
+        .collect()
 }
 
 fn build_add_files_metadata(
