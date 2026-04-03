@@ -78,6 +78,7 @@
 
 pub mod validation;
 pub mod workload;
+pub mod write_executor;
 
 use std::path::{Path, PathBuf};
 

@@ -170,6 +170,12 @@ pub fn execute_and_validate_workload(
             let result = execute_snapshot_workload(engine, table_root, snapshot_spec.as_ref());
             validate_snapshot(result, expected)?;
         }
+        Spec::Write(_write_spec) => {
+            // Write specs are handled separately — they build the table first,
+            // then verification is done via the read/snapshot specs listed in
+            // write_spec.verification. This match arm is a no-op because the
+            // test harness dispatches write specs before running read specs.
+        }
     }
     Ok(())
 }

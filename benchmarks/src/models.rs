@@ -194,6 +194,37 @@ pub enum Spec {
     Read(ReadSpec),
     #[serde(alias = "snapshot_construction")]
     SnapshotConstruction(Box<SnapshotConstructionSpec>),
+    Write(WriteSpec),
+}
+
+/// Specification for a write workload — a sequence of commits to build a table.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteSpec {
+    pub description: Option<String>,
+    pub commits: Vec<WriteCommit>,
+    pub verification: Option<Vec<String>>,
+}
+
+/// A single commit in a write spec.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteCommit {
+    pub operation: String,
+    pub description: Option<String>,
+    pub schema: Option<serde_json::Value>,
+    pub partition_columns: Option<Vec<String>>,
+    pub properties: Option<std::collections::HashMap<String, String>>,
+    pub data_files: Option<Vec<String>>,
+    pub predicate: Option<String>,
+    pub set: Option<std::collections::HashMap<String, String>>,
+    pub sql: Option<serde_json::Value>, // String or array of strings
+    pub app_id: Option<String>,
+    pub version: Option<i64>,
+    pub domain: Option<String>,
+    pub configuration: Option<String>,
+    pub removed: Option<bool>,
+    pub retention_hours: Option<i64>,
 }
 
 /// Specification for a read workload.
@@ -243,6 +274,9 @@ impl Spec {
             Spec::Read(read_spec) => read_spec.as_str(),
             Spec::SnapshotConstruction(snapshot_construction_spec) => {
                 snapshot_construction_spec.as_str()
+            }
+            Spec::Write(write_spec) => {
+                write_spec.description.as_deref().unwrap_or("write")
             }
         }
     }
