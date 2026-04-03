@@ -60,3 +60,6 @@ harness = false
 [[test]]
 name = "acceptance_workloads_reader"
 harness = false
+
+[[test]]
+name = "write_replay_test"
