@@ -27,6 +27,7 @@
 //!     .results();
 //! ```
 
+pub mod errors;
 pub mod ir;
 pub mod record_schemas;
 pub mod schemas;
