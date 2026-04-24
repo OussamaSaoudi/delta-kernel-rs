@@ -32,3 +32,4 @@ pub mod ir;
 pub mod kdf;
 pub mod record_schemas;
 pub mod schemas;
+pub mod state_machines;
