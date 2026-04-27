@@ -3,9 +3,8 @@
 //! Each struct here is a single node kind in the declarative plan tree. The
 //! recursive tree is assembled in [`super::declarative::DeclarativePlanNode`].
 //!
-//! This module ships only the nodes the prototype's read path exercises. KDF
-//! filter/consumer nodes land with the KDF framework; write and V4-specific
-//! nodes land with their respective follow-on stacks.
+//! This module ships nodes the prototype's read path exercises plus sink IR in the
+//! [`sinks`] submodule; write-specific nodes land with their stacks.
 
 use std::sync::Arc;
 
@@ -250,77 +249,7 @@ impl OrderingSpec {
     }
 }
 
-// ============================================================================
-// Sinks
-// ============================================================================
 
-/// Identifier for a relation produced by one plan and consumed by another in
-/// the same `PhaseOperation::Plans(...)`. Created via [`RelationHandle::fresh`];
-/// each handle is unique across all kernel plans for the lifetime of the
-/// process (id-based comparison).
-///
-/// Handles connect a [`SinkType::Relation`] in one plan to a
-/// [`super::declarative::DeclarativePlanNode::Relation`] leaf in another.
-/// The executor allocates a bounded channel per handle, the producing plan's
-/// sink writes to it, and the consuming plan's source reads from it —
-/// streaming end-to-end, not materialized.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RelationHandle {
-    /// Diagnostic name (used in tracing spans, error messages); not part of
-    /// equality / hashing.
-    pub name: String,
-    /// Process-wide monotonic id. Drives equality and hashing so that two
-    /// freshly-minted handles with the same name are still distinct.
-    pub id: u64,
-}
+mod sinks;
 
-impl RelationHandle {
-    /// Mint a fresh handle with the given diagnostic name.
-    pub fn fresh(name: impl Into<String>) -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        Self {
-            name: name.into(),
-            id: NEXT.fetch_add(1, Ordering::Relaxed),
-        }
-    }
-}
-
-/// What the engine does with the terminal row stream.
-///
-/// This branch ships two sink shapes: `Results` for terminal pipelines that
-/// stream batches back to the caller, and `Relation` for piping a plan's
-/// output into another plan in the same `PhaseOperation::Plans(...)`.
-/// `ConsumeByKDF` (FFI consumer drain) lands with the KDF framework;
-/// `Load` / `Write` / `PartitionedWrite` land with their respective stacks.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SinkType {
-    /// Stream every output batch to the caller.
-    Results,
-    /// Stream every output batch to the named [`RelationHandle`]. Another
-    /// plan in the same phase consumes via
-    /// [`DeclarativePlanNode::Relation`](super::declarative::DeclarativePlanNode::Relation).
-    Relation(RelationHandle),
-}
-
-/// Terminal node of a [`super::plan::Plan`], carrying a [`SinkType`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SinkNode {
-    pub sink_type: SinkType,
-}
-
-impl SinkNode {
-    /// `Results`-sink convenience constructor.
-    pub fn results() -> Self {
-        Self {
-            sink_type: SinkType::Results,
-        }
-    }
-
-    /// `Relation`-sink convenience constructor.
-    pub fn relation(handle: RelationHandle) -> Self {
-        Self {
-            sink_type: SinkType::Relation(handle),
-        }
-    }
-}
+pub use sinks::{ConsumeByKdfSink, RelationHandle, SinkNode, SinkType};

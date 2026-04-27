@@ -4,15 +4,22 @@
 //!
 //! The prototype uses a fluent-builder style directly on the enum — static
 //! constructors for leaves, chain methods for unary transforms and n-ary
-//! combinators, and terminal methods that produce a [`Plan`].
+//! combinators, and terminal methods that produce a [`Plan`] (untyped) or a
+//! [`Prepared<O>`] (typed, via a consumer KDF that also impls
+//! [`crate::plans::kdf::KdfOutput`]).
 //!
 //! ```ignore
 //! use delta_kernel::plans::ir::DeclarativePlanNode;
 //!
-//! // Read JSON with an inferred schema, project to a sub-schema, stream results.
+//! // Untyped pipeline: scan JSON, project to a sub-schema, stream results.
 //! let plan = DeclarativePlanNode::scan_json_as::<CheckpointHintRecord>(files)
 //!     .project(projection, output_schema)
 //!     .results();
+//!
+//! // Typed pipeline: scan JSON, drain into a typed consumer KDF, harvest
+//! // the output.
+//! let prepared = DeclarativePlanNode::scan_json_as::<CheckpointHintRecord>(files)
+//!     .consume(CheckpointHintReader::default());
 //! ```
 //!
 //! ## Leaves
@@ -23,8 +30,7 @@
 //!   — schemas inferred from a struct via [`crate::schema::ToSchema`].
 //! - [`DeclarativePlanNode::listing`] — storage prefix listing.
 //! - [`DeclarativePlanNode::literal`] / [`literal_row`] — kernel-provided
-//!   constant rows. Aligned with
-//!   [`crate::EvaluationHandler::create_many`](crate::EvaluationHandler::create_many).
+//!   constant rows. Aligned with [`crate::EvaluationHandler::create_many`].
 //! - [`DeclarativePlanNode::union`] / [`union_unordered`] — concatenate N children.
 //!
 //! ## Transforms
@@ -37,12 +43,21 @@
 //!
 //! ## Terminals
 //!
-//! - [`DeclarativePlanNode::into_plan`] — with an explicit sink.
+//! - [`DeclarativePlanNode::into_plan`] — explicit sink.
 //! - [`DeclarativePlanNode::results`] — sugar for
 //!   `into_plan(SinkType::Results)`.
 //! - [`DeclarativePlanNode::into_relation`] — pipe output into a named
 //!   [`RelationHandle`](super::nodes::RelationHandle) for another plan in
 //!   the same `PhaseOperation::Plans(...)` to consume.
+//! - [`DeclarativePlanNode::consume`] — typed KDF consumer terminal; returns
+//!   a [`Prepared<O>`] whose plan terminates in
+//!   [`SinkType::ConsumeByKdf`](super::nodes::SinkType::ConsumeByKdf).
+//!
+//! ## Escape hatches
+//!
+//! - [`DeclarativePlanNode::consume_by_kdf`] — terminate `self` into a
+//!   [`SinkType::ConsumeByKdf`] sink from a pre-built
+//!   [`ConsumeByKdfSink`](super::nodes::ConsumeByKdfSink) without a typed extractor.
 //!
 //! [`scan_json`]: DeclarativePlanNode::scan_json
 //! [`scan_parquet`]: DeclarativePlanNode::scan_parquet
@@ -60,6 +75,8 @@ use url::Url;
 use super::nodes::*;
 use super::plan::Plan;
 use crate::expressions::{Expression, Scalar};
+use crate::plans::kdf::typed::ExtractFn;
+use crate::plans::kdf::{downcast_all, ConsumerKdf, KdfOutput, KdfStateToken};
 use crate::schema::{SchemaRef, StructType, ToSchema};
 use crate::{DeltaResult, Error, FileMeta};
 
@@ -67,7 +84,8 @@ use crate::{DeltaResult, Error, FileMeta};
 ///
 /// Trees are transforms-only: every complete pipeline terminates in a
 /// [`Plan`] via one of the terminal methods (`into_plan`, `results`,
-/// `into_relation`).
+/// `into_relation`, `consume_by_kdf`) or in a [`Prepared<O>`] via
+/// [`DeclarativePlanNode::consume`].
 #[derive(Debug, Clone)]
 pub enum DeclarativePlanNode {
     // Leaves
@@ -182,9 +200,6 @@ impl DeclarativePlanNode {
     {
         let mut children: Vec<Self> = children.into_iter().collect();
         if children.len() == 1 {
-            // Safe: the len check above guarantees `pop` returns `Some`. We
-            // use `pop` + `ok_or_else` rather than `unwrap`/`expect` so
-            // clippy's panic-free rules don't fire in production code.
             return children
                 .pop()
                 .ok_or_else(|| Error::generic("internal: single-child union drained empty"));
@@ -288,6 +303,92 @@ impl DeclarativePlanNode {
             },
         }
     }
+
+    /// Typed KDF consumer terminal. Wraps `self` in a [`Plan`] terminating in
+    /// [`SinkType::ConsumeByKdf`] and returns a [`Prepared<O>`] carrying the
+    /// typed extractor.
+    pub fn consume<S>(self, state: S) -> Prepared<S::Output>
+    where
+        S: ConsumerKdf + KdfOutput + 'static,
+    {
+        let node = ConsumeByKdfSink::new_consumer(state);
+        let token = node.token.clone();
+        let extract = make_extract::<S>(token.clone());
+        Prepared {
+            plan: self.into_plan(SinkType::ConsumeByKdf(node)),
+            token,
+            extract,
+        }
+    }
+
+    /// Power-user escape hatch: terminate `self` in a [`Plan`] with a
+    /// [`SinkType::ConsumeByKdf`] from a pre-built consumer-KDF node. No typed
+    /// extractor is threaded forward — caller harvests partition states directly.
+    ///
+    /// Use [`Self::consume`] instead when the state type also implements
+    /// [`KdfOutput`].
+    pub fn consume_by_kdf(self, node: ConsumeByKdfSink) -> Plan {
+        self.into_plan(SinkType::ConsumeByKdf(node))
+    }
+}
+
+/// Build the typed extract closure for a state `S` at a given token. The
+/// closure downcasts each per-partition erased state back to `S` and reduces
+/// via [`KdfOutput::into_output`].
+fn make_extract<S>(token: KdfStateToken) -> ExtractFn<S::Output>
+where
+    S: KdfOutput + 'static,
+{
+    Box::new(move |parts| {
+        let states = downcast_all::<S>(parts, &token)?;
+        S::into_output(states)
+    })
+}
+
+// ============================================================================
+// Typed wrapper: Prepared<O>
+// ============================================================================
+
+/// A fully-assembled [`Plan`] paired with a typed post-execution extractor.
+///
+/// Produced by [`DeclarativePlanNode::consume`]. The executor runs `plan`;
+/// the caller harvests the typed output via [`Prepared::extract`].
+pub struct Prepared<O> {
+    /// The assembled plan the executor drives.
+    pub plan: Plan,
+    token: KdfStateToken,
+    extract: ExtractFn<O>,
+}
+
+impl<O: Send + 'static> Prepared<O> {
+    /// Token identifying the KDF state this extractor will consume.
+    pub fn token(&self) -> &KdfStateToken {
+        &self.token
+    }
+
+    /// Consume the prepared plan, producing the typed output from the
+    /// finalized per-partition states the executor handed back.
+    pub fn extract(
+        self,
+        parts: Vec<Box<dyn std::any::Any + Send>>,
+    ) -> Result<O, crate::plans::errors::DeltaError> {
+        (self.extract)(parts)
+    }
+
+    /// Split into the executable plan and its extractor. Useful for executor
+    /// boundaries where the two live in different scopes.
+    pub fn into_parts(self) -> (Plan, ExtractFn<O>) {
+        (self.plan, self.extract)
+    }
+}
+
+impl<O> std::fmt::Debug for Prepared<O> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Prepared")
+            .field("plan", &self.plan)
+            .field("token", &self.token)
+            .finish_non_exhaustive()
+    }
 }
 
 // ============================================================================
@@ -370,8 +471,7 @@ impl DeclarativePlanNode {
     }
 }
 
-/// Static label for a node variant; used in error messages on scan-only
-/// modifiers like [`DeclarativePlanNode::with_row_index`].
+/// Static label for a node variant; used in error messages and diagnostics.
 fn node_kind_name(node: &DeclarativePlanNode) -> &'static str {
     match node {
         DeclarativePlanNode::Scan(..) => "Scan",
@@ -390,8 +490,12 @@ fn node_kind_name(node: &DeclarativePlanNode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
+
     use super::*;
     use crate::expressions::Expression;
+    use crate::plans::errors::DeltaError;
+    use crate::plans::kdf::{ConsumerKdf, Kdf, KdfControl, KdfOutput};
     use crate::schema::{DataType, StructField, StructType};
 
     fn simple_schema() -> SchemaRef {
@@ -422,14 +526,12 @@ mod tests {
     fn union_with_single_child_unwraps() {
         let only = DeclarativePlanNode::scan_json(vec![], simple_schema());
         let unioned = DeclarativePlanNode::union(vec![only]).unwrap();
-        // Single-child union short-circuits to the child itself.
         assert!(matches!(unioned, DeclarativePlanNode::Scan(..)));
     }
 
     #[test]
     fn union_zero_children_is_empty_struct() {
         let unioned = DeclarativePlanNode::union(Vec::<DeclarativePlanNode>::new()).unwrap();
-        // Zero children stays as an empty Union node (matches the plan spec).
         assert!(matches!(unioned, DeclarativePlanNode::Union { .. }));
     }
 
@@ -503,7 +605,6 @@ mod tests {
     fn fresh_relation_handles_are_distinct() {
         let a = RelationHandle::fresh("dup");
         let b = RelationHandle::fresh("dup");
-        // Same diagnostic name but distinct ids — equality is id-based.
         assert_ne!(a, b);
         assert_eq!(a.name, b.name);
     }
@@ -514,10 +615,8 @@ mod tests {
             StructField::not_null("a", DataType::LONG),
             StructField::not_null("b", DataType::LONG),
         ]));
-        // Right count: succeeds.
         DeclarativePlanNode::literal_row(schema.clone(), vec![Scalar::Long(1), Scalar::Long(2)])
             .unwrap();
-        // Wrong count: errors.
         let err = DeclarativePlanNode::literal_row(schema, vec![Scalar::Long(1)]).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("schema expects"), "message was: {msg}");
@@ -560,5 +659,57 @@ mod tests {
             .filter(Arc::new(Expression::literal(true)));
         let err = plan.with_row_index("rowidx").unwrap_err();
         assert!(format!("{err}").contains("requires a Scan node"));
+    }
+
+    // === Consumer-KDF tests (validated via a test-local consumer state) ===
+
+    #[derive(Debug, Clone)]
+    struct NoopConsumer;
+    impl Kdf for NoopConsumer {
+        fn kdf_id(&self) -> &'static str {
+            "consumer.noop"
+        }
+        fn finish(self: Box<Self>) -> Box<dyn Any + Send> {
+            Box::new(*self)
+        }
+    }
+    impl ConsumerKdf for NoopConsumer {
+        fn apply(&mut self, _batch: &dyn crate::EngineData) -> DeltaResult<KdfControl> {
+            Ok(KdfControl::Break)
+        }
+    }
+    impl KdfOutput for NoopConsumer {
+        type Output = bool;
+        fn into_output(parts: Vec<Self>) -> Result<bool, DeltaError> {
+            Ok(!parts.is_empty())
+        }
+    }
+
+    #[test]
+    fn consume_by_kdf_escape_hatch_terminates_in_sink() {
+        let node = ConsumeByKdfSink::new_consumer(NoopConsumer);
+        let plan = DeclarativePlanNode::scan_json(vec![], simple_schema()).consume_by_kdf(node);
+        assert!(matches!(plan.sink.sink_type, SinkType::ConsumeByKdf(_)));
+    }
+
+    #[test]
+    fn consume_produces_prepared_with_kdf_sink() {
+        let prepared =
+            DeclarativePlanNode::scan_json(vec![], simple_schema()).consume(NoopConsumer);
+        assert!(matches!(
+            prepared.plan.sink.sink_type,
+            SinkType::ConsumeByKdf(_)
+        ));
+        assert_eq!(prepared.token().kdf_id, "consumer.noop");
+        let parts: Vec<Box<dyn Any + Send>> = vec![Box::new(NoopConsumer)];
+        assert!(prepared.extract(parts).unwrap());
+    }
+
+    #[test]
+    fn token_embeds_kdf_id() {
+        let node = ConsumeByKdfSink::new_consumer(NoopConsumer);
+        assert_eq!(node.token.kdf_id, "consumer.noop");
+        let s = node.token.to_string();
+        assert!(s.starts_with("consumer.noop#"), "got: {s}");
     }
 }

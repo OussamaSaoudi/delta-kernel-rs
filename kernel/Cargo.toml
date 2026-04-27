@@ -60,6 +60,10 @@ z85 = "3.0.6"
 
 # optional deps
 futures = { version = "0.3", optional = true }
+# dyn-clone: `Clone` for `Box<dyn ConsumerKdf>` trait objects via the
+# `DynClone` supertrait. Blanket impl covers any `Clone` KDF state, so
+# concrete KDFs don't write their own `clone_boxed`.
+dyn-clone = { version = "1.0", optional = true }
 # Used for fetching direct urls (like pre-signed urls). We disable `default-tls` to avoid
 # pulling in a second rustls crypto provider that conflicts with transitive deps (see
 # feature-tests for a regression test). Each default-engine-* feature selects its TLS backend.
@@ -120,10 +124,13 @@ schema-diff = []
 
 # Declarative plan IR and construction API. Opt-in; the existing
 # `Scan`/`Snapshot`/`Transaction` APIs keep working without it.
-# Enables `internal-api` because the declarative IR uses kernel-internal
-# types (most notably `schema::ToSchema`) that are hidden under `#[internal_api]`
-# by default.
-declarative-plans = ["internal-api"]
+#
+# Enables:
+#   - `internal-api` — because the declarative IR uses kernel-internal
+#     types (most notably `schema::ToSchema`) hidden under `#[internal_api]`.
+#   - `arrow` — the executor works in Arrow types throughout, and KDF
+#     consumer impls return Arrow-typed views over each batch.
+declarative-plans = ["internal-api", "arrow", "dep:dyn-clone"]
 
 # this is an 'internal' feature flag which has all the shared bits from default-engine-native-tls
 # and default-engine-rustls

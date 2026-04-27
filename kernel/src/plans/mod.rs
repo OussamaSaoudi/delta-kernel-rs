@@ -29,5 +29,6 @@
 
 pub mod errors;
 pub mod ir;
+pub mod kdf;
 pub mod record_schemas;
 pub mod schemas;
