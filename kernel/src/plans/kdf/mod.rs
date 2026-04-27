@@ -11,9 +11,8 @@
 //!   per-partition state for the engine to harvest after the plan completes.
 //!
 //! `ConsumerKdf` extends a small supertrait [`traits::Kdf`] carrying
-//! `kdf_id()` and `finish()`, and is `#[typetag::serde]` — so
-//! `Box<dyn ConsumerKdf>` serializes / deserializes transparently via each
-//! impl's `#[typetag::serde]` annotation.
+//! `kdf_id()` and `finish()`. KDFs are dispatched in-process and never cross
+//! a serialization boundary (the sink is an opaque pointer to the engine).
 //!
 //! # Identity
 //!
@@ -31,18 +30,24 @@
 //!
 //! See `kernel/docs/KDF_DESIGN.md` for the full end-to-end walkthrough.
 //! Short version: new file with four impl blocks (`Kdf`, `ConsumerKdf`,
-//! `KdfOutput`, `RowVisitor`), one line in the submodule mod.rs, one line in
-//! the factory module.
+//! `KdfOutput`, `RowVisitor`), one line in the submodule mod.rs, one line
+//! re-exporting here. Row-ordering requirements live on the KDF trait
+//! itself — no separate factory.
 //!
 //! [`ConsumeByKdfSink`]: crate::plans::ir::nodes::ConsumeByKdfSink
 
+#[macro_use]
+mod macros;
+
 pub mod handle;
+pub mod state;
 pub mod token;
 pub mod trace;
 pub mod traits;
 pub mod typed;
 
 pub use handle::{FinishedHandle, Handle};
+pub use state::consumer::{CheckpointHintReader, MetadataProtocolReader, SidecarCollector};
 pub use token::KdfStateToken;
 pub use trace::TraceContext;
 pub use traits::{ConsumerKdf, Kdf, KdfControl};
