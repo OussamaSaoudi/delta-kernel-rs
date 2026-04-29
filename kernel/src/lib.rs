@@ -103,6 +103,9 @@ mod log_path;
 mod log_reader;
 pub mod metrics;
 pub mod partition;
+/// Declarative plan IR and construction API. Opt-in.
+#[cfg(feature = "declarative-plans")]
+pub mod plans;
 pub mod scan;
 pub mod schema;
 pub mod snapshot;

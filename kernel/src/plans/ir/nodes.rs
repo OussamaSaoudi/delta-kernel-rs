@@ -1,0 +1,326 @@
+//! Individual plan node types.
+//!
+//! Each struct here is a single node kind in the declarative plan tree. The
+//! recursive tree is assembled in [`super::declarative::DeclarativePlanNode`].
+//!
+//! This module ships only the nodes the prototype's read path exercises. KDF
+//! filter/consumer nodes land with the KDF framework; write and V4-specific
+//! nodes land with their respective follow-on stacks.
+
+use std::sync::Arc;
+
+use crate::expressions::{ColumnName, Expression, Scalar};
+use crate::schema::SchemaRef;
+use crate::{DeltaResult, Error, FileMeta};
+
+// ============================================================================
+// Leaf nodes
+// ============================================================================
+
+/// File formats readable by a [`ScanNode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileType {
+    Parquet,
+    Json,
+}
+
+/// Read columnar data from a fixed file list.
+///
+/// # Schema contract
+///
+/// The `schema` field specifies the desired output structure with the
+/// nullability semantics of [`crate::ParquetHandler::read_parquet_files`]:
+/// missing nullable columns become NULL; missing non-nullable columns error;
+/// present columns may be cast to the requested type; column order follows
+/// `schema`.
+///
+/// # Row index column
+///
+/// When `row_index_column` is `Some(name)`, each output row is augmented with
+/// a synthetic `LONG` column containing its 0-indexed position within the
+/// originating file. The name must not collide with any column in `schema`.
+///
+/// # Predicate
+///
+/// `predicate` is a pushdown hint: the engine MAY apply it during the read,
+/// but MUST NOT over-filter. Any residual filtering happens via
+/// [`FilterNode`].
+///
+/// # Ordering
+///
+/// `ordered = false` (the default) is standard SQL — files MAY be processed
+/// in any order, in parallel. `ordered = true` is sugar for
+/// `UNION ALL(per-file scans) ORDER BY <synthetic file-ordinal>`: across
+/// arms, order is set by the position in `files`; within each file, rows
+/// remain in natural source order (parquet row group / JSON line). Initial
+/// `ordered = true` consumers: stream-replay log readers (newest-first).
+#[derive(Debug, Clone)]
+pub struct ScanNode {
+    pub file_type: FileType,
+    pub files: Vec<FileMeta>,
+    pub schema: SchemaRef,
+    pub row_index_column: Option<String>,
+    pub predicate: Option<Arc<Expression>>,
+    /// Cross-file emission order; see the type-level "Ordering" doc.
+    pub ordered: bool,
+}
+
+impl ScanNode {
+    /// Create a new scan node with no row index column, no predicate, and
+    /// `ordered = false` (the SQL default — engines may parallelize).
+    pub fn new(file_type: FileType, files: Vec<FileMeta>, schema: SchemaRef) -> Self {
+        Self {
+            file_type,
+            files,
+            schema,
+            row_index_column: None,
+            predicate: None,
+            ordered: false,
+        }
+    }
+}
+
+/// List files from a storage prefix via [`crate::StorageHandler::list_from`].
+#[derive(Debug, Clone)]
+pub struct FileListingNode {
+    /// Directory URL or file path to start listing from.
+    pub path: url::Url,
+}
+
+/// Kernel-provided constant rows (no I/O).
+///
+/// Emits `rows.len()` rows, each carrying one [`Scalar`] per top-level field
+/// in `schema`.
+///
+/// # Invariants
+///
+/// Enforced by [`LiteralNode::validate`]:
+/// - `rows.len() <= LITERAL_NODE_MAX_ROWS`
+/// - every row has `values.len() == schema.fields().count()`
+/// - every row has `values.len() <= LITERAL_NODE_MAX_COLS`
+/// - estimated total payload `<= LITERAL_NODE_MAX_ESTIMATED_BYTES`
+///
+/// The layout mirrors [`crate::EvaluationHandler::create_many`], which is
+/// what the executor uses to materialize a literal node into `EngineData`.
+#[derive(Debug, Clone)]
+pub struct LiteralNode {
+    pub schema: SchemaRef,
+    pub rows: Vec<Vec<Scalar>>,
+}
+
+/// Maximum number of rows in a [`LiteralNode`].
+pub const LITERAL_NODE_MAX_ROWS: usize = 1024;
+
+/// Maximum number of top-level scalars per row.
+pub const LITERAL_NODE_MAX_COLS: usize = 100;
+
+/// Maximum estimated payload bytes across all rows.
+pub const LITERAL_NODE_MAX_ESTIMATED_BYTES: usize = 10 * 1024;
+
+impl LiteralNode {
+    /// Construct and validate a multi-row literal.
+    pub fn try_new(schema: SchemaRef, rows: Vec<Vec<Scalar>>) -> DeltaResult<Self> {
+        Self::validate(&schema, &rows)?;
+        Ok(Self { schema, rows })
+    }
+
+    /// Construct and validate a single-row literal.
+    pub fn try_new_row(schema: SchemaRef, values: Vec<Scalar>) -> DeltaResult<Self> {
+        Self::try_new(schema, vec![values])
+    }
+
+    fn validate(schema: &SchemaRef, rows: &[Vec<Scalar>]) -> DeltaResult<()> {
+        if rows.len() > LITERAL_NODE_MAX_ROWS {
+            return Err(Error::generic(format!(
+                "LiteralNode exceeds max rows: {} > {}",
+                rows.len(),
+                LITERAL_NODE_MAX_ROWS,
+            )));
+        }
+        let expected_cols = schema.fields().count();
+        let mut total_bytes: usize = 0;
+        for (i, row) in rows.iter().enumerate() {
+            if row.len() != expected_cols {
+                return Err(Error::generic(format!(
+                    "LiteralNode row {i} has {} scalars, schema expects {}",
+                    row.len(),
+                    expected_cols,
+                )));
+            }
+            if row.len() > LITERAL_NODE_MAX_COLS {
+                return Err(Error::generic(format!(
+                    "LiteralNode row {i} exceeds max cols: {} > {}",
+                    row.len(),
+                    LITERAL_NODE_MAX_COLS,
+                )));
+            }
+            for scalar in row {
+                total_bytes = total_bytes.saturating_add(estimate_scalar_bytes(scalar));
+            }
+        }
+        if total_bytes > LITERAL_NODE_MAX_ESTIMATED_BYTES {
+            return Err(Error::generic(format!(
+                "LiteralNode exceeds max payload: {total_bytes} > {LITERAL_NODE_MAX_ESTIMATED_BYTES}",
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Coarse upper bound on the heap footprint of a scalar. Conservative — used
+/// only to gate [`LiteralNode`] payload size.
+fn estimate_scalar_bytes(s: &Scalar) -> usize {
+    use Scalar::*;
+    match s {
+        Null(_) | Boolean(_) | Byte(_) | Short(_) => 1,
+        Integer(_) | Float(_) => 4,
+        Long(_) | Double(_) | Date(_) | Timestamp(_) | TimestampNtz(_) => 8,
+        Decimal(_) => 16,
+        String(s) => s.len(),
+        Binary(b) => b.len(),
+        Struct(_) | Array(_) | Map(_) => 64, // rough; nested literals are rare here
+    }
+}
+
+// ============================================================================
+// Unary transforms
+// ============================================================================
+
+/// Filter rows where `predicate` evaluates `true`. `NULL` predicate values
+/// drop the row (SQL semantics).
+#[derive(Debug, Clone)]
+pub struct FilterNode {
+    pub predicate: Arc<Expression>,
+}
+
+/// Project input rows through a list of expressions into `output_schema`.
+///
+/// `columns.len()` must equal `output_schema.fields().count()`, and each
+/// expression must be evaluable against the child's schema and assignable to
+/// its matching output field.
+#[derive(Debug, Clone)]
+pub struct ProjectNode {
+    pub columns: Vec<Arc<Expression>>,
+    pub output_schema: SchemaRef,
+}
+
+// ============================================================================
+// N-ary
+// ============================================================================
+
+/// Concatenate N child streams.
+///
+/// When `ordered` is `true`, children are consumed in declaration order. When
+/// `false`, the engine may interleave or reorder freely.
+///
+/// All children must have compatible schemas; the first child's schema is
+/// the canonical output. An empty [`UnionNode`] yields the empty-struct schema.
+#[derive(Debug, Clone)]
+pub struct UnionNode {
+    pub ordered: bool,
+}
+
+// ============================================================================
+// Ordering (used by KDF phases in later PRs; kept here so the IR is stable)
+// ============================================================================
+
+/// A single-column sort specification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderingSpec {
+    pub column: ColumnName,
+    pub descending: bool,
+    pub nulls_first: bool,
+}
+
+impl OrderingSpec {
+    pub fn asc(column: ColumnName) -> Self {
+        Self {
+            column,
+            descending: false,
+            nulls_first: false,
+        }
+    }
+
+    pub fn desc(column: ColumnName) -> Self {
+        Self {
+            column,
+            descending: true,
+            nulls_first: false,
+        }
+    }
+}
+
+// ============================================================================
+// Sinks
+// ============================================================================
+
+/// Identifier for a relation produced by one plan and consumed by another in
+/// the same `PhaseOperation::Plans(...)`. Created via [`RelationHandle::fresh`];
+/// each handle is unique across all kernel plans for the lifetime of the
+/// process (id-based comparison).
+///
+/// Handles connect a [`SinkType::Relation`] in one plan to a
+/// [`super::declarative::DeclarativePlanNode::Relation`] leaf in another.
+/// The executor allocates a bounded channel per handle, the producing plan's
+/// sink writes to it, and the consuming plan's source reads from it —
+/// streaming end-to-end, not materialized.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RelationHandle {
+    /// Diagnostic name (used in tracing spans, error messages); not part of
+    /// equality / hashing.
+    pub name: String,
+    /// Process-wide monotonic id. Drives equality and hashing so that two
+    /// freshly-minted handles with the same name are still distinct.
+    pub id: u64,
+}
+
+impl RelationHandle {
+    /// Mint a fresh handle with the given diagnostic name.
+    pub fn fresh(name: impl Into<String>) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self {
+            name: name.into(),
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+}
+
+/// What the engine does with the terminal row stream.
+///
+/// This branch ships two sink shapes: `Results` for terminal pipelines that
+/// stream batches back to the caller, and `Relation` for piping a plan's
+/// output into another plan in the same `PhaseOperation::Plans(...)`.
+/// `ConsumeByKDF` (FFI consumer drain) lands with the KDF framework;
+/// `Load` / `Write` / `PartitionedWrite` land with their respective stacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SinkType {
+    /// Stream every output batch to the caller.
+    Results,
+    /// Stream every output batch to the named [`RelationHandle`]. Another
+    /// plan in the same phase consumes via
+    /// [`DeclarativePlanNode::Relation`](super::declarative::DeclarativePlanNode::Relation).
+    Relation(RelationHandle),
+}
+
+/// Terminal node of a [`super::plan::Plan`], carrying a [`SinkType`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SinkNode {
+    pub sink_type: SinkType,
+}
+
+impl SinkNode {
+    /// `Results`-sink convenience constructor.
+    pub fn results() -> Self {
+        Self {
+            sink_type: SinkType::Results,
+        }
+    }
+
+    /// `Relation`-sink convenience constructor.
+    pub fn relation(handle: RelationHandle) -> Self {
+        Self {
+            sink_type: SinkType::Relation(handle),
+        }
+    }
+}
