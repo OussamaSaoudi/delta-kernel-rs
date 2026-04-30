@@ -327,6 +327,42 @@ impl OrderingSpec {
     }
 }
 
+// ============================================================================
+// Window
+// ============================================================================
+
+/// One window function applied within a [`WindowNode`].
+///
+/// Ships `function_name = "row_number"` only — the only window function any
+/// current consumer needs. `args` is empty for `row_number`. Each function
+/// emits exactly one column whose name is `output_col` and whose type is
+/// `LONG NOT NULL` (for `row_number`; documented per future name).
+#[derive(Debug, Clone)]
+pub struct WindowFunction {
+    pub function_name: String,
+    pub args: Vec<Arc<Expression>>,
+    pub output_col: String,
+}
+
+/// Window functions over `partition_by` + `order_by`.
+///
+/// Output schema = `Schema(child) ++ (one LONG NOT NULL column per function)`.
+///
+/// Today the executor implements `row_number()` only, with empty `order_by`
+/// interpreted as upstream stream order (the canonical "first row per group"
+/// pattern: `Window(row_number()) → Filter(_rn = 1) → Project(<orig cols>)`).
+/// Non-empty `order_by` is reserved for engines that pattern-match to
+/// `WindowGroupLimit` / `PhotonTopK`; the in-process executor errors at build
+/// time if it can't honor the requested ordering.
+///
+/// Spec: `declarative_plan_docs/algebra/plan_nodes.md` §3.2 (`WindowNode`).
+#[derive(Debug, Clone)]
+pub struct WindowNode {
+    pub functions: Vec<WindowFunction>,
+    pub partition_by: Vec<Arc<Expression>>,
+    pub order_by: Vec<OrderingSpec>,
+}
+
 
 mod sinks;
 

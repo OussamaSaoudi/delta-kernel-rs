@@ -39,6 +39,7 @@
 //!   [`with_ordered`] — scan modifiers.
 //! - [`DeclarativePlanNode::filter`] — predicate filter.
 //! - [`DeclarativePlanNode::project`] — projection.
+//! - [`DeclarativePlanNode::window`] — window functions (`row_number`).
 //! - [`DeclarativePlanNode::apply_opt`] — conditional chain composition.
 //!
 //! ## Terminals
@@ -67,6 +68,7 @@
 //! [`union_unordered`]: DeclarativePlanNode::union_unordered
 //! [`with_row_index`]: DeclarativePlanNode::with_row_index
 //! [`with_ordered`]: DeclarativePlanNode::with_ordered
+//! [`window`]: DeclarativePlanNode::window
 
 use std::sync::Arc;
 
@@ -106,6 +108,11 @@ pub enum DeclarativePlanNode {
     Project {
         child: Box<DeclarativePlanNode>,
         node: ProjectNode,
+    },
+    /// Window over partitions. See [`WindowNode`].
+    Window {
+        child: Box<DeclarativePlanNode>,
+        node: WindowNode,
     },
 
     // N-ary
@@ -322,6 +329,23 @@ impl DeclarativePlanNode {
         }
     }
 
+    /// Wrap `self` in a [`Window`](Self::Window) with partition keys and ordering specs.
+    pub fn window(
+        self,
+        functions: Vec<WindowFunction>,
+        partition_by: Vec<Arc<Expression>>,
+        order_by: Vec<OrderingSpec>,
+    ) -> Self {
+        Self::Window {
+            child: Box::new(self),
+            node: WindowNode {
+                functions,
+                partition_by,
+                order_by,
+            },
+        }
+    }
+
     /// Typed KDF consumer terminal. Wraps `self` in a [`Plan`] terminating in
     /// [`SinkType::ConsumeByKdf`] and returns a [`Prepared<O>`] carrying the
     /// typed extractor.
@@ -473,7 +497,7 @@ impl DeclarativePlanNode {
             Self::Scan(..) | Self::FileListing(..) | Self::Literal(..) | Self::Relation(..) => {
                 Vec::new()
             }
-            Self::Filter { child, .. } | Self::Project { child, .. } => {
+            Self::Filter { child, .. } | Self::Project { child, .. } | Self::Window { child, .. } => {
                 vec![child.as_ref()]
             }
             Self::Union { children, .. } => children.iter().collect(),
@@ -499,6 +523,7 @@ fn node_kind_name(node: &DeclarativePlanNode) -> &'static str {
         DeclarativePlanNode::Relation(..) => "Relation",
         DeclarativePlanNode::Filter { .. } => "Filter",
         DeclarativePlanNode::Project { .. } => "Project",
+        DeclarativePlanNode::Window { .. } => "Window",
         DeclarativePlanNode::Union { .. } => "Union",
         DeclarativePlanNode::Join { .. } => "Join",
     }
