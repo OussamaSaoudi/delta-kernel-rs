@@ -40,6 +40,7 @@
 //! - [`DeclarativePlanNode::filter`] — predicate filter.
 //! - [`DeclarativePlanNode::project`] — projection.
 //! - [`DeclarativePlanNode::window`] — window functions (`row_number`).
+//! - [`DeclarativePlanNode::assert`] — schema-preserving row-level invariants.
 //! - [`DeclarativePlanNode::apply_opt`] — conditional chain composition.
 //!
 //! ## Terminals
@@ -113,6 +114,11 @@ pub enum DeclarativePlanNode {
     Window {
         child: Box<DeclarativePlanNode>,
         node: WindowNode,
+    },
+    /// Schema-preserving row-level invariant. See [`AssertNode`].
+    Assert {
+        child: Box<DeclarativePlanNode>,
+        node: AssertNode,
     },
 
     // N-ary
@@ -346,6 +352,15 @@ impl DeclarativePlanNode {
         }
     }
 
+    /// Wrap `self` in an [`Assert`](Self::Assert) with the given checks.
+    /// Schema-preserving row-level invariant; see [`AssertNode`].
+    pub fn assert(self, checks: Vec<AssertCheck>) -> Self {
+        Self::Assert {
+            child: Box::new(self),
+            node: AssertNode { checks },
+        }
+    }
+
     /// Typed KDF consumer terminal. Wraps `self` in a [`Plan`] terminating in
     /// [`SinkType::ConsumeByKdf`] and returns a [`Prepared<O>`] carrying the
     /// typed extractor.
@@ -497,7 +512,10 @@ impl DeclarativePlanNode {
             Self::Scan(..) | Self::FileListing(..) | Self::Literal(..) | Self::Relation(..) => {
                 Vec::new()
             }
-            Self::Filter { child, .. } | Self::Project { child, .. } | Self::Window { child, .. } => {
+            Self::Filter { child, .. }
+            | Self::Project { child, .. }
+            | Self::Window { child, .. }
+            | Self::Assert { child, .. } => {
                 vec![child.as_ref()]
             }
             Self::Union { children, .. } => children.iter().collect(),
@@ -524,6 +542,7 @@ fn node_kind_name(node: &DeclarativePlanNode) -> &'static str {
         DeclarativePlanNode::Filter { .. } => "Filter",
         DeclarativePlanNode::Project { .. } => "Project",
         DeclarativePlanNode::Window { .. } => "Window",
+        DeclarativePlanNode::Assert { .. } => "Assert",
         DeclarativePlanNode::Union { .. } => "Union",
         DeclarativePlanNode::Join { .. } => "Join",
     }
@@ -578,6 +597,28 @@ mod tests {
     fn union_zero_children_is_empty_struct() {
         let unioned = DeclarativePlanNode::union(Vec::<DeclarativePlanNode>::new()).unwrap();
         assert!(matches!(unioned, DeclarativePlanNode::Union { .. }));
+    }
+
+    #[test]
+    fn assert_wraps_child_with_checks() {
+        let plan = DeclarativePlanNode::scan_json(vec![], simple_schema()).assert(vec![
+            AssertCheck {
+                predicate: Arc::new(Expression::literal(true)),
+                error_code: "STATS_CLUSTERING_NOT_NULL".into(),
+                error_message: "missing stats for cluster col".into(),
+            },
+        ]);
+
+        assert!(!plan.is_leaf());
+        assert_eq!(plan.children().len(), 1);
+        assert!(plan.children()[0].is_leaf());
+        match plan {
+            DeclarativePlanNode::Assert { node, .. } => {
+                assert_eq!(node.checks.len(), 1);
+                assert_eq!(node.checks[0].error_code, "STATS_CLUSTERING_NOT_NULL");
+            }
+            _ => panic!("expected Assert"),
+        }
     }
 
     #[test]
