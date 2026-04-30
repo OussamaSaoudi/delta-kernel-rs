@@ -219,6 +219,84 @@ pub struct UnionNode {
     pub ordered: bool,
 }
 
+// Binary — equi-join
+// ============================================================================
+
+/// SQL join semantics. Selects what gets emitted, independent of how (see
+/// [`JoinHint`]).
+///
+/// Today the executor only ships [`JoinType::LeftAnti`]; other variants exist
+/// in the IR so plans can carry intent forward without a kernel migration —
+/// when an executor implementation lands, no plan-author code changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    /// Emit `(left, right)` pairs whose join keys match. Reserved.
+    Inner,
+    /// Inner ∪ unmatched left rows (right cols nulled). Reserved.
+    LeftOuter,
+    /// Inner ∪ unmatched right rows (left cols nulled). Reserved.
+    RightOuter,
+    /// LeftOuter ∪ RightOuter. Reserved.
+    FullOuter,
+    /// Emit each left row whose key matches any right row. Reserved.
+    LeftSemi,
+    /// Emit each left row whose key does NOT match any right row.
+    /// **The only variant the read-path executor implements today.**
+    LeftAnti,
+    /// Emit each right row whose key matches any left row. Reserved.
+    RightSemi,
+    /// Emit each right row whose key does NOT match any left row. Reserved.
+    RightAnti,
+}
+
+/// Strategy hint for the executor. Today only [`JoinHint::Hash`] is consumed;
+/// future hints (broadcast, sort-merge) ride on this enum without a plan-IR
+/// migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinHint {
+    /// Drain the *build* subtree into an in-memory lookup, then stream probe.
+    /// `JoinNode.build_keys` indexes the lookup; `JoinNode.probe_keys`
+    /// queries it.
+    Hash,
+}
+
+/// Equi-join with composite-key support, in build/probe framing.
+///
+/// Binary tree node: the two child subtrees produce the build and probe sides
+/// respectively. [`JoinHint`] picks the execution strategy; [`JoinType`]
+/// picks the SQL semantics.
+///
+/// # Output schema
+///
+/// `LeftAnti` mirrors the probe child's schema unchanged. Other variants are
+/// reserved (see [`JoinType`]).
+///
+/// # SQL anti-join null semantics (`LeftAnti` variant)
+///
+/// - **Build side**: rows with null in any key column are skipped (not inserted into the lookup).
+/// - **Probe side**: rows with null in any key column always pass — a null tuple can't equal
+///   anything, so it can't be in the build set.
+///
+/// # Invariants (validated by the executor at run time)
+///
+/// - `build_keys` and `probe_keys` are both non-empty.
+/// - `build_keys.len() == probe_keys.len()`.
+#[derive(Debug, Clone)]
+pub struct JoinNode {
+    /// Key expressions evaluated against build batches; their tuples are
+    /// inserted into the lookup.
+    pub build_keys: Vec<Arc<Expression>>,
+    /// Key expressions evaluated against probe batches; their tuples are
+    /// looked up against the build set.
+    pub probe_keys: Vec<Arc<Expression>>,
+    /// SQL join semantics — what to emit.
+    pub join_type: JoinType,
+    /// Execution strategy hint — how to compute the join.
+    pub hint: JoinHint,
+}
+
+// ============================================================================
+
 // ============================================================================
 // Ordering (used by KDF phases in later PRs; kept here so the IR is stable)
 // ============================================================================

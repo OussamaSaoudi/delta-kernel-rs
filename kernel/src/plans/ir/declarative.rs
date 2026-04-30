@@ -113,6 +113,14 @@ pub enum DeclarativePlanNode {
         children: Vec<DeclarativePlanNode>,
         node: UnionNode,
     },
+
+    // Binary
+    /// Equi-join. See [`JoinNode`].
+    Join {
+        build: Box<DeclarativePlanNode>,
+        probe: Box<DeclarativePlanNode>,
+        node: JoinNode,
+    },
 }
 
 // ============================================================================
@@ -220,6 +228,16 @@ impl DeclarativePlanNode {
             children,
             node: UnionNode { ordered: false },
         })
+    }
+
+    /// Equi-join with `build` and `probe` subtrees. See [`JoinNode`] for the
+    /// node-level contract (key arity, null semantics, output schema).
+    pub fn join(node: JoinNode, build: Self, probe: Self) -> Self {
+        Self::Join {
+            build: Box::new(build),
+            probe: Box::new(probe),
+            node,
+        }
     }
 }
 
@@ -459,6 +477,7 @@ impl DeclarativePlanNode {
                 vec![child.as_ref()]
             }
             Self::Union { children, .. } => children.iter().collect(),
+            Self::Join { build, probe, .. } => vec![build.as_ref(), probe.as_ref()],
         }
     }
 
@@ -481,6 +500,7 @@ fn node_kind_name(node: &DeclarativePlanNode) -> &'static str {
         DeclarativePlanNode::Filter { .. } => "Filter",
         DeclarativePlanNode::Project { .. } => "Project",
         DeclarativePlanNode::Union { .. } => "Union",
+        DeclarativePlanNode::Join { .. } => "Join",
     }
 }
 
@@ -588,6 +608,36 @@ mod tests {
         match plan {
             DeclarativePlanNode::Relation(got) => assert_eq!(got, h),
             _ => panic!("expected Relation leaf"),
+        }
+    }
+
+    #[test]
+    fn join_holds_build_and_probe_subtrees() {
+        let build = DeclarativePlanNode::scan_json(vec![], simple_schema());
+        let probe = DeclarativePlanNode::scan_json(vec![], simple_schema());
+        let plan = DeclarativePlanNode::join(
+            JoinNode {
+                build_keys: vec![Arc::new(Expression::column(["version"]))],
+                probe_keys: vec![Arc::new(Expression::column(["version"]))],
+                join_type: JoinType::LeftAnti,
+                hint: JoinHint::Hash,
+            },
+            build,
+            probe,
+        );
+        assert!(!plan.is_leaf());
+        let children = plan.children();
+        assert_eq!(children.len(), 2);
+        assert!(children[0].is_leaf());
+        assert!(children[1].is_leaf());
+        match plan {
+            DeclarativePlanNode::Join { node, .. } => {
+                assert_eq!(node.join_type, JoinType::LeftAnti);
+                assert_eq!(node.hint, JoinHint::Hash);
+                assert_eq!(node.build_keys.len(), 1);
+                assert_eq!(node.probe_keys.len(), 1);
+            }
+            other => panic!("expected Join, got {other:?}"),
         }
     }
 
