@@ -51,6 +51,9 @@
 //! - [`DeclarativePlanNode::into_relation`] — pipe output into a named
 //!   [`RelationHandle`](super::nodes::RelationHandle) for another plan in
 //!   the same `PhaseOperation::Plans(...)` to consume.
+//! - [`DeclarativePlanNode::into_load`] — file-reader sink: each upstream
+//!   row describes a file to open and read. Materializes under a named
+//!   relation handle.
 //! - [`DeclarativePlanNode::consume`] — typed KDF consumer terminal; returns
 //!   a [`Prepared<O>`] whose plan terminates in
 //!   [`SinkType::ConsumeByKdf`](super::nodes::SinkType::ConsumeByKdf).
@@ -499,6 +502,14 @@ impl DeclarativePlanNode {
     pub fn into_relation(self, handle: RelationHandle) -> Plan {
         self.into_plan(SinkType::Relation(handle))
     }
+
+    /// Terminal: file-reader sink. For each upstream row, open the resolved
+    /// file, read [`LoadSink::file_schema`] columns, and materialize the
+    /// result under [`LoadSink::output_relation`] for downstream
+    /// [`Self::relation`] consumers in the same phase. See [`LoadSink`].
+    pub fn into_load(self, sink: LoadSink) -> Plan {
+        self.into_plan(SinkType::Load(sink))
+    }
 }
 
 // ============================================================================
@@ -557,7 +568,7 @@ mod tests {
     use std::any::Any;
 
     use super::*;
-    use crate::expressions::Expression;
+    use crate::expressions::{ColumnName, Expression};
     use crate::plans::errors::DeltaError;
     use crate::plans::kdf::{ConsumerKdf, Kdf, KdfControl, KdfOutput};
     use crate::schema::{DataType, StructField, StructType};
@@ -597,6 +608,29 @@ mod tests {
     fn union_zero_children_is_empty_struct() {
         let unioned = DeclarativePlanNode::union(Vec::<DeclarativePlanNode>::new()).unwrap();
         assert!(matches!(unioned, DeclarativePlanNode::Union { .. }));
+    }
+
+    #[test]
+    fn load_sink_terminal_emits_load_sink() {
+        let out_handle = RelationHandle::fresh("manifest_files", simple_schema());
+        let load = LoadSink {
+            output_relation: out_handle.clone(),
+            file_schema: simple_schema(),
+            base_url: None,
+            file_meta: ScanFileColumns {
+                path: ColumnName::new(["path"]),
+                size: None,
+                record_count: None,
+            },
+            passthrough_columns: vec![],
+            row_index_column: None,
+            file_type: FileType::Parquet,
+        };
+        let plan = DeclarativePlanNode::scan_json(vec![], simple_schema()).into_load(load);
+        match plan.sink.sink_type {
+            SinkType::Load(ls) => assert_eq!(ls.output_relation, out_handle),
+            other => panic!("expected Load sink, got {other:?}"),
+        }
     }
 
     #[test]

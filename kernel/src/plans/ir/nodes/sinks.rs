@@ -1,12 +1,12 @@
-//! Sink IR types — relation piping and [`ConsumeByKdf`] sinks.
+//! Sink IR types — relation piping, [`ConsumeByKdf`] and file-reader [`LoadSink`].
 
 use std::sync::Arc;
 
-use crate::expressions::Expression;
+use crate::expressions::{ColumnName, Expression};
 use crate::plans::kdf::{ConsumerKdf, Handle, KdfStateToken, TraceContext};
 use crate::schema::SchemaRef;
 
-use super::OrderingSpec;
+use super::{FileType, OrderingSpec};
 
 /// Template for draining a row stream into a [`ConsumerKdf`] via
 /// [`SinkType::ConsumeByKdf`].
@@ -132,13 +132,85 @@ impl std::hash::Hash for RelationHandle {
     }
 }
 
+/// Column-name hints that a [`LoadSink`] reads from each upstream row to
+/// resolve which file to open. The `path` column is mandatory; `size` and
+/// `record_count` are advisory and used by engines for split-sizing /
+/// pruning decisions.
+///
+/// Names are [`ColumnName`]s so they may reference nested fields (e.g.
+/// `add.path` on a Delta-checkpoint upstream).
+///
+/// Spec: `declarative_plan_docs/algebra/plan_nodes.md` §7.3
+/// (`ScanFileColumns`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanFileColumns {
+    /// Column on the upstream relation holding the per-row file path /
+    /// URL fragment. Joined to [`LoadSink::base_url`] when set.
+    pub path: ColumnName,
+    /// Optional column with the file's total size in bytes.
+    pub size: Option<ColumnName>,
+    /// Optional column with the file's row-count (parquet-encoded `numRecords`).
+    pub record_count: Option<ColumnName>,
+}
+
+/// File-reader sink. For each upstream row, opens the resolved file in
+/// [`Self::file_type`], reads [`Self::file_schema`] columns, optionally
+/// emits a [`Self::row_index_column`], and broadcasts the row's
+/// [`Self::passthrough_columns`] alongside each emitted file row.
+///
+/// The materialized result is named via [`Self::output_relation`] so that
+/// downstream plans in the same phase can consume it through
+/// [`crate::plans::ir::declarative::DeclarativePlanNode::Relation`].
+///
+/// This Phase 0.6 surface intentionally omits DV-mask (`inline_dv`) and
+/// pushdown predicate; both land with subsequent stack PRs.
+///
+/// Spec: `declarative_plan_docs/algebra/plan_nodes.md` §5
+/// (`Sink: Load (LoadSinkNode)`).
+#[derive(Debug, Clone)]
+pub struct LoadSink {
+    /// Where Load's output is materialized. Downstream plans reference this
+    /// handle via [`crate::plans::ir::declarative::DeclarativePlanNode::Relation`].
+    pub output_relation: RelationHandle,
+    /// Desired per-file output columns (nullability follows
+    /// [`crate::ParquetHandler::read_parquet_files`] semantics).
+    pub file_schema: SchemaRef,
+    /// Optional URL prefix joined with each per-row path. When `None`, the
+    /// path column is treated as an absolute URL.
+    pub base_url: Option<url::Url>,
+    /// Column-name hints used to read per-row file metadata from upstream.
+    pub file_meta: ScanFileColumns,
+    /// Names of upstream columns to broadcast verbatim onto every output row
+    /// (e.g. `add.path` for downstream joins back to the manifest).
+    pub passthrough_columns: Vec<ColumnName>,
+    /// Optional name for a synthetic per-file `LONG NOT NULL` row-index
+    /// column. Must not collide with [`Self::file_schema`] or
+    /// [`Self::passthrough_columns`].
+    pub row_index_column: Option<String>,
+    /// Read format. Phase 0.6 supports `Parquet` and `Json`; later stacks
+    /// add the spec's full `FileFormat` tagged union.
+    pub file_type: FileType,
+}
+
+impl PartialEq for LoadSink {
+    fn eq(&self, other: &Self) -> bool {
+        // Identity follows the materialized relation handle (process-wide
+        // unique). Two sinks that target the same handle are the same sink
+        // for plan-equality purposes.
+        self.output_relation == other.output_relation
+    }
+}
+
+impl Eq for LoadSink {}
+
 /// What the engine does with the terminal row stream.
 ///
-/// This branch ships three sink shapes: `Results` for terminal pipelines that
+/// This branch ships four sink shapes: `Results` for terminal pipelines that
 /// stream batches back to the caller, `Relation` for piping a plan's output
-/// into another plan in the same `PhaseOperation::Plans(...)`, and
-/// `ConsumeByKdf` for draining a stream into a [`ConsumerKdf`] state machine.
-/// `Load` / `Write` / `PartitionedWrite` land with their respective stacks.
+/// into another plan in the same `PhaseOperation::Plans(...)`,
+/// `ConsumeByKdf` for draining a stream into a [`ConsumerKdf`] state machine,
+/// and `Load` for the file-reader sink. `Write` / `PartitionedWrite` land
+/// with their stacks.
 #[derive(Debug, Clone)]
 pub enum SinkType {
     /// Stream every output batch to the caller.
@@ -153,6 +225,9 @@ pub enum SinkType {
     /// [`Prepared`](crate::plans::ir::declarative::Prepared) extractor that yields
     /// `O = ConsumerKdf::Output`).
     ConsumeByKdf(ConsumeByKdfSink),
+    /// File-reader sink — for each upstream row, read a file and materialize
+    /// the result under [`LoadSink::output_relation`]. See [`LoadSink`].
+    Load(LoadSink),
 }
 
 impl PartialEq for SinkType {
@@ -161,6 +236,7 @@ impl PartialEq for SinkType {
             (SinkType::Results, SinkType::Results) => true,
             (SinkType::Relation(a), SinkType::Relation(b)) => a == b,
             (SinkType::ConsumeByKdf(a), SinkType::ConsumeByKdf(b)) => a.token == b.token,
+            (SinkType::Load(a), SinkType::Load(b)) => a == b,
             _ => false,
         }
     }
@@ -193,6 +269,13 @@ impl SinkNode {
     pub fn consume_by_kdf(node: ConsumeByKdfSink) -> Self {
         Self {
             sink_type: SinkType::ConsumeByKdf(node),
+        }
+    }
+
+    /// `Load`-sink convenience constructor.
+    pub fn load(node: LoadSink) -> Self {
+        Self {
+            sink_type: SinkType::Load(node),
         }
     }
 }

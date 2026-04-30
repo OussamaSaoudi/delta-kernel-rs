@@ -407,4 +407,6 @@ pub struct AssertNode {
 
 mod sinks;
 
-pub use sinks::{ConsumeByKdfSink, RelationHandle, SinkNode, SinkType};
+pub use sinks::{
+    ConsumeByKdfSink, LoadSink, RelationHandle, ScanFileColumns, SinkNode, SinkType,
+};
