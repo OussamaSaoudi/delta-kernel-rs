@@ -32,6 +32,8 @@ use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, LogCompactionWriter, Version};
 
 mod builder;
+#[cfg(feature = "declarative-plans")]
+mod full_state;
 pub use builder::SnapshotBuilder;
 
 /// A shared, thread-safe reference to a [`Snapshot`].
