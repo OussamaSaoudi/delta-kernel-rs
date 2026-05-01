@@ -56,7 +56,7 @@ async fn partitioned_write_parquet_hive_paths_and_row_counts() {
         vec![Scalar::String("eu".into()), Scalar::Long(3)],
     ];
     let sink = PartitionedWriteSink::parquet(dest, vec!["region".into()]);
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .expect("literal")
         .into_partitioned_write(sink);
 
@@ -95,7 +95,7 @@ async fn partitioned_write_json_lines_roundtrip_values() {
         vec![Scalar::String("us".into()), Scalar::Long(20)],
     ];
     let sink = PartitionedWriteSink::json_lines(dest, vec!["region".into()]);
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .expect("literal")
         .into_partitioned_write(sink);
 
@@ -147,7 +147,7 @@ async fn partitioned_write_two_level_hive_layout() {
         ],
     ];
     let sink = PartitionedWriteSink::parquet(dest, vec!["dt".into(), "region".into()]);
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .expect("literal")
         .into_partitioned_write(sink);
 
@@ -176,12 +176,12 @@ async fn partitioned_write_union_batches_merge_same_directory() {
     let dir = TempDir::new().expect("tempdir");
     let dest = file_url(&dir);
     let schema = region_value_schema();
-    let a = DeclarativePlanNode::literal(
+    let a = DeclarativePlanNode::values(
         schema.clone(),
         vec![vec![Scalar::String("eu".into()), Scalar::Long(1)]],
     )
     .expect("lit a");
-    let b = DeclarativePlanNode::literal(
+    let b = DeclarativePlanNode::values(
         schema,
         vec![vec![Scalar::String("eu".into()), Scalar::Long(2)]],
     )
@@ -205,7 +205,7 @@ async fn partitioned_write_escapes_special_characters_in_segment() {
     let schema = region_value_schema();
     let rows = vec![vec![Scalar::String("a:b".into()), Scalar::Long(7)]];
     let sink = PartitionedWriteSink::parquet(dest, vec!["region".into()]);
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .expect("literal")
         .into_partitioned_write(sink);
 
@@ -225,7 +225,7 @@ fn partitioned_write_compile_errors_on_unknown_partition_column() {
     let schema = region_value_schema();
     let rows = vec![vec![Scalar::String("eu".into()), Scalar::Long(1)]];
     let sink = PartitionedWriteSink::parquet(dest, vec!["no_such_col".into()]);
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .expect("literal")
         .into_partitioned_write(sink);
 

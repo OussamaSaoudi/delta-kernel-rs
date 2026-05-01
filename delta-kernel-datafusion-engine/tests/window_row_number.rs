@@ -45,7 +45,7 @@ fn row_number_resets_on_partition_change_stream_order() {
         vec![Scalar::Long(2), Scalar::Long(30)],
         vec![Scalar::Long(2), Scalar::Long(40)],
     ];
-    let plan = DeclarativePlanNode::literal(schema.clone(), rows)
+    let plan = DeclarativePlanNode::values(schema.clone(), rows)
         .expect("literal")
         .window(
             vec![WindowFunction {
@@ -56,7 +56,7 @@ fn row_number_resets_on_partition_change_stream_order() {
             vec![Arc::new(Expression::column(["part"]))],
             vec![],
         )
-        .results();
+        .into_results();
 
     let exec = DataFusionExecutor::try_new().expect("executor");
     let batches =
@@ -74,7 +74,7 @@ fn row_number_global_when_no_partition_keys() {
         vec![Scalar::Long(1), Scalar::Long(10)],
         vec![Scalar::Long(99), Scalar::Long(20)],
     ];
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .expect("literal")
         .window(
             vec![WindowFunction {
@@ -85,7 +85,7 @@ fn row_number_global_when_no_partition_keys() {
             vec![],
             vec![],
         )
-        .results();
+        .into_results();
 
     let exec = DataFusionExecutor::try_new().expect("executor");
     let batches =
@@ -101,7 +101,7 @@ fn multiple_row_number_functions_duplicate_rank_column() {
         vec![Scalar::Long(1), Scalar::Long(10)],
         vec![Scalar::Long(1), Scalar::Long(20)],
     ];
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .expect("literal")
         .window(
             vec![
@@ -119,7 +119,7 @@ fn multiple_row_number_functions_duplicate_rank_column() {
             vec![Arc::new(Expression::column(["part"]))],
             vec![],
         )
-        .results();
+        .into_results();
 
     let exec = DataFusionExecutor::try_new().expect("executor");
     let batches =
@@ -144,7 +144,7 @@ fn row_number_with_order_by_desc_assigns_rank_within_partition() {
         vec![Scalar::Long(2), Scalar::Long(40)],
         vec![Scalar::Long(1), Scalar::Long(20)],
     ];
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .expect("literal")
         .window(
             vec![WindowFunction {
@@ -157,7 +157,7 @@ fn row_number_with_order_by_desc_assigns_rank_within_partition() {
                 delta_kernel::expressions::ColumnName::new(["v"]),
             )],
         )
-        .results();
+        .into_results();
 
     let exec = DataFusionExecutor::try_new().expect("executor");
     let batches =
@@ -203,7 +203,7 @@ fn row_number_with_order_by_asc_matches_inverted_desc() {
         vec![Scalar::Long(1), Scalar::Long(10)],
         vec![Scalar::Long(1), Scalar::Long(20)],
     ];
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .expect("literal")
         .window(
             vec![WindowFunction {
@@ -216,7 +216,7 @@ fn row_number_with_order_by_asc_matches_inverted_desc() {
                 delta_kernel::expressions::ColumnName::new(["v"]),
             )],
         )
-        .results();
+        .into_results();
 
     let exec = DataFusionExecutor::try_new().expect("executor");
     let batches =

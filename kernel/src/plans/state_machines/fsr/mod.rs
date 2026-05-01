@@ -59,7 +59,7 @@ pub fn try_build_fsr_strip_then_fanout_sm(
     CoroutineSM::new(|mut co| async move {
         let mut phase = Phase(&mut co);
 
-        let (strip_plan, strip_extractor) = DeclarativePlanNode::literal(strip_schema, strip_rows)
+        let (strip_plan, strip_extractor) = DeclarativePlanNode::values(strip_schema, strip_rows)
             .map_err(|e| e.into_delta_default())?
             .consume(RowCounter::default());
         let strip_state = phase
@@ -85,7 +85,7 @@ pub fn try_build_fsr_strip_then_fanout_sm(
             )
         })?;
 
-        let (fan_plan, fan_extractor) = DeclarativePlanNode::literal(fanout_schema, fanout_rows)
+        let (fan_plan, fan_extractor) = DeclarativePlanNode::values(fanout_schema, fanout_rows)
             .map_err(|e| e.into_delta_default())?
             .consume(RowCounter::default());
         let fan_state = phase

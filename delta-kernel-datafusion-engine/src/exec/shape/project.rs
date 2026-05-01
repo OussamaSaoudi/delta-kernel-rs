@@ -422,7 +422,7 @@ mod tests {
             vec![Scalar::Long(1), Scalar::String("x".into())],
             vec![Scalar::Long(2), Scalar::String("y".into())],
         ];
-        let plan = DeclarativePlanNode::literal(input_schema.clone(), rows)
+        let plan = DeclarativePlanNode::values(input_schema.clone(), rows)
             .expect("literal")
             .project(
                 vec![Arc::new(Expression::struct_from([
@@ -431,7 +431,7 @@ mod tests {
                 ]))],
                 out_schema.clone(),
             )
-            .results();
+            .into_results();
 
         let exec = DataFusionExecutor::try_new().expect("executor");
         let batches = exec.execute_plan_collect(plan).await.expect("run");
@@ -465,7 +465,7 @@ mod tests {
             DataType::Struct(Box::new(inner.clone())),
         )]));
         let rows = vec![vec![Scalar::Long(7), Scalar::String("hi".into())]];
-        let plan = DeclarativePlanNode::literal(input_schema.clone(), rows)
+        let plan = DeclarativePlanNode::values(input_schema.clone(), rows)
             .expect("literal")
             .project(
                 vec![Arc::new(Expression::struct_from([
@@ -474,7 +474,7 @@ mod tests {
                 ]))],
                 out_schema.clone(),
             )
-            .results();
+            .into_results();
 
         let exec = DataFusionExecutor::try_new().expect("executor");
         let batches = exec.execute_plan_collect(plan).await.expect("run");
@@ -525,7 +525,7 @@ mod tests {
                 Scalar::String("b".into()),
             ],
         ];
-        let plan = DeclarativePlanNode::literal(input_schema.clone(), rows)
+        let plan = DeclarativePlanNode::values(input_schema.clone(), rows)
             .expect("literal")
             .project(
                 vec![
@@ -537,7 +537,7 @@ mod tests {
                 ],
                 out_schema.clone(),
             )
-            .results();
+            .into_results();
 
         let exec = DataFusionExecutor::try_new().expect("executor");
         let batches = exec.execute_plan_collect(plan).await.expect("run");

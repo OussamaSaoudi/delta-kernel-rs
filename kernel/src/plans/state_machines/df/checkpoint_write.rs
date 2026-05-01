@@ -60,7 +60,7 @@ pub fn prepare_classic_checkpoint_parquet_materialization(
 
 /// Declarative plan: stream registered checkpoint batches into the classic parquet checkpoint path.
 pub fn checkpoint_classic_parquet_write_plan(handle: RelationHandle, destination: Url) -> Plan {
-    DeclarativePlanNode::Relation(handle).into_write(WriteSink::parquet(destination))
+    DeclarativePlanNode::RelationRef(handle).into_write(WriteSink::parquet(destination))
 }
 
 /// Single-phase SM: write a classic parquet checkpoint plan.

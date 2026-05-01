@@ -24,6 +24,10 @@ pub enum FileType {
     Json,
 }
 
+/// Alias for [`FileType`] used by format-parametric scan APIs when the readable format is chosen at
+/// runtime (for example checkpoint JSON vs Parquet).
+pub type FileFormat = FileType;
+
 /// Read columnar data from a fixed file list.
 ///
 /// # Schema contract
@@ -87,28 +91,28 @@ pub struct FileListingNode {
     pub path: url::Url,
 }
 
-/// Kernel-provided constant rows (no I/O).
+/// Kernel-provided constant rows (no I/O), matching SQL `VALUES`-style rows.
 ///
 /// Emits `rows.len()` rows, each carrying one [`Scalar`] per top-level field
 /// in `schema`.
 ///
 /// # Invariants
 ///
-/// Enforced by [`LiteralNode::validate`]:
+/// Enforced by [`ValuesNode::try_new`] / [`ValuesNode::try_new_row`]:
 /// - `rows.len() <= LITERAL_NODE_MAX_ROWS`
 /// - every row has `values.len() == schema.fields().count()`
 /// - every row has `values.len() <= LITERAL_NODE_MAX_COLS`
 /// - estimated total payload `<= LITERAL_NODE_MAX_ESTIMATED_BYTES`
 ///
 /// The layout mirrors [`crate::EvaluationHandler::create_many`], which is
-/// what the executor uses to materialize a literal node into `EngineData`.
+/// what the executor uses to materialize a values node into `EngineData`.
 #[derive(Debug, Clone)]
-pub struct LiteralNode {
+pub struct ValuesNode {
     pub schema: SchemaRef,
     pub rows: Vec<Vec<Scalar>>,
 }
 
-/// Maximum number of rows in a [`LiteralNode`].
+/// Maximum number of rows in a [`ValuesNode`].
 pub const LITERAL_NODE_MAX_ROWS: usize = 1024;
 
 /// Maximum number of top-level scalars per row.
@@ -117,7 +121,7 @@ pub const LITERAL_NODE_MAX_COLS: usize = 100;
 /// Maximum estimated payload bytes across all rows.
 pub const LITERAL_NODE_MAX_ESTIMATED_BYTES: usize = 10 * 1024;
 
-impl LiteralNode {
+impl ValuesNode {
     /// Construct and validate a multi-row literal.
     pub fn try_new(schema: SchemaRef, rows: Vec<Vec<Scalar>>) -> DeltaResult<Self> {
         Self::validate(&schema, &rows)?;
@@ -132,7 +136,7 @@ impl LiteralNode {
     fn validate(schema: &SchemaRef, rows: &[Vec<Scalar>]) -> DeltaResult<()> {
         if rows.len() > LITERAL_NODE_MAX_ROWS {
             return Err(Error::generic(format!(
-                "LiteralNode exceeds max rows: {} > {}",
+                "ValuesNode exceeds max rows: {} > {}",
                 rows.len(),
                 LITERAL_NODE_MAX_ROWS,
             )));
@@ -142,14 +146,14 @@ impl LiteralNode {
         for (i, row) in rows.iter().enumerate() {
             if row.len() != expected_cols {
                 return Err(Error::generic(format!(
-                    "LiteralNode row {i} has {} scalars, schema expects {}",
+                    "ValuesNode row {i} has {} scalars, schema expects {}",
                     row.len(),
                     expected_cols,
                 )));
             }
             if row.len() > LITERAL_NODE_MAX_COLS {
                 return Err(Error::generic(format!(
-                    "LiteralNode row {i} exceeds max cols: {} > {}",
+                    "ValuesNode row {i} exceeds max cols: {} > {}",
                     row.len(),
                     LITERAL_NODE_MAX_COLS,
                 )));
@@ -160,7 +164,7 @@ impl LiteralNode {
         }
         if total_bytes > LITERAL_NODE_MAX_ESTIMATED_BYTES {
             return Err(Error::generic(format!(
-                "LiteralNode exceeds max payload: {total_bytes} > {LITERAL_NODE_MAX_ESTIMATED_BYTES}",
+                "ValuesNode exceeds max payload: {total_bytes} > {LITERAL_NODE_MAX_ESTIMATED_BYTES}",
             )));
         }
         Ok(())
@@ -168,7 +172,7 @@ impl LiteralNode {
 }
 
 /// Coarse upper bound on the heap footprint of a scalar. Conservative — used
-/// only to gate [`LiteralNode`] payload size.
+/// only to gate [`ValuesNode`] payload size.
 fn estimate_scalar_bytes(s: &Scalar) -> usize {
     use Scalar::*;
     match s {

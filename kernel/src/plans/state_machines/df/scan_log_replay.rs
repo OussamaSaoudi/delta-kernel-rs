@@ -193,7 +193,7 @@ fn build_plans(snapshot: &Snapshot) -> Result<ScanPlans, DeltaError> {
         )?
         .filter(add_path_is_not_null())
         .project(scan_row_projection(), scan_row_schema())
-        .results();
+        .into_results();
         return Ok(ScanPlans {
             results,
             feeders: Vec::new(),
@@ -227,14 +227,14 @@ fn build_plans(snapshot: &Snapshot) -> Result<ScanPlans, DeltaError> {
             join_type: JoinType::LeftAnti,
             hint: JoinHint::Hash,
         },
-        DeclarativePlanNode::relation(phase1_handle.clone()),
-        DeclarativePlanNode::relation(checkpoint_handle),
+        DeclarativePlanNode::relation_ref(phase1_handle.clone()),
+        DeclarativePlanNode::relation_ref(checkpoint_handle),
     )
     .into_relation(anti_join_handle.clone());
 
     let unioned = DeclarativePlanNode::union_unordered(vec![
-        DeclarativePlanNode::relation(phase1_handle),
-        DeclarativePlanNode::relation(anti_join_handle),
+        DeclarativePlanNode::relation_ref(phase1_handle),
+        DeclarativePlanNode::relation_ref(anti_join_handle),
     ])
     .map_err(|e| {
         crate::delta_error!(
@@ -246,7 +246,7 @@ fn build_plans(snapshot: &Snapshot) -> Result<ScanPlans, DeltaError> {
     let results = unioned
         .filter(add_path_is_not_null())
         .project(scan_row_projection(), scan_row_schema())
-        .results();
+        .into_results();
 
     Ok(ScanPlans {
         results,

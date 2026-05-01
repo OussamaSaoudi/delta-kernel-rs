@@ -14,7 +14,7 @@
 //! // Untyped pipeline: scan JSON, project to a sub-schema, stream results.
 //! let plan = DeclarativePlanNode::scan_json_as::<CheckpointHintRecord>(files)
 //!     .project(projection, output_schema)
-//!     .results();
+//!     .into_results();
 //!
 //! // Typed pipeline: scan JSON, drain into a typed consumer KDF, recover
 //! // the typed output from the resulting PhaseState.
@@ -30,8 +30,8 @@
 //! - [`DeclarativePlanNode::scan_as`] / [`scan_json_as`] / [`scan_parquet_as`] — schemas inferred
 //!   from a struct via [`crate::schema::ToSchema`].
 //! - [`DeclarativePlanNode::listing`] — storage prefix listing.
-//! - [`DeclarativePlanNode::literal`] / [`literal_row`] — kernel-provided constant rows. Aligned
-//!   with [`crate::EvaluationHandler::create_many`].
+//! - [`DeclarativePlanNode::values`] / [`values_row`] — kernel-provided constant rows (`VALUES`-style).
+//!   Aligned with [`crate::EvaluationHandler::create_many`].
 //! - [`DeclarativePlanNode::union`] / [`union_unordered`] — concatenate N children.
 //!
 //! ## Transforms
@@ -47,7 +47,7 @@
 //! ## Terminals
 //!
 //! - [`DeclarativePlanNode::into_plan`] — explicit sink.
-//! - [`DeclarativePlanNode::results`] — sugar for `into_plan(SinkType::Results)`.
+//! - [`DeclarativePlanNode::into_results`] — sugar for `into_plan(SinkType::Results)`.
 //! - [`DeclarativePlanNode::into_relation`] — pipe output into a named
 //!   [`RelationHandle`](super::nodes::RelationHandle) for another plan in the same
 //!   `PhaseOperation::Plans(...)` to consume.
@@ -73,7 +73,7 @@
 //! [`scan_parquet`]: DeclarativePlanNode::scan_parquet
 //! [`scan_json_as`]: DeclarativePlanNode::scan_json_as
 //! [`scan_parquet_as`]: DeclarativePlanNode::scan_parquet_as
-//! [`literal_row`]: DeclarativePlanNode::literal_row
+//! [`values_row`]: DeclarativePlanNode::values_row
 //! [`union_unordered`]: DeclarativePlanNode::union_unordered
 //! [`with_row_index`]: DeclarativePlanNode::with_row_index
 //! [`with_ordered`]: DeclarativePlanNode::with_ordered
@@ -98,7 +98,7 @@ use crate::{DeltaResult, Error, FileMeta};
 /// A single node in the declarative plan tree.
 ///
 /// Trees are transforms-only: every complete pipeline terminates in a
-/// [`Plan`] via one of the terminal methods (`into_plan`, `results`,
+/// [`Plan`] via one of the terminal methods (`into_plan`, `into_results`,
 /// `into_relation`, `into_load`, `into_write`, `into_partitioned_write`, `consume_by_kdf`) or in a
 /// `(Plan, Extractor<O>)` pair via [`DeclarativePlanNode::consume`].
 #[derive(Debug, Clone)]
@@ -106,12 +106,12 @@ pub enum DeclarativePlanNode {
     // Leaves
     Scan(ScanNode),
     FileListing(FileListingNode),
-    Literal(LiteralNode),
+    Values(ValuesNode),
     /// Read batches from a relation produced by another plan in the same
     /// `PhaseOperation::Plans(...)`. Wired up by the executor to a bounded
     /// channel whose sender is held by the producing plan's
     /// [`SinkType::Relation`](super::nodes::SinkType::Relation).
-    Relation(RelationHandle),
+    RelationRef(RelationHandle),
 
     // Unary
     Filter {
@@ -153,26 +153,33 @@ pub enum DeclarativePlanNode {
 // ============================================================================
 
 impl DeclarativePlanNode {
-    /// Scan a fixed file list with an explicit schema.
-    pub fn scan(file_type: FileType, files: Vec<FileMeta>, schema: SchemaRef) -> Self {
-        Self::Scan(ScanNode::new(file_type, files, schema))
+    /// Scan a fixed file list with an explicit schema when the readable [`FileFormat`] is chosen at
+    /// runtime (for example FSR Plan A4 checkpoint shape).
+    ///
+    /// Dispatches to [`Self::scan_parquet`] or [`Self::scan_json`]. Prefer those helpers when the
+    /// format is known statically.
+    pub fn scan(format: FileFormat, files: Vec<FileMeta>, schema: SchemaRef) -> Self {
+        match format {
+            FileType::Parquet => Self::scan_parquet(files, schema),
+            FileType::Json => Self::scan_json(files, schema),
+        }
     }
 
     /// Scan JSON files with an explicit schema.
     pub fn scan_json(files: Vec<FileMeta>, schema: SchemaRef) -> Self {
-        Self::scan(FileType::Json, files, schema)
+        Self::Scan(ScanNode::new(FileType::Json, files, schema))
     }
 
     /// Scan Parquet files with an explicit schema.
     pub fn scan_parquet(files: Vec<FileMeta>, schema: SchemaRef) -> Self {
-        Self::scan(FileType::Parquet, files, schema)
+        Self::Scan(ScanNode::new(FileType::Parquet, files, schema))
     }
 
     /// Scan a fixed file list with a schema inferred from `T`.
     ///
     /// Shortcut for [`Self::scan`] with `schema = Arc::new(T::to_schema())`.
-    pub fn scan_as<T: ToSchema>(file_type: FileType, files: Vec<FileMeta>) -> Self {
-        Self::scan(file_type, files, Arc::new(T::to_schema()))
+    pub fn scan_as<T: ToSchema>(format: FileFormat, files: Vec<FileMeta>) -> Self {
+        Self::scan(format, files, Arc::new(T::to_schema()))
     }
 
     /// Scan JSON files with a schema inferred from `T`.
@@ -194,11 +201,11 @@ impl DeclarativePlanNode {
     /// `PhaseOperation::Plans(...)`. The producing plan terminates in
     /// [`SinkType::Relation`](super::nodes::SinkType::Relation) referencing
     /// the same handle.
-    pub fn relation(handle: RelationHandle) -> Self {
-        Self::Relation(handle)
+    pub fn relation_ref(handle: RelationHandle) -> Self {
+        Self::RelationRef(handle)
     }
 
-    /// Empty literal — zero rows with an empty-struct schema.
+    /// Empty values node — zero rows with an empty-struct schema.
     ///
     /// Useful as a placeholder for pipelines that must exist structurally but
     /// produce no rows.
@@ -206,20 +213,20 @@ impl DeclarativePlanNode {
         let schema = Arc::new(StructType::new_unchecked(
             Vec::<crate::schema::StructField>::new(),
         ));
-        Self::Literal(LiteralNode {
+        Self::Values(ValuesNode {
             schema,
             rows: Vec::new(),
         })
     }
 
-    /// Multi-row literal. Rows × columns layout; see [`LiteralNode`] invariants.
-    pub fn literal(schema: SchemaRef, rows: Vec<Vec<Scalar>>) -> DeltaResult<Self> {
-        Ok(Self::Literal(LiteralNode::try_new(schema, rows)?))
+    /// Multi-row `VALUES`-style literal table. Rows × columns layout; see [`ValuesNode`] invariants.
+    pub fn values(schema: SchemaRef, rows: Vec<Vec<Scalar>>) -> DeltaResult<Self> {
+        Ok(Self::Values(ValuesNode::try_new(schema, rows)?))
     }
 
-    /// Single-row literal. Sugar for the common one-row case.
-    pub fn literal_row(schema: SchemaRef, values: Vec<Scalar>) -> DeltaResult<Self> {
-        Ok(Self::Literal(LiteralNode::try_new_row(schema, values)?))
+    /// Single-row values node. Sugar for the common one-row case.
+    pub fn values_row(schema: SchemaRef, values: Vec<Scalar>) -> DeltaResult<Self> {
+        Ok(Self::Values(ValuesNode::try_new_row(schema, values)?))
     }
 
     /// Ordered union of N child streams; children are consumed in declaration
@@ -479,7 +486,7 @@ impl DeclarativePlanNode {
     ///             .filter(ds.predicate)
     ///     })
     ///     .project(final_cols, final_schema)
-    ///     .results();
+    ///     .into_results();
     /// ```
     pub fn apply_opt<T, F>(self, opt: Option<T>, f: F) -> Self
     where
@@ -503,13 +510,13 @@ impl DeclarativePlanNode {
     }
 
     /// Terminal: stream every output batch to the caller.
-    pub fn results(self) -> Plan {
+    pub fn into_results(self) -> Plan {
         self.into_plan(SinkType::Results)
     }
 
     /// Terminal: stream every output batch to the named relation. Another
     /// plan in the same `PhaseOperation::Plans(...)` consumes the relation
-    /// via [`Self::relation`].
+    /// via [`Self::relation_ref`].
     pub fn into_relation(self, handle: RelationHandle) -> Plan {
         self.into_plan(SinkType::Relation(handle))
     }
@@ -518,7 +525,7 @@ impl DeclarativePlanNode {
     /// file, read [`LoadSink::file_schema`] columns (with optional DV masking
     /// when [`LoadSink::dv_ref`] names an upstream descriptor column), and
     /// materialize the result under [`LoadSink::output_relation`] for downstream
-    /// [`Self::relation`] consumers in the same phase. See [`LoadSink`].
+    /// [`Self::relation_ref`] consumers in the same phase. See [`LoadSink`].
     pub fn into_load(self, sink: LoadSink) -> Plan {
         self.into_plan(SinkType::Load(sink))
     }
@@ -545,7 +552,7 @@ impl DeclarativePlanNode {
     /// Borrowed child subtrees, in left-to-right declaration order.
     pub fn children(&self) -> Vec<&DeclarativePlanNode> {
         match self {
-            Self::Scan(..) | Self::FileListing(..) | Self::Literal(..) | Self::Relation(..) => {
+            Self::Scan(..) | Self::FileListing(..) | Self::Values(..) | Self::RelationRef(..) => {
                 Vec::new()
             }
             Self::Filter { child, .. }
@@ -563,7 +570,7 @@ impl DeclarativePlanNode {
     pub fn is_leaf(&self) -> bool {
         matches!(
             self,
-            Self::Scan(..) | Self::FileListing(..) | Self::Literal(..) | Self::Relation(..)
+            Self::Scan(..) | Self::FileListing(..) | Self::Values(..) | Self::RelationRef(..)
         )
     }
 }
@@ -573,8 +580,8 @@ fn node_kind_name(node: &DeclarativePlanNode) -> &'static str {
     match node {
         DeclarativePlanNode::Scan(..) => "Scan",
         DeclarativePlanNode::FileListing(..) => "FileListing",
-        DeclarativePlanNode::Literal(..) => "Literal",
-        DeclarativePlanNode::Relation(..) => "Relation",
+        DeclarativePlanNode::Values(..) => "Values",
+        DeclarativePlanNode::RelationRef(..) => "RelationRef",
         DeclarativePlanNode::Filter { .. } => "Filter",
         DeclarativePlanNode::Project { .. } => "Project",
         DeclarativePlanNode::Window { .. } => "Window",
@@ -813,9 +820,9 @@ mod tests {
     }
 
     #[test]
-    fn results_terminal() {
+    fn into_results_terminal() {
         let base = DeclarativePlanNode::scan_json(vec![], simple_schema());
-        let results_plan = base.results();
+        let results_plan = base.into_results();
         assert_eq!(results_plan.sink.sink_type, SinkType::Results);
     }
 
@@ -839,14 +846,14 @@ mod tests {
     }
 
     #[test]
-    fn relation_leaf_is_a_leaf() {
+    fn relation_ref_leaf_is_a_leaf() {
         let h = RelationHandle::fresh("r0", simple_schema());
-        let plan = DeclarativePlanNode::relation(h.clone());
+        let plan = DeclarativePlanNode::relation_ref(h.clone());
         assert!(plan.is_leaf());
         assert_eq!(plan.children().len(), 0);
         match plan {
-            DeclarativePlanNode::Relation(got) => assert_eq!(got, h),
-            _ => panic!("expected Relation leaf"),
+            DeclarativePlanNode::RelationRef(got) => assert_eq!(got, h),
+            _ => panic!("expected RelationRef leaf"),
         }
     }
 
@@ -900,20 +907,20 @@ mod tests {
     }
 
     #[test]
-    fn literal_row_validates_field_count() {
+    fn values_row_validates_field_count() {
         let schema = Arc::new(StructType::new_unchecked([
             StructField::not_null("a", DataType::LONG),
             StructField::not_null("b", DataType::LONG),
         ]));
-        DeclarativePlanNode::literal_row(schema.clone(), vec![Scalar::Long(1), Scalar::Long(2)])
+        DeclarativePlanNode::values_row(schema.clone(), vec![Scalar::Long(1), Scalar::Long(2)])
             .unwrap();
-        let err = DeclarativePlanNode::literal_row(schema, vec![Scalar::Long(1)]).unwrap_err();
+        let err = DeclarativePlanNode::values_row(schema, vec![Scalar::Long(1)]).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("schema expects"), "message was: {msg}");
     }
 
     #[test]
-    fn literal_multirow_roundtrips_rows() {
+    fn values_multirow_roundtrips_rows() {
         let schema = Arc::new(StructType::new_unchecked([StructField::not_null(
             "v",
             DataType::LONG,
@@ -923,15 +930,15 @@ mod tests {
             vec![Scalar::Long(2)],
             vec![Scalar::Long(3)],
         ];
-        let plan = DeclarativePlanNode::literal(schema, rows.clone()).unwrap();
+        let plan = DeclarativePlanNode::values(schema, rows.clone()).unwrap();
         match plan {
-            DeclarativePlanNode::Literal(lit) => assert_eq!(lit.rows, rows),
-            _ => panic!("expected Literal"),
+            DeclarativePlanNode::Values(lit) => assert_eq!(lit.rows, rows),
+            _ => panic!("expected Values"),
         }
     }
 
     #[test]
-    fn literal_rejects_too_many_rows() {
+    fn values_rejects_too_many_rows() {
         let schema = Arc::new(StructType::new_unchecked([StructField::not_null(
             "v",
             DataType::LONG,
@@ -939,7 +946,7 @@ mod tests {
         let too_many: Vec<Vec<Scalar>> = (0..LITERAL_NODE_MAX_ROWS + 1)
             .map(|_| vec![Scalar::Long(0)])
             .collect();
-        let err = DeclarativePlanNode::literal(schema, too_many).unwrap_err();
+        let err = DeclarativePlanNode::values(schema, too_many).unwrap_err();
         assert!(format!("{err}").contains("max rows"));
     }
 

@@ -27,7 +27,7 @@ async fn write_sink_parquet_round_trips_literal_row_and_reports_row_count() {
     let dest = Url::from_file_path(&path).expect("file url");
 
     let ex = DataFusionExecutor::try_new().expect("executor");
-    let plan = DeclarativePlanNode::literal_row(number_schema(), vec![Scalar::Long(42)])
+    let plan = DeclarativePlanNode::values_row(number_schema(), vec![Scalar::Long(42)])
         .expect("literal")
         .into_write(WriteSink::parquet(dest));
 
@@ -59,7 +59,7 @@ async fn write_sink_json_lines_writes_ndjson_and_reports_row_count() {
     let dest = Url::from_file_path(&path).expect("file url");
 
     let ex = DataFusionExecutor::try_new().expect("executor");
-    let plan = DeclarativePlanNode::literal_row(number_schema(), vec![Scalar::Long(7)])
+    let plan = DeclarativePlanNode::values_row(number_schema(), vec![Scalar::Long(7)])
         .expect("literal")
         .into_write(WriteSink::json_lines(dest));
 
@@ -83,7 +83,7 @@ async fn write_sink_empty_stream_still_materializes_single_file() {
     let dest = Url::from_file_path(&path).expect("file url");
 
     let ex = DataFusionExecutor::try_new().expect("executor");
-    let plan = DeclarativePlanNode::literal(number_schema(), Vec::<Vec<Scalar>>::new())
+    let plan = DeclarativePlanNode::values(number_schema(), Vec::<Vec<Scalar>>::new())
         .expect("empty literal")
         .into_write(WriteSink::parquet(dest));
 
@@ -108,9 +108,9 @@ async fn write_sink_empty_stream_still_materializes_single_file() {
 #[tokio::test]
 async fn write_dispatch_non_write_sinks_unchanged_results_plan_streams_rows() {
     let ex = DataFusionExecutor::try_new().expect("executor");
-    let plan = DeclarativePlanNode::literal_row(number_schema(), vec![Scalar::Long(99)])
+    let plan = DeclarativePlanNode::values_row(number_schema(), vec![Scalar::Long(99)])
         .expect("literal")
-        .results();
+        .into_results();
 
     let stream = ex.execute_plan_to_stream(plan).await.expect("stream");
     let batches = stream

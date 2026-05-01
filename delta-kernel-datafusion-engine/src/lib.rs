@@ -55,14 +55,14 @@ mod tests {
     fn assert_passes_when_predicate_true() {
         futures::executor::block_on(async {
             let ex = DataFusionExecutor::try_new().unwrap();
-            let plan = DeclarativePlanNode::literal_row(bool_schema(), vec![Scalar::Boolean(true)])
+            let plan = DeclarativePlanNode::values_row(bool_schema(), vec![Scalar::Boolean(true)])
                 .unwrap()
                 .assert(vec![AssertCheck {
                     predicate: Arc::new(Expression::literal(true)),
                     error_code: "SHOULD_NOT_FIRE".into(),
                     error_message: "unexpected".into(),
                 }])
-                .results();
+                .into_results();
 
             let batches = ex.execute_plan_collect(plan).await.unwrap();
             assert_eq!(batches.len(), 1);
@@ -75,10 +75,10 @@ mod tests {
         futures::executor::block_on(async {
             let ex = DataFusionExecutor::try_new().unwrap();
             let plan =
-                DeclarativePlanNode::literal_row(bool_schema(), vec![Scalar::Boolean(false)])
+                DeclarativePlanNode::values_row(bool_schema(), vec![Scalar::Boolean(false)])
                     .unwrap()
                     .assert(vec![])
-                    .results();
+                    .into_results();
 
             let batches = ex.execute_plan_collect(plan).await.unwrap();
             assert_eq!(batches[0].num_rows(), 1);
@@ -89,14 +89,14 @@ mod tests {
     fn assert_fails_when_predicate_false() {
         futures::executor::block_on(async {
             let ex = DataFusionExecutor::try_new().unwrap();
-            let plan = DeclarativePlanNode::literal_row(bool_schema(), vec![Scalar::Boolean(true)])
+            let plan = DeclarativePlanNode::values_row(bool_schema(), vec![Scalar::Boolean(true)])
                 .unwrap()
                 .assert(vec![AssertCheck {
                     predicate: Arc::new(Expression::literal(false)),
                     error_code: "MY_CODE_FALSE".into(),
                     error_message: "human readable false".into(),
                 }])
-                .results();
+                .into_results();
 
             let stream = ex.execute_plan_to_stream(plan).await.unwrap();
             let err = stream.try_collect::<Vec<_>>().await.lift().unwrap_err();
@@ -126,14 +126,14 @@ mod tests {
                 DataType::BOOLEAN,
             )]));
             let plan =
-                DeclarativePlanNode::literal_row(schema, vec![Scalar::Null(DataType::BOOLEAN)])
+                DeclarativePlanNode::values_row(schema, vec![Scalar::Null(DataType::BOOLEAN)])
                     .unwrap()
                     .assert(vec![AssertCheck {
                         predicate: Arc::new(Expression::column(["flag"])),
                         error_code: "NULL_PRED".into(),
                         error_message: "flag must be known".into(),
                     }])
-                    .results();
+                    .into_results();
 
             let stream = ex.execute_plan_to_stream(plan).await.unwrap();
             let err = stream.try_collect::<Vec<_>>().await.lift().unwrap_err();
@@ -151,7 +151,7 @@ mod tests {
     fn assert_first_failing_check_wins_per_row() {
         futures::executor::block_on(async {
             let ex = DataFusionExecutor::try_new().unwrap();
-            let plan = DeclarativePlanNode::literal(
+            let plan = DeclarativePlanNode::values(
                 two_bool_schema(),
                 vec![vec![Scalar::Boolean(false), Scalar::Boolean(false)]],
             )
@@ -168,7 +168,7 @@ mod tests {
                     error_message: "second check".into(),
                 },
             ])
-            .results();
+            .into_results();
 
             let stream = ex.execute_plan_to_stream(plan).await.unwrap();
             let err = stream.try_collect::<Vec<_>>().await.lift().unwrap_err();

@@ -129,7 +129,7 @@ async fn multi_file_parquet_row_index_resets_each_file_by_value_range() {
     .unwrap()
     .with_row_index("rid")
     .unwrap()
-    .results();
+    .into_results();
 
     let batches = DataFusionExecutor::try_new()
         .unwrap()
@@ -189,7 +189,7 @@ async fn unordered_multi_file_scan_with_row_index_keeps_scan_ordered_false_and_r
         "row_index_column must fan out per-file (OrderedUnionExec)"
     );
 
-    let plan = node.results();
+    let plan = node.into_results();
 
     let batches = DataFusionExecutor::try_new()
         .unwrap()
@@ -249,7 +249,7 @@ async fn scan_predicate_matches_arrow_parquet_reference_multi_file_ordered() {
         .unwrap()
         .with_predicate(Arc::clone(&pred))
         .unwrap()
-        .results();
+        .into_results();
 
     let df_batches = DataFusionExecutor::try_new()
         .unwrap()

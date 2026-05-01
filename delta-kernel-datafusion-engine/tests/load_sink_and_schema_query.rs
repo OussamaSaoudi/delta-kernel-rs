@@ -10,7 +10,7 @@ use delta_kernel::arrow::array::{ArrayRef, AsArray, Int64Array, RecordBatch};
 use delta_kernel::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use delta_kernel::expressions::{ColumnName, Scalar, StructData};
 use delta_kernel::plans::ir::nodes::{
-    FileType, LiteralNode, LoadSink, RelationHandle, ScanFileColumns,
+    FileType, LoadSink, RelationHandle, ScanFileColumns, ValuesNode,
 };
 use delta_kernel::plans::ir::DeclarativePlanNode;
 use delta_kernel::schema::{DataType, StructField, StructType, ToSchema};
@@ -90,7 +90,7 @@ async fn load_sink_broadcasts_passthrough_columns() {
         file_type: FileType::Parquet,
     };
 
-    let lit = DeclarativePlanNode::Literal(LiteralNode {
+    let lit = DeclarativePlanNode::Values(ValuesNode {
         schema: upstream_schema,
         rows: vec![
             vec![
@@ -113,7 +113,7 @@ async fn load_sink_broadcasts_passthrough_columns() {
         "Load sink yields nothing to the caller"
     );
 
-    let consumer_plan = DeclarativePlanNode::relation(handle).results();
+    let consumer_plan = DeclarativePlanNode::relation_ref(handle).into_results();
     let batches = executor.execute_plan_collect(consumer_plan).await.unwrap();
 
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -176,7 +176,7 @@ async fn load_sink_without_dv_reads_full_parquet_row_group() {
         file_type: FileType::Parquet,
     };
 
-    let lit = DeclarativePlanNode::Literal(LiteralNode {
+    let lit = DeclarativePlanNode::Values(ValuesNode {
         schema: upstream_schema,
         rows: vec![vec![Scalar::String(path_str)]],
     });
@@ -188,7 +188,7 @@ async fn load_sink_without_dv_reads_full_parquet_row_group() {
         .unwrap()
         .is_empty());
 
-    let consumer_plan = DeclarativePlanNode::relation(handle).results();
+    let consumer_plan = DeclarativePlanNode::relation_ref(handle).into_results();
     let batches = executor.execute_plan_collect(consumer_plan).await.unwrap();
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(rows, 10);
@@ -256,7 +256,7 @@ async fn load_sink_applies_dv_ref_masking_from_descriptor_column() {
         file_type: FileType::Parquet,
     };
 
-    let lit = DeclarativePlanNode::Literal(LiteralNode {
+    let lit = DeclarativePlanNode::Values(ValuesNode {
         schema: upstream_schema,
         rows: vec![vec![Scalar::String(path_str), dv_example_scalar()]],
     });
@@ -268,7 +268,7 @@ async fn load_sink_applies_dv_ref_masking_from_descriptor_column() {
         .unwrap()
         .is_empty());
 
-    let consumer_plan = DeclarativePlanNode::relation(handle).results();
+    let consumer_plan = DeclarativePlanNode::relation_ref(handle).into_results();
     let batches = executor.execute_plan_collect(consumer_plan).await.unwrap();
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(rows, 8);
@@ -306,7 +306,7 @@ async fn load_sink_reads_ndjson_with_matching_schema() {
         file_type: FileType::Json,
     };
 
-    let lit = DeclarativePlanNode::Literal(LiteralNode {
+    let lit = DeclarativePlanNode::Values(ValuesNode {
         schema: upstream_schema,
         rows: vec![vec![Scalar::String(rel)]],
     });
@@ -318,7 +318,7 @@ async fn load_sink_reads_ndjson_with_matching_schema() {
         .unwrap()
         .is_empty());
 
-    let consumer_plan = DeclarativePlanNode::relation(handle).results();
+    let consumer_plan = DeclarativePlanNode::relation_ref(handle).into_results();
     let batches = executor.execute_plan_collect(consumer_plan).await.unwrap();
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
 

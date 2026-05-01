@@ -303,7 +303,7 @@ mod tests {
     }
 
     fn root_plan(scan: DeclarativePlanNode) -> delta_kernel::plans::ir::Plan {
-        scan.results()
+        scan.into_results()
     }
 
     #[tokio::test]

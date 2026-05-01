@@ -24,7 +24,7 @@
 //! let plan = DeclarativePlanNode::scan_json_as::<CheckpointHintRecord>(files)
 //!     .filter(predicate)
 //!     .project(projection, output_schema)
-//!     .results();
+//!     .into_results();
 //! ```
 
 pub mod errors;

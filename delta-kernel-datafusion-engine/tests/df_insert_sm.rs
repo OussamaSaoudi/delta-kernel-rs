@@ -28,7 +28,7 @@ async fn df_insert_sm_writes_parquet_for_literal_rows() {
         vec![Scalar::Long(2)],
         vec![Scalar::Long(3)],
     ];
-    let plan = DeclarativePlanNode::literal(schema.clone(), rows)
+    let plan = DeclarativePlanNode::values(schema.clone(), rows)
         .unwrap()
         .into_write(WriteSink::parquet(dest));
 

@@ -72,7 +72,7 @@ fn flatten_i64_col(batches: &[RecordBatch], name: &str) -> Vec<i64> {
 }
 
 fn root_plan(scan: DeclarativePlanNode) -> delta_kernel::plans::ir::Plan {
-    scan.results()
+    scan.into_results()
 }
 
 #[tokio::test]

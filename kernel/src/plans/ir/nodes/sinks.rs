@@ -78,13 +78,13 @@ impl std::fmt::Debug for ConsumeByKdfSink {
 /// process (id-based comparison).
 ///
 /// Handles connect a [`SinkType::Relation`] in one plan to a
-/// [`crate::plans::ir::declarative::DeclarativePlanNode::Relation`] leaf in another.
+/// [`crate::plans::ir::declarative::DeclarativePlanNode::RelationRef`] leaf in another.
 /// The executor allocates a bounded channel per handle, the producing plan's
 /// sink writes to it, and the consuming plan's source reads from it —
 /// streaming end-to-end, not materialized.
 ///
 /// The handle also carries the producing plan's output [`SchemaRef`] so that
-/// consuming sources (`Relation` / `HashJoin` / `Union`) can publish
+/// consuming sources (`RelationRef` / `HashJoin` / `Union`) can publish
 /// a static output schema during pipeline construction; that unblocks
 /// operators like `FilterByExpression` and `Select` that need an input
 /// schema to build their evaluators. Schema is metadata, not identity:
@@ -160,7 +160,7 @@ pub struct ScanFileColumns {
 ///
 /// The materialized result is named via [`Self::output_relation`] so that
 /// downstream plans in the same phase can consume it through
-/// [`crate::plans::ir::declarative::DeclarativePlanNode::Relation`].
+/// [`crate::plans::ir::declarative::DeclarativePlanNode::relation_ref`].
 ///
 /// Phase 0.7 threads an optional [`Self::dv_ref`] column hint for per-row
 /// deletion-vector masking; pushdown predicate lands with subsequent stack PRs.
@@ -170,7 +170,7 @@ pub struct ScanFileColumns {
 #[derive(Debug, Clone)]
 pub struct LoadSink {
     /// Where Load's output is materialized. Downstream plans reference this
-    /// handle via [`crate::plans::ir::declarative::DeclarativePlanNode::Relation`].
+    /// handle via [`crate::plans::ir::declarative::DeclarativePlanNode::relation_ref`].
     pub output_relation: RelationHandle,
     /// Desired per-file output columns (nullability follows
     /// [`crate::ParquetHandler::read_parquet_files`] semantics).
@@ -317,7 +317,7 @@ pub enum SinkType {
     Results,
     /// Stream every output batch to the named [`RelationHandle`]. Another
     /// plan in the same phase consumes via
-    /// [`crate::plans::ir::declarative::DeclarativePlanNode::Relation`].
+    /// [`crate::plans::ir::declarative::DeclarativePlanNode::relation_ref`].
     Relation(RelationHandle),
     /// Drain every output batch through the wrapped consumer KDF. The KDF's
     /// finalized per-partition state is harvested by the engine into the

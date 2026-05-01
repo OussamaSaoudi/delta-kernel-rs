@@ -133,9 +133,9 @@ async fn parity_literal_matches_kernel_create_many() {
         vec![Scalar::Long(2), Scalar::Long(20)],
     ];
     let expected = kernel_literal_batch(Arc::clone(&schema), &rows);
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .unwrap()
-        .results();
+        .into_results();
     let got = df_collect(plan).await;
     assert_batches_equal(&expected, &got);
 }
@@ -156,10 +156,10 @@ async fn parity_filter_matches_kernel_semantics() {
     )));
     let expected = kernel_filter(&base, pred.as_ref());
 
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .unwrap()
         .filter(pred)
-        .results();
+        .into_results();
     let got = df_collect(plan).await;
     assert_batches_equal(&expected, &got);
 }
@@ -189,10 +189,10 @@ async fn parity_project_matches_kernel_evaluation() {
     // doubled = x + 3
     let expected = kernel_project(&base, &columns, Arc::clone(&out_schema));
 
-    let plan = DeclarativePlanNode::literal(in_schema, rows)
+    let plan = DeclarativePlanNode::values(in_schema, rows)
         .unwrap()
         .project(columns, out_schema)
-        .results();
+        .into_results();
     let got = df_collect(plan).await;
     assert_batches_equal(&expected, &got);
 }
@@ -209,11 +209,11 @@ async fn parity_ordered_union_matches_kernel_concat() {
         concat_batches(&b_left.schema(), &[b_left, b_right]).expect("concat union reference");
 
     let plan = DeclarativePlanNode::union(vec![
-        DeclarativePlanNode::literal(Arc::clone(&schema), left_rows).unwrap(),
-        DeclarativePlanNode::literal(Arc::clone(&schema), right_rows).unwrap(),
+        DeclarativePlanNode::values(Arc::clone(&schema), left_rows).unwrap(),
+        DeclarativePlanNode::values(Arc::clone(&schema), right_rows).unwrap(),
     ])
     .unwrap()
-    .results();
+    .into_results();
     let got = df_collect(plan).await;
     assert_batches_equal(&expected, &got);
 }
@@ -264,7 +264,7 @@ async fn parity_window_row_number_matches_stream_partition_reference() {
         Arc::new(out_schema.as_ref().try_into_arrow().unwrap());
     let expected = RecordBatch::try_new(arrow_out, cols).unwrap();
 
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .unwrap()
         .window(
             vec![WindowFunction {
@@ -275,7 +275,7 @@ async fn parity_window_row_number_matches_stream_partition_reference() {
             vec![Arc::new(Expression::column(["part"]))],
             vec![],
         )
-        .results();
+        .into_results();
     let got = df_collect(plan).await;
     assert_batches_equal(&expected, &got);
 }
@@ -358,10 +358,10 @@ async fn parity_inner_join_matches_reference_including_duplicate_build_keys() {
 
     let root = DeclarativePlanNode::join(
         join_node,
-        DeclarativePlanNode::literal(build_schema, build_rows).unwrap(),
-        DeclarativePlanNode::literal(probe_schema, probe_rows).unwrap(),
+        DeclarativePlanNode::values(build_schema, build_rows).unwrap(),
+        DeclarativePlanNode::values(probe_schema, probe_rows).unwrap(),
     );
-    let got = df_collect(root.results()).await;
+    let got = df_collect(root.into_results()).await;
     let merged = concat_or_clone(&got);
     assert_eq!(
         batch_to_inner_join_tuples(&merged),
@@ -383,12 +383,12 @@ async fn parity_left_anti_join_matches_reference_probe_order() {
     );
 
     let build =
-        DeclarativePlanNode::literal(build_schema.clone(), vec![vec![Scalar::Long(1)]]).unwrap();
+        DeclarativePlanNode::values(build_schema.clone(), vec![vec![Scalar::Long(1)]]).unwrap();
     let probe_rows = vec![
         vec![Scalar::Long(2), Scalar::Long(20)],
         vec![Scalar::Long(1), Scalar::Long(10)],
     ];
-    let probe = DeclarativePlanNode::literal(probe_schema.clone(), probe_rows.clone()).unwrap();
+    let probe = DeclarativePlanNode::values(probe_schema.clone(), probe_rows.clone()).unwrap();
 
     let join_node = JoinNode {
         build_keys: vec![Arc::new(Expression::column(["bk"]))],
@@ -398,7 +398,7 @@ async fn parity_left_anti_join_matches_reference_probe_order() {
     };
 
     let root = DeclarativePlanNode::join(join_node, build, probe);
-    let got = df_collect(root.results()).await;
+    let got = df_collect(root.into_results()).await;
     let batch = concat_or_clone(&got);
 
     let build_keys: HashSet<i64> = [1i64].into_iter().collect();
@@ -422,7 +422,7 @@ async fn parity_assert_pass_through_matches_kernel_when_checks_pass() {
     let rows = vec![vec![Scalar::Boolean(true), Scalar::Boolean(true)]];
     let expected = kernel_literal_batch(Arc::clone(&schema), &rows);
 
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .unwrap()
         .assert(vec![
             AssertCheck {
@@ -436,7 +436,7 @@ async fn parity_assert_pass_through_matches_kernel_when_checks_pass() {
                 error_message: "fail b".into(),
             },
         ])
-        .results();
+        .into_results();
 
     let got = df_collect(plan).await;
     assert_batches_equal(&expected, &got);
@@ -487,7 +487,7 @@ async fn parity_scan_single_parquet_matches_arrow_reader() {
     let expected = concat_or_clone(&expected_batches);
 
     let kernel_schema_clone = Arc::clone(&kernel_schema);
-    let plan = DeclarativePlanNode::scan_parquet(vec![file_meta(&path)], kernel_schema).results();
+    let plan = DeclarativePlanNode::scan_parquet(vec![file_meta(&path)], kernel_schema).into_results();
     let got = df_collect(plan).await;
     assert_batch_column_data_equal(&kernel_schema_clone, &expected, &concat_or_clone(&got));
 }

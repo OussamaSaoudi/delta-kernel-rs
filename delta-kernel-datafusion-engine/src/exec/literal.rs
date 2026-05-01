@@ -1,6 +1,6 @@
-//! Literal source: emits in-memory batches from kernel [`Scalar`] rows (see [`LiteralNode`]).
+//! Literal source: emits in-memory batches from kernel [`Scalar`] rows (see [`ValuesNode`]).
 //!
-//! [`LiteralNode`]: delta_kernel::plans::ir::nodes::LiteralNode
+//! [`ValuesNode`]: delta_kernel::plans::ir::nodes::ValuesNode
 
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
@@ -23,7 +23,7 @@ use delta_kernel::expressions::Scalar;
 use delta_kernel::plans::errors::{DeltaError, DeltaErrorCode, DeltaResultExt, KernelErrAsDelta};
 use delta_kernel::schema::SchemaRef as KernelSchemaRef;
 
-/// Execution operator that materializes [`LiteralNode`] rows as Arrow batches.
+/// Execution operator that materializes [`ValuesNode`] rows as Arrow batches.
 pub struct LiteralExec {
     kernel_schema: KernelSchemaRef,
     arrow_schema: ArrowSchemaRef,

@@ -14,10 +14,10 @@
 //! reads via kernel handlers into [`crate::exec::RelationBatchRegistry`].
 //!
 //! Phase 1.2 extends the scaffold with leaf support:
-//! - `Literal`
+//! - `Values`
 //! - `Scan`
 //! - `FileListing`
-//! - `Relation`
+//! - `RelationRef`
 
 use std::sync::{Arc, Mutex};
 
@@ -129,7 +129,7 @@ pub(super) fn compile_declarative_node(
     ctx: &CompileContext,
 ) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
     match node {
-        DeclarativePlanNode::Literal(n) => Ok(Arc::new(LiteralExec::try_new(
+        DeclarativePlanNode::Values(n) => Ok(Arc::new(LiteralExec::try_new(
             n.schema.clone(),
             n.rows.clone(),
         )?)),
@@ -137,7 +137,7 @@ pub(super) fn compile_declarative_node(
         DeclarativePlanNode::FileListing(node) => {
             Ok(Arc::new(FileListingExec::new(node.path.clone())))
         }
-        DeclarativePlanNode::Relation(handle) => compile_relation(handle, ctx),
+        DeclarativePlanNode::RelationRef(handle) => compile_relation(handle, ctx),
         DeclarativePlanNode::Filter { child, node } => {
             let child_plan = compile_declarative_node(child, ctx)?;
             let input_schema = node_output_schema(child)?;
@@ -207,8 +207,8 @@ pub(super) fn compile_declarative_node(
 fn node_output_schema(node: &DeclarativePlanNode) -> Result<SchemaRef, DeltaError> {
     match node {
         DeclarativePlanNode::Scan(n) => Ok(n.schema.clone()),
-        DeclarativePlanNode::Literal(n) => Ok(n.schema.clone()),
-        DeclarativePlanNode::Relation(h) => Ok(h.schema.clone()),
+        DeclarativePlanNode::Values(n) => Ok(n.schema.clone()),
+        DeclarativePlanNode::RelationRef(h) => Ok(h.schema.clone()),
         DeclarativePlanNode::Project { node, .. } => Ok(node.output_schema.clone()),
         DeclarativePlanNode::Union { children, .. } => {
             let Some(first) = children.first() else {

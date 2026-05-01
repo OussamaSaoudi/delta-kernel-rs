@@ -2,7 +2,7 @@
 //!
 //! Relation sinks ([`delta_kernel::plans::ir::nodes::SinkType::Relation`]) materialize batches into
 //! [`crate::exec::RelationBatchRegistry`] when their stream is drained; subsequent plans read via a
-//! [`DeclarativePlanNode::Relation`](delta_kernel::plans::ir::DeclarativePlanNode::Relation) leaf.
+//! [`DeclarativePlanNode::RelationRef`](delta_kernel::plans::ir::DeclarativePlanNode::RelationRef) leaf.
 //! [`SinkType::ConsumeByKdf`](delta_kernel::plans::ir::nodes::SinkType::ConsumeByKdf) drains
 //! through a [`KernelConsumeByKdfExec`](crate::exec::KernelConsumeByKdfExec); harvest the finalized
 //! handle with [`DataFusionExecutor::take_last_kdf_finished`] after fully draining the stream.

@@ -291,10 +291,10 @@ async fn parity_phase_plans_relation_pipe_matches_kernel_literal_materialization
     let kernel_reference_batch = kernel_literal_record_batch(Arc::clone(&schema), &rows);
 
     let handle = RelationHandle::fresh("parity_pipe", Arc::clone(&schema));
-    let producer = DeclarativePlanNode::literal(Arc::clone(&schema), rows.clone())
+    let producer = DeclarativePlanNode::values(Arc::clone(&schema), rows.clone())
         .unwrap()
         .into_relation(handle.clone());
-    let consumer = DeclarativePlanNode::relation(handle.clone()).results();
+    let consumer = DeclarativePlanNode::relation_ref(handle.clone()).into_results();
 
     let executor = DataFusionExecutor::try_new().unwrap();
     executor
@@ -302,7 +302,7 @@ async fn parity_phase_plans_relation_pipe_matches_kernel_literal_materialization
         .await
         .expect("phase Plans");
 
-    let read_plan = DeclarativePlanNode::relation(handle).results();
+    let read_plan = DeclarativePlanNode::relation_ref(handle).into_results();
     let df_batches = executor
         .execute_plan_collect(read_plan)
         .await
@@ -388,7 +388,7 @@ async fn parity_insert_kernel_parquet_handler_write_matches_df_insert_sm() {
 
     let df_path = dir.path().join("df.parquet");
     let df_url = Url::from_file_path(&df_path).unwrap();
-    let plan = DeclarativePlanNode::literal(Arc::clone(&schema), rows.clone())
+    let plan = DeclarativePlanNode::values(Arc::clone(&schema), rows.clone())
         .unwrap()
         .into_write(WriteSink::parquet(df_url));
 

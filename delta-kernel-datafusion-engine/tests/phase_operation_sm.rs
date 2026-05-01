@@ -61,11 +61,11 @@ async fn phase_plans_runs_relation_producer_then_consumer_in_one_tick() {
     let rows = vec![vec![Scalar::Long(1)], vec![Scalar::Long(2)]];
     let handle = RelationHandle::fresh("pipe", schema.clone());
 
-    let producer = DeclarativePlanNode::literal(schema.clone(), rows)
+    let producer = DeclarativePlanNode::values(schema.clone(), rows)
         .expect("literal")
         .into_relation(handle.clone());
 
-    let consumer = DeclarativePlanNode::relation(handle.clone()).results();
+    let consumer = DeclarativePlanNode::relation_ref(handle.clone()).into_results();
 
     let executor = DataFusionExecutor::try_new().unwrap();
     let accum = executor
@@ -78,7 +78,7 @@ async fn phase_plans_runs_relation_producer_then_consumer_in_one_tick() {
     // schema submission.
     assert!(accum.take_schema().is_none());
 
-    let read_back = DeclarativePlanNode::relation(handle).results();
+    let read_back = DeclarativePlanNode::relation_ref(handle).into_results();
     let batches = executor
         .execute_plan_collect(read_back)
         .await
@@ -93,7 +93,7 @@ async fn phase_plans_submits_consume_by_kdf_into_phase_kdf_state_not_harvest_slo
     let rows = vec![vec![Scalar::Long(10)], vec![Scalar::Long(20)]];
     let sink = ConsumeByKdfSink::new_consumer(SumRowsConsumer(0));
     let token = sink.token.clone();
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .expect("literal")
         .consume_by_kdf(sink);
 
@@ -152,7 +152,7 @@ async fn legacy_execute_plan_to_stream_still_harvests_via_slot_when_accumulator_
     let schema = long_schema();
     let rows = vec![vec![Scalar::Long(7)]];
     let sink = ConsumeByKdfSink::new_consumer(SumRowsConsumer(0));
-    let plan = DeclarativePlanNode::literal(schema, rows)
+    let plan = DeclarativePlanNode::values(schema, rows)
         .expect("literal")
         .consume_by_kdf(sink);
 

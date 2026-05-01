@@ -26,7 +26,7 @@ fn hash_inner_join_literals_matching_keys_single_row() {
         .unwrap(),
     );
 
-    let build = DeclarativePlanNode::literal(
+    let build = DeclarativePlanNode::values(
         build_schema.clone(),
         vec![
             vec![Scalar::Long(10), Scalar::Long(100)],
@@ -35,7 +35,7 @@ fn hash_inner_join_literals_matching_keys_single_row() {
     )
     .unwrap();
 
-    let probe = DeclarativePlanNode::literal(
+    let probe = DeclarativePlanNode::values(
         probe_schema.clone(),
         vec![
             vec![Scalar::Long(10), Scalar::Long(1000)],
@@ -52,7 +52,7 @@ fn hash_inner_join_literals_matching_keys_single_row() {
     };
 
     let root = DeclarativePlanNode::join(join_node, build, probe);
-    let plan = root.results();
+    let plan = root.into_results();
 
     let batches = futures::executor::block_on(async {
         DataFusionExecutor::try_new()
@@ -97,9 +97,9 @@ fn hash_left_anti_join_literals_keeps_non_matching_probe_rows() {
     );
 
     let build =
-        DeclarativePlanNode::literal(build_schema.clone(), vec![vec![Scalar::Long(1)]]).unwrap();
+        DeclarativePlanNode::values(build_schema.clone(), vec![vec![Scalar::Long(1)]]).unwrap();
 
-    let probe = DeclarativePlanNode::literal(
+    let probe = DeclarativePlanNode::values(
         probe_schema.clone(),
         vec![
             vec![Scalar::Long(2), Scalar::Long(20)],
@@ -116,7 +116,7 @@ fn hash_left_anti_join_literals_keeps_non_matching_probe_rows() {
     };
 
     let root = DeclarativePlanNode::join(join_node, build, probe);
-    let plan = root.results();
+    let plan = root.into_results();
 
     let batches = futures::executor::block_on(async {
         DataFusionExecutor::try_new()
