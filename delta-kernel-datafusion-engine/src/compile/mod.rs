@@ -22,6 +22,12 @@ pub fn compile_plan(plan: &Plan) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
         SinkType::Load(_) => Err(crate::error::unsupported(
             "Load sink is not implemented for the DataFusion engine scaffold",
         )),
+        SinkType::Write(_) => Err(crate::error::unsupported(
+            "Write sink is not implemented for the DataFusion engine scaffold",
+        )),
+        SinkType::PartitionedWrite(_) => Err(crate::error::unsupported(
+            "PartitionedWrite sink is not implemented for the DataFusion engine scaffold",
+        )),
     }
 }
 
