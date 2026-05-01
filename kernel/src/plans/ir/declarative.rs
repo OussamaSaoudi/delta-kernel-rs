@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn relation_leaf_is_a_leaf() {
-        let h = RelationHandle::fresh("r0");
+        let h = RelationHandle::fresh("r0", simple_schema());
         let plan = DeclarativePlanNode::relation(h.clone());
         assert!(plan.is_leaf());
         assert_eq!(plan.children().len(), 0);
@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn into_relation_terminal_emits_relation_sink() {
-        let h = RelationHandle::fresh("output");
+        let h = RelationHandle::fresh("output", simple_schema());
         let plan = DeclarativePlanNode::scan_json(vec![], simple_schema()).into_relation(h.clone());
         match plan.sink.sink_type {
             SinkType::Relation(got) => assert_eq!(got, h),
@@ -603,8 +603,9 @@ mod tests {
 
     #[test]
     fn fresh_relation_handles_are_distinct() {
-        let a = RelationHandle::fresh("dup");
-        let b = RelationHandle::fresh("dup");
+        let a = RelationHandle::fresh("dup", simple_schema());
+        let b = RelationHandle::fresh("dup", simple_schema());
+        // Same diagnostic name but distinct ids — equality is id-based.
         assert_ne!(a, b);
         assert_eq!(a.name, b.name);
     }
