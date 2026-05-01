@@ -30,15 +30,15 @@ impl Snapshot {
     ///
     /// # Feature gate
     ///
-    /// Available only with the `declarative-plans` feature. There is **no** runtime fallback: if the
-    /// feature is disabled at compile time, callers rely on [`Snapshot::scan_builder`] and classic
-    /// kernel replay instead.
+    /// Available only with the `declarative-plans` feature. There is **no** runtime fallback: if
+    /// the feature is disabled at compile time, callers rely on [`Snapshot::scan_builder`] and
+    /// classic kernel replay instead.
     ///
     /// # Limitations
     ///
     /// Does not perform storage I/O or produce active data files — only exercises FSR-shaped
-    /// multi-phase scheduling. Real reads remain on the scan/log-replay path until later phases swap
-    /// literals for declarative checkpoint and file scans.
+    /// multi-phase scheduling. Real reads remain on the scan/log-replay path until later phases
+    /// swap literals for declarative checkpoint and file scans.
     pub fn full_state(&self) -> DeltaResult<CoroutineSM<FsrStripThenFanoutOutcome>> {
         let listed = &self.log_segment().listed;
         let n_cp_parts = listed.checkpoint_parts.len();

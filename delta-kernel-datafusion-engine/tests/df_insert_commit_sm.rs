@@ -52,7 +52,10 @@ async fn df_commit_emit_sm_returns_ordered_json_action_envelopes() {
     let prepared = commit_action_envelopes_literal(vec![commit.into(), add.into()]).unwrap();
     let sm = commit_action_emit_sm(prepared).unwrap();
     let ex = DataFusionExecutor::try_new().unwrap();
-    let out = ex.drive_coroutine_sm(sm, DriveOpts::default()).await.unwrap();
+    let out = ex
+        .drive_coroutine_sm(sm, DriveOpts::default())
+        .await
+        .unwrap();
 
     assert_eq!(out.len(), 2);
     let v0: Value = serde_json::from_str(&out[0]).unwrap();
