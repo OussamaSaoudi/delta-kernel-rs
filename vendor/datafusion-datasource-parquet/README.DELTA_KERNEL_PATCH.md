@@ -14,7 +14,13 @@ Baseline: Apache DataFusion **53.1.0** `datafusion-datasource-parquet` (crates.i
    `ProjectionMask::roots` **unless** virtual columns are configured — then it uses `ProjectionMask::all`
    so arrow-rs retains synthesized columns through decode (narrow-only masks strip virtual outputs).
 
-Default remains unchanged: empty virtual columns list.
+4. **Parquet root field-ID-aware adaptation** — when the logical file schema carries Arrow
+   `PARQUET:field_id` metadata on any **top-level** field, `ParquetOpener` clones the decoded physical
+   schema but renames roots to logical scan names using ID-first matching with name fallback (Delta
+   Kernel semantics for flat reads). Decoder stream schemas keep physical names; they are temporarily
+   aligned before `reassign_expr_columns` so projection reordering stays consistent.
+
+Default remains unchanged: empty virtual columns list; absent logical field IDs preserve upstream name-only matching.
 
 ## Upstream alignment
 

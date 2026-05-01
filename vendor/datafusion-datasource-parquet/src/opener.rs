@@ -16,6 +16,9 @@
 // under the License.
 
 //! [`ParquetOpener`] for opening Parquet files
+//!
+//! Delta Kernel adds parquet root column adaptation via [`crate::field_id_projection`] when logical
+//! schemas annotate `PARQUET:field_id` (flat tables only — see module docs there).
 
 use crate::page_filter::PagePruningAccessPlanFilter;
 use crate::row_group_filter::RowGroupAccessPlanFilter;
@@ -409,6 +412,15 @@ impl FileOpener for ParquetOpener {
                 )?;
             }
 
+            // Delta Kernel / column-mapping reads: logical schemas attach `PARQUET:field_id` at root
+            // columns while parquet footers retain distinct physical names. Clone the decoded physical
+            // schema but rename roots for [`DefaultPhysicalExprAdapter`] + downstream column re-bind.
+            let adapted_physical_for_adapter =
+                crate::field_id_projection::maybe_adapt_physical_schema_for_parquet_field_ids(
+                    &logical_file_schema,
+                    &physical_file_schema,
+                )?;
+
             // Adapt the projection & filter predicate to the physical file schema.
             // This evaluates missing columns and inserts any necessary casts.
             // After rewriting to the file schema, further simplifications may be possible.
@@ -427,9 +439,10 @@ impl FileOpener for ParquetOpener {
             if needs_rewrite {
                 let rewriter = expr_adapter_factory.create(
                     Arc::clone(&logical_file_schema),
-                    Arc::clone(&physical_file_schema),
+                    Arc::clone(&adapted_physical_for_adapter),
                 )?;
-                let simplifier = PhysicalExprSimplifier::new(&physical_file_schema);
+                let simplifier =
+                    PhysicalExprSimplifier::new(adapted_physical_for_adapter.as_ref());
                 predicate = predicate
                     .map(|p| simplifier.simplify(rewriter.rewrite(p)?))
                     .transpose()?;
@@ -655,11 +668,20 @@ impl FileOpener for ParquetOpener {
             // See note below about file vs. output schema.
             let replace_schema = !stream_schema.eq(&output_schema);
 
+            let stream_schema_for_reassign = Arc::new(
+                crate::field_id_projection::align_stream_schema_column_names_for_logical_projection(
+                    stream_schema.as_ref(),
+                    adapted_physical_for_adapter.as_ref(),
+                    physical_file_schema.as_ref(),
+                )?,
+            );
+
             // Rebase column indices to match the narrowed stream schema.
             // The projection expressions have indices based on physical_file_schema,
             // but the stream only contains the columns selected by the ProjectionMask.
-            let projection = projection
-                .try_map_exprs(|expr| reassign_expr_columns(expr, &stream_schema))?;
+            let projection = projection.try_map_exprs(|expr| {
+                reassign_expr_columns(expr, stream_schema_for_reassign.as_ref())
+            })?;
 
             let projector = projection.make_projector(&stream_schema)?;
 

@@ -1,4 +1,17 @@
 //! Native scan lowering using DataFusion file sources.
+//!
+//! ## Parquet column matching (`PARQUET:field_id`)
+//!
+//! Kernel logical schemas encode parquet native field IDs on Arrow fields as `PARQUET:field_id`
+//! during conversion from kernel `StructType`. The vendored [`ParquetSource`] / `ParquetOpener` adapts decoded physical
+//! parquet columns **by ID first, then by name** at the Arrow-schema root level—matching Delta Kernel
+//! parquet handlers for flat reads when writers kept stable IDs across physical renames/reordering.
+//!
+//! When **no** root-level field IDs are present on the logical schema, behavior stays name-only (upstream DataFusion).
+//!
+//! **Limits:** nested struct children are not independently matched by parquet field ID in this path.
+//! Predicate pushdown inside the parquet decoder still keys off physical parquet statistics paths;
+//! declarative scans prefer residual [`KernelFilterExec`] after decode to avoid over-pushdown.
 
 use std::sync::Arc;
 
