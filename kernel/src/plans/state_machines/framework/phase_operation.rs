@@ -32,10 +32,9 @@ impl SchemaQueryNode {
 ///
 /// Separates the two concerns the executor understands:
 ///
-/// - [`Plans`](Self::Plans) — one or more independent data pipelines
-///   terminated by sinks. When the vec holds a single plan, this is the
-///   common case. When it holds multiple, they are independent and the
-///   executor may run them concurrently; KDF state is merged across all.
+/// - [`Plans`](Self::Plans) — one or more independent data pipelines terminated by sinks. When the
+///   vec holds a single plan, this is the common case. When it holds multiple, they are independent
+///   and the executor may run them concurrently; KDF state is merged across all.
 /// - [`SchemaQuery`](Self::SchemaQuery) — metadata-only footer read.
 #[derive(Debug, Clone)]
 pub enum PhaseOperation {

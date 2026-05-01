@@ -8,19 +8,18 @@
 //!
 //! Distinct from [`crate::plans::kdf::KdfStateToken`]:
 //!
-//! - `KdfStateToken` = "which KDF node in the plan" — stamped at plan-build
-//!   time, lives in the plan tree.
-//! - `TraceContext` = "which SM/phase is executing" — set at phase-execute
-//!   time, lives on handles.
+//! - `KdfStateToken` = "which KDF node in the plan" — stamped at plan-build time, lives in the plan
+//!   tree.
+//! - `TraceContext` = "which SM/phase is executing" — set at phase-execute time, lives on handles.
 //!
 //! Used by:
-//! - **Tracing**: framework-level `#[tracing::instrument]` attributes
-//!   include the context as span fields.
-//! - **Safety checks**: the phase-state container (landing with the
-//!   state-machine framework stack) rejects handles whose ctx doesn't
-//!   match the phase's — catches stale handles or cross-SM contamination.
-//! - **Error messages**: `DeltaError` detail strings render ctx so failures
-//!   are attributable to the enclosing SM/phase.
+//! - **Tracing**: framework-level `#[tracing::instrument]` attributes include the context as span
+//!   fields.
+//! - **Safety checks**: the phase-state container (landing with the state-machine framework stack)
+//!   rejects handles whose ctx doesn't match the phase's — catches stale handles or cross-SM
+//!   contamination.
+//! - **Error messages**: `DeltaError` detail strings render ctx so failures are attributable to the
+//!   enclosing SM/phase.
 
 /// Execution-time identity of a KDF's containing phase.
 ///

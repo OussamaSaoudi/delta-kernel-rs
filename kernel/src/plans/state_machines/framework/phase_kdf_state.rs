@@ -9,14 +9,12 @@
 //! ## Lifecycle
 //!
 //! 1. Executor calls [`PhaseKdfState::empty`] at the start of a phase.
-//! 2. Each per-partition KDF iterator calls
-//!    [`Handle::finish`](crate::plans::kdf::Handle::finish) to produce a
-//!    [`FinishedHandle`] and hands it to [`PhaseKdfState::submit`].
-//! 3. When the phase terminates, the executor returns the (cheap-to-clone)
-//!    `PhaseKdfState` to the SM as part of `PhaseResume::Completed`.
-//! 4. The SM's `Phase::await_handle` call extracts the erased `Vec<Box<dyn
-//!    Any + Send>>` via [`PhaseKdfState::take_by_token`] and feeds it to the
-//!    typed `Prepared<O>` extractor.
+//! 2. Each per-partition KDF iterator calls [`Handle::finish`](crate::plans::kdf::Handle::finish)
+//!    to produce a [`FinishedHandle`] and hands it to [`PhaseKdfState::submit`].
+//! 3. When the phase terminates, the executor returns the (cheap-to-clone) `PhaseKdfState` to the
+//!    SM as part of `PhaseResume::Completed`.
+//! 4. The SM's `Phase::await_handle` call extracts the erased `Vec<Box<dyn Any + Send>>` via
+//!    [`PhaseKdfState::take_by_token`] and feeds it to the typed `Prepared<O>` extractor.
 //!
 //! ## Design notes
 //!

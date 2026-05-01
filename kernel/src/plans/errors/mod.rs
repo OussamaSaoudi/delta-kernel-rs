@@ -9,12 +9,11 @@
 //!
 //! Three supported paths:
 //!
-//! - [`delta_error!`] — build a value. First arg is a [`DeltaErrorCode`],
-//!   followed by `name = value` template params. The reserved name `source`
-//!   is lifted into [`DeltaError::source`].
+//! - [`delta_error!`] — build a value. First arg is a [`DeltaErrorCode`], followed by `name =
+//!   value` template params. The reserved name `source` is lifted into [`DeltaError::source`].
 //! - [`bail_delta!`] — early-return from an enclosing function.
-//! - [`DeltaResultExt::or_delta`] — attach a code at a `?` site, preserving
-//!   the underlying error as [`DeltaError::source`].
+//! - [`DeltaResultExt::or_delta`] — attach a code at a `?` site, preserving the underlying error as
+//!   [`DeltaError::source`].
 //!
 //! ```ignore
 //! use delta_kernel::plans::errors::{DeltaErrorCode, DeltaResultExt};
@@ -336,7 +335,10 @@ macro_rules! __delta_error_bind_kwarg {
     };
     // General case: template parameter.
     (@one $params:ident $source:ident $name:ident = $value:expr) => {
-        $params.push((stringify!($name), ::std::string::ToString::to_string(&$value)));
+        $params.push((
+            stringify!($name),
+            ::std::string::ToString::to_string(&$value),
+        ));
     };
 }
 
@@ -346,8 +348,9 @@ macro_rules! __delta_error_bind_kwarg {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::error::Error;
+
+    use super::*;
 
     // --- render_template ----------------------------------------------------
 
@@ -390,10 +393,7 @@ mod tests {
 
     #[test]
     fn delta_error_macro_captures_template_params() {
-        let err = crate::delta_error!(
-            DeltaErrorCode::DeltaTableNotFound,
-            tableName = "my_table",
-        );
+        let err = crate::delta_error!(DeltaErrorCode::DeltaTableNotFound, tableName = "my_table",);
         assert_eq!(err.code, DeltaErrorCode::DeltaTableNotFound);
         assert_eq!(err.params, vec![("tableName", "my_table".to_string())]);
         assert!(err.source.is_none());
@@ -415,17 +415,15 @@ mod tests {
 
     #[test]
     fn delta_error_macro_accepts_any_displayable_value() {
-        let err = crate::delta_error!(
-            DeltaErrorCode::DeltaVersionInvalid,
-            version = 42u64,
-        );
+        let err = crate::delta_error!(DeltaErrorCode::DeltaVersionInvalid, version = 42u64,);
         assert_eq!(err.params, vec![("version", "42".to_string())]);
     }
 
     #[test]
     fn or_delta_preserves_original_error_in_source() {
         fn parse_version(s: &str) -> Result<u64, DeltaError> {
-            s.parse::<u64>().or_delta(DeltaErrorCode::DeltaVersionInvalid)
+            s.parse::<u64>()
+                .or_delta(DeltaErrorCode::DeltaVersionInvalid)
         }
         let err = parse_version("not-a-number").unwrap_err();
         assert_eq!(err.code, DeltaErrorCode::DeltaVersionInvalid);
@@ -456,15 +454,16 @@ mod tests {
     /// existing upstream code.
     #[test]
     fn every_code_exists_in_upstream_catalog_with_matching_sqlstate() {
-        let upstream: serde_json::Value = serde_json::from_str(UPSTREAM_JSON)
-            .expect("upstream catalog must be valid JSON");
+        let upstream: serde_json::Value =
+            serde_json::from_str(UPSTREAM_JSON).expect("upstream catalog must be valid JSON");
         let root = upstream.as_object().expect("upstream root is an object");
         for &code in ALL_CODES {
             let entry = root.get(code.name()).unwrap_or_else(|| {
                 panic!(
                     "DeltaErrorCode::{:?} (name={}) is NOT present in upstream \
                      delta-error-codes.json — pick an existing upstream code or drop the variant.",
-                    code, code.name(),
+                    code,
+                    code.name(),
                 );
             });
             let upstream_sqlstate = entry

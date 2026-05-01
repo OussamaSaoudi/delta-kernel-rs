@@ -3,12 +3,11 @@
 //!
 //! The coroutine yields one operation at a time; the driver:
 //!
-//! 1. drains [`PhaseYield::Dispatch`] yields into a single `Vec<Plan>`
-//!    batch, tracking per-task ids;
+//! 1. drains [`PhaseYield::Dispatch`] yields into a single `Vec<Plan>` batch, tracking per-task
+//!    ids;
 //! 2. presents the batch as a [`PhaseOperation::Plans`] to the engine;
-//! 3. on `advance`, resolves same-batch awaits in-memory (no engine
-//!    round-trip) and drains any fresh dispatches before returning
-//!    [`AdvanceResult::Continue`] or [`AdvanceResult::Done`].
+//! 3. on `advance`, resolves same-batch awaits in-memory (no engine round-trip) and drains any
+//!    fresh dispatches before returning [`AdvanceResult::Continue`] or [`AdvanceResult::Done`].
 //!
 //! **Invariant:** a successfully constructed [`CoroutineSM`] always has
 //! at least one concrete phase queued. Zero-phase coroutines are invalid;
@@ -25,15 +24,14 @@ use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::plans::errors::{DeltaError, DeltaErrorCode, DeltaResultExt};
-use crate::{bail_delta, DeltaResult, Error};
-
 use super::super::engine_error::EngineError;
 use super::super::phase_kdf_state::PhaseKdfState;
 use super::super::phase_operation::PhaseOperation;
 use super::super::state_machine::{AdvanceResult, StateMachine};
 use super::generator::{Co, Gen, GeneratorState};
 use super::phase::{PhaseCo, PhaseResume, PhaseYield};
+use crate::plans::errors::{DeltaError, DeltaErrorCode, DeltaResultExt};
+use crate::{bail_delta, DeltaResult, Error};
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 type InnerGen<R> = Gen<PhaseYield, PhaseResume, Result<R, DeltaError>>;
@@ -362,13 +360,12 @@ fn _assert_box_future_shape() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::plans::ir::{
-        nodes::{ScanNode, SinkNode, SinkType},
-        DeclarativePlanNode, Plan,
-    };
-    use crate::plans::state_machines::framework::engine_error::{EngineError, EngineErrorKind};
     use std::sync::Arc;
+
+    use super::*;
+    use crate::plans::ir::nodes::{ScanNode, SinkNode, SinkType};
+    use crate::plans::ir::{DeclarativePlanNode, Plan};
+    use crate::plans::state_machines::framework::engine_error::{EngineError, EngineErrorKind};
 
     // A throwaway plan whose identity we don't care about — the SM tests
     // only look at the shape of `PhaseOperation`, not what's inside.
@@ -382,7 +379,7 @@ mod tests {
             schema,
         ));
         let sink = SinkNode {
-            sink_type: SinkType::Drop,
+            sink_type: SinkType::Results,
         };
         Plan::new(root, sink)
     }

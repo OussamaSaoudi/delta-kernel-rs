@@ -4,11 +4,11 @@
 //! protocol/metadata harvesting, sidecar collection) that engines can't
 //! interpret. Today the IR exposes one KDF shape:
 //!
-//! - [`traits::ConsumerKdf`] — observer over batches; returns
-//!   `Continue` / `Break` for early termination. Wired into the plan via the
-//!   [`SinkType::ConsumeByKdf`](crate::plans::ir::nodes::SinkType::ConsumeByKdf)
-//!   sink — the consumer drains the terminal row stream, accumulating its own
-//!   per-partition state for the engine to harvest after the plan completes.
+//! - [`traits::ConsumerKdf`] — observer over batches; returns `Continue` / `Break` for early
+//!   termination. Wired into the plan via the
+//!   [`SinkType::ConsumeByKdf`](crate::plans::ir::nodes::SinkType::ConsumeByKdf) sink — the
+//!   consumer drains the terminal row stream, accumulating its own per-partition state for the
+//!   engine to harvest after the plan completes.
 //!
 //! `ConsumerKdf` extends a small supertrait [`traits::Kdf`] carrying
 //! `kdf_id()` and `finish()`. KDFs are dispatched in-process and never cross
@@ -16,15 +16,15 @@
 //!
 //! # Identity
 //!
-//! - [`token::KdfStateToken`] — `{ kdf_id, serial }` stamped at plan-build
-//!   time. Keys the executor's state table.
-//! - [`trace::TraceContext`] — `{ sm, phase }` stamped at phase-execute
-//!   time. Lives on handles; used by tracing and cross-check validations.
+//! - [`token::KdfStateToken`] — `{ kdf_id, serial }` stamped at plan-build time. Keys the
+//!   executor's state table.
+//! - [`trace::TraceContext`] — `{ sm, phase }` stamped at phase-execute time. Lives on handles;
+//!   used by tracing and cross-check validations.
 //!
 //! # Handles
 //!
-//! - [`handle::Handle<K>`] — generic per-partition runtime state. Executor
-//!   code holds `Handle<dyn ConsumerKdf>` directly.
+//! - [`handle::Handle<K>`] — generic per-partition runtime state. Executor code holds `Handle<dyn
+//!   ConsumerKdf>` directly.
 //!
 //! # Adding a KDF
 //!

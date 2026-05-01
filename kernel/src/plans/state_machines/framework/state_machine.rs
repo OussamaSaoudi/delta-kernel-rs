@@ -16,11 +16,10 @@
 //! }
 //! ```
 
-use crate::plans::errors::DeltaError;
-
 use super::engine_error::EngineError;
 use super::phase_kdf_state::PhaseKdfState;
 use super::phase_operation::PhaseOperation;
+use crate::plans::errors::DeltaError;
 
 /// Result of advancing a state machine one step.
 #[derive(Debug)]
@@ -87,12 +86,11 @@ pub trait StateMachine {
 
     /// Receive the phase outcome from the driver.
     ///
-    /// - `Ok(PhaseKdfState)` — the executor ran every plan in the phase and
-    ///   gathered per-partition KDF state; the SM takes ownership of the
-    ///   accumulator.
-    /// - `Err(EngineError)` — a typed engine-side failure; the SM matches
-    ///   on [`EngineError::kind`](super::engine_error::EngineError::kind)
-    ///   and decides how to surface it.
+    /// - `Ok(PhaseKdfState)` — the executor ran every plan in the phase and gathered per-partition
+    ///   KDF state; the SM takes ownership of the accumulator.
+    /// - `Err(EngineError)` — a typed engine-side failure; the SM matches on
+    ///   [`EngineError::kind`](super::engine_error::EngineError::kind) and decides how to surface
+    ///   it.
     fn advance(
         &mut self,
         result: Result<PhaseKdfState, EngineError>,

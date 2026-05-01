@@ -1,8 +1,8 @@
 //! Declarative plan intermediate representation.
 //!
 //! - [`nodes`] — individual node types (leaves, transforms, sink).
-//! - [`declarative`] — the [`DeclarativePlanNode`] tree enum and its chain
-//!   construction API (leaf constructors, transforms, terminals).
+//! - [`declarative`] — the [`DeclarativePlanNode`] tree enum and its chain construction API (leaf
+//!   constructors, transforms, terminals).
 //! - [`plan`] — the [`Plan`] envelope handed to the engine.
 
 pub mod declarative;

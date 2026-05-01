@@ -144,5 +144,4 @@ mod tests {
         assert_eq!(out[0].size, 1000);
         assert_eq!(out[0].last_modified, 42);
     }
-
 }

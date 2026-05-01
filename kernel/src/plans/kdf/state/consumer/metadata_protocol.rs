@@ -111,5 +111,4 @@ mod tests {
         let err = MetadataProtocolReader::into_output(vec![r]).unwrap_err();
         assert!(format!("{err}").contains("missing protocol"), "got: {err}");
     }
-
 }

@@ -131,8 +131,8 @@ impl EngineErrorCode {
     /// - [`FileNotFound`](Self::FileNotFound) — `payload` is the path.
     /// - [`IoError`](Self::IoError) — `payload` is the message.
     /// - [`EmptyInput`](Self::EmptyInput) — `payload` is the sink description.
-    /// - [`CommitConflict`](Self::CommitConflict) — `payload` parses as
-    ///   [`Version`]; non-numeric returns `None`.
+    /// - [`CommitConflict`](Self::CommitConflict) — `payload` parses as [`Version`]; non-numeric
+    ///   returns `None`.
     ///
     /// Returns `None` only for ill-typed payloads (today, a
     /// `CommitConflict` whose payload can't parse as a version). FFI

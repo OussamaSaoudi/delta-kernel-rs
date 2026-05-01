@@ -10,8 +10,8 @@
 //! for the destination URL),
 //! and [`SinkType::PartitionedWrite`](delta_kernel::plans::ir::nodes::SinkType::PartitionedWrite)
 //! (Hive-style directories under a destination prefix),
-//! and [`SinkType::Load`](delta_kernel::plans::ir::nodes::SinkType::Load) (per-row parquet or JSON reads
-//! via kernel parquet/json handlers into the relation registry).
+//! and [`SinkType::Load`](delta_kernel::plans::ir::nodes::SinkType::Load) (per-row parquet or JSON
+//! reads via kernel parquet/json handlers into the relation registry).
 //! Unsupported constructs still return
 //! [`delta_kernel::plans::errors::DeltaError`] via [`error::unsupported`].
 
@@ -21,7 +21,7 @@ pub mod exec;
 pub mod executor;
 
 pub use error::{datafusion_err_to_delta, LiftDeltaErr};
-pub use executor::DataFusionExecutor;
+pub use executor::{DataFusionExecutor, DriveOpts};
 
 #[cfg(test)]
 mod tests {

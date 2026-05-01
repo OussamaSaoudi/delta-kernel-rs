@@ -3,13 +3,12 @@
 //! Replaces the `genawaiter` crate with a narrow, no-deps implementation that
 //! covers exactly the shape the [`super::engine::CoroutineSM`] driver needs:
 //!
-//! - [`Co<Y, R>`] — the coroutine-side handle. An `async fn` given a `Co`
-//!   calls [`Co::yield_`] to surrender control with a value of type `Y`,
-//!   and receives back a value of type `R` when the driver resumes it.
-//! - [`Gen<Y, R, O>`] — the driver-side generator. Wraps a boxed future
-//!   produced by the user's `FnOnce(Co<Y, R>) -> F` closure. [`Gen::resume_with`]
-//!   advances the future until it yields or completes, returning
-//!   [`GeneratorState<Y, O>`].
+//! - [`Co<Y, R>`] — the coroutine-side handle. An `async fn` given a `Co` calls [`Co::yield_`] to
+//!   surrender control with a value of type `Y`, and receives back a value of type `R` when the
+//!   driver resumes it.
+//! - [`Gen<Y, R, O>`] — the driver-side generator. Wraps a boxed future produced by the user's
+//!   `FnOnce(Co<Y, R>) -> F` closure. [`Gen::resume_with`] advances the future until it yields or
+//!   completes, returning [`GeneratorState<Y, O>`].
 //!
 //! ## Mechanics
 //!
@@ -24,15 +23,13 @@
 //!
 //! ## Constraints
 //!
-//! - The producer must not hold the channel lock across an `.await` boundary —
-//!   [`Co::yield_`] and [`YieldFuture::poll`] take the lock only to load/store
-//!   the single word of state, then drop it before returning. This is enforced
-//!   by keeping the critical sections trivial.
-//! - [`Gen::resume_with`] is `&mut self`: only one thread advances the
-//!   coroutine at a time. The `Send` marker applies to futures that don't hold
-//!   non-`Send` state across await points.
-//! - The no-op waker never schedules a re-poll; the driver polls explicitly
-//!   in response to external events (engine results), never speculatively.
+//! - The producer must not hold the channel lock across an `.await` boundary — [`Co::yield_`] and
+//!   [`YieldFuture::poll`] take the lock only to load/store the single word of state, then drop it
+//!   before returning. This is enforced by keeping the critical sections trivial.
+//! - [`Gen::resume_with`] is `&mut self`: only one thread advances the coroutine at a time. The
+//!   `Send` marker applies to futures that don't hold non-`Send` state across await points.
+//! - The no-op waker never schedules a re-poll; the driver polls explicitly in response to external
+//!   events (engine results), never speculatively.
 //!
 //! Panics in this module are reserved for internal coroutine-protocol
 //! invariants — the driver and body communicate in lockstep through

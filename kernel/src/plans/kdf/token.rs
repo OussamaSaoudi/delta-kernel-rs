@@ -15,9 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 ///
 /// Fields:
 /// - `kdf_id` — owned copy of [`crate::plans::kdf::Kdf::kdf_id`]'s return.
-/// - `serial` — monotonic counter; disambiguates multiple instances of the
-///   same KDF type within one plan (rare but real — e.g., two
-///   `MetadataProtocol` consumers over disjoint sub-unions).
+/// - `serial` — monotonic counter; disambiguates multiple instances of the same KDF type within one
+///   plan (rare but real — e.g., two `MetadataProtocol` consumers over disjoint sub-unions).
 ///
 /// Equality / hashing consider both fields. `Display` formats as
 /// `kdf_id#serial`.
@@ -47,6 +46,28 @@ impl std::fmt::Display for KdfStateToken {
     }
 }
 
+impl KdfStateToken {
+    /// Parse [`Display`] output (`kdf_id` + `#` + decimal serial).
+    ///
+    /// Uses the **last** `#` so `kdf_id` may contain `#` without ambiguity for the serial suffix.
+    pub fn parse_display(s: &str) -> crate::DeltaResult<Self> {
+        let (kdf_id, serial_str) = s.rsplit_once('#').ok_or_else(|| {
+            crate::Error::generic(format!(
+                "KdfStateToken::parse_display: missing `#` separator in `{s}`"
+            ))
+        })?;
+        let serial = serial_str.parse::<u64>().map_err(|e| {
+            crate::Error::generic(format!(
+                "KdfStateToken::parse_display: invalid serial in `{s}`: {e}"
+            ))
+        })?;
+        Ok(Self {
+            kdf_id: kdf_id.to_string(),
+            serial,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +87,21 @@ mod tests {
             serial: 42,
         };
         assert_eq!(t.to_string(), "consumer.checkpoint_hint#42");
+    }
+
+    #[test]
+    fn parse_display_round_trips_display() {
+        let t = KdfStateToken {
+            kdf_id: "consumer.checkpoint_hint".to_string(),
+            serial: 42,
+        };
+        assert_eq!(KdfStateToken::parse_display(&t.to_string()).unwrap(), t);
+    }
+
+    #[test]
+    fn parse_display_last_hash_splits_serial() {
+        let t = KdfStateToken::parse_display("a#b#3").unwrap();
+        assert_eq!(t.kdf_id, "a#b");
+        assert_eq!(t.serial, 3);
     }
 }

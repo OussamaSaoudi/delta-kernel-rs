@@ -3,16 +3,15 @@
 //!
 //! Three pieces, all kernel-internal:
 //!
-//! - [`PhaseYield`] / [`PhaseResume`] / [`PhaseCo`] — the typed protocol
-//!   flowing through the coroutine: yield plans and receive either a task
-//!   ack (on dispatch) or a completed [`PhaseKdfState`] / [`EngineError`]
-//!   (on await).
-//! - [`Handle`] — typed receipt for a dispatched plan; produced by
-//!   [`Phase::dispatch`] and consumed by [`Phase::await_handle`]. Carries
-//!   the KDF token so the correct per-partition payloads are extracted.
-//! - [`Phase`] — ergonomic wrappers around the raw yields (`dispatch`,
-//!   `execute`, `try_execute`, `run_schema_query`, ...). SM authors
-//!   write their phase body as `phase.execute(prepared).await`.
+//! - [`PhaseYield`] / [`PhaseResume`] / [`PhaseCo`] — the typed protocol flowing through the
+//!   coroutine: yield plans and receive either a task ack (on dispatch) or a completed
+//!   [`PhaseKdfState`] / [`EngineError`] (on await).
+//! - [`Handle`] — typed receipt for a dispatched plan; produced by [`Phase::dispatch`] and consumed
+//!   by [`Phase::await_handle`]. Carries the KDF token so the correct per-partition payloads are
+//!   extracted.
+//! - [`Phase`] — ergonomic wrappers around the raw yields (`dispatch`, `execute`, `try_execute`,
+//!   `run_schema_query`, ...). SM authors write their phase body as
+//!   `phase.execute(prepared).await`.
 //!
 //! Panics in this module are reserved for internal coroutine-protocol
 //! invariants — the driver assigns task IDs and matches `PhaseYield` /
@@ -23,6 +22,7 @@
 
 use std::sync::Arc;
 
+use super::generator::Co;
 use crate::delta_error;
 use crate::plans::errors::{DeltaError, DeltaErrorCode};
 use crate::plans::ir::{Plan, Prepared};
@@ -32,8 +32,6 @@ use crate::plans::state_machines::framework::engine_error::EngineError;
 use crate::plans::state_machines::framework::phase_kdf_state::PhaseKdfState;
 use crate::plans::state_machines::framework::phase_operation::SchemaQueryNode;
 use crate::schema::{SchemaRef, StructType};
-
-use super::generator::Co;
 
 /// Value yielded by a coroutine at each phase boundary. The driver drains
 /// [`Dispatch`](Self::Dispatch) yields into a single batch until an

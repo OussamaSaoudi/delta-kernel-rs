@@ -12,13 +12,12 @@
 //!
 //! # Object-safety notes
 //!
-//! - Associated types are NOT on the subtrait — `Box<dyn ConsumerKdf>` must
-//!   be heterogeneous across concrete consumer implementations (the executor
-//!   mixes consumers with different state types). Typed output lives on the
-//!   [`crate::plans::kdf::KdfOutput`] companion trait via static dispatch.
-//! - `finish(self: Box<Self>) -> Box<dyn Any + Send>` erases the per-impl
-//!   state type to keep the subtrait object-safe. Typed factories
-//!   downcast inside their extract closure.
+//! - Associated types are NOT on the subtrait — `Box<dyn ConsumerKdf>` must be heterogeneous across
+//!   concrete consumer implementations (the executor mixes consumers with different state types).
+//!   Typed output lives on the [`crate::plans::kdf::KdfOutput`] companion trait via static
+//!   dispatch.
+//! - `finish(self: Box<Self>) -> Box<dyn Any + Send>` erases the per-impl state type to keep the
+//!   subtrait object-safe. Typed factories downcast inside their extract closure.
 
 use std::any::Any;
 
@@ -63,7 +62,8 @@ pub trait Kdf: Send + std::fmt::Debug {
     /// closure back to the concrete state type.
     ///
     /// Signature takes `Box<Self>` rather than `self` so it's object-safe;
-    /// concrete impls are usually `fn finish(self: Box<Self>) -> Box<dyn Any + Send> { Box::new(*self) }`.
+    /// concrete impls are usually `fn finish(self: Box<Self>) -> Box<dyn Any + Send> {
+    /// Box::new(*self) }`.
     fn finish(self: Box<Self>) -> Box<dyn Any + Send>;
 }
 

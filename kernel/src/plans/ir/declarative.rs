@@ -47,18 +47,17 @@
 //! - [`DeclarativePlanNode::into_plan`] — explicit sink.
 //! - [`DeclarativePlanNode::results`] — sugar for `into_plan(SinkType::Results)`.
 //! - [`DeclarativePlanNode::into_relation`] — pipe output into a named
-//!   [`RelationHandle`](super::nodes::RelationHandle) for another plan in
-//!   the same `PhaseOperation::Plans(...)` to consume.
-//! - [`DeclarativePlanNode::into_load`] — file-reader sink: each upstream
-//!   row describes a file to open and read; optional DV masking via
-//!   [`LoadSink::dv_ref`]. Materializes under a named relation handle.
-//! - [`DeclarativePlanNode::into_write`] — single-destination file write
-//!   sink ([`WriteSink`]); IR-only until a DataFusion-backed executor handles it.
+//!   [`RelationHandle`](super::nodes::RelationHandle) for another plan in the same
+//!   `PhaseOperation::Plans(...)` to consume.
+//! - [`DeclarativePlanNode::into_load`] — file-reader sink: each upstream row describes a file to
+//!   open and read; optional DV masking via [`LoadSink::dv_ref`]. Materializes under a named
+//!   relation handle.
+//! - [`DeclarativePlanNode::into_write`] — single-destination file write sink ([`WriteSink`]);
+//!   IR-only until a DataFusion-backed executor handles it.
 //! - [`DeclarativePlanNode::into_partitioned_write`] — Hive-partitioned file write
 //!   ([`PartitionedWriteSink`]); IR-only for the same reason.
-//! - [`DeclarativePlanNode::consume`] — typed KDF consumer terminal; returns
-//!   a [`Prepared<O>`] whose plan terminates in
-//!   [`SinkType::ConsumeByKdf`](super::nodes::SinkType::ConsumeByKdf).
+//! - [`DeclarativePlanNode::consume`] — typed KDF consumer terminal; returns a [`Prepared<O>`]
+//!   whose plan terminates in [`SinkType::ConsumeByKdf`](super::nodes::SinkType::ConsumeByKdf).
 //!
 //! ## Escape hatches
 //!
@@ -425,6 +424,18 @@ pub struct Prepared<O> {
 }
 
 impl<O: Send + 'static> Prepared<O> {
+    /// Assemble a [`Prepared`] when the plan is not built via [`DeclarativePlanNode::consume`].
+    ///
+    /// Used by DF write-path helpers that pair non-KDF sinks (for example [`SinkType::Write`])
+    /// with executor-submitted telemetry keyed by `token`.
+    pub(crate) fn new(plan: Plan, token: KdfStateToken, extract: ExtractFn<O>) -> Self {
+        Self {
+            plan,
+            token,
+            extract,
+        }
+    }
+
     /// Token identifying the KDF state this extractor will consume.
     pub fn token(&self) -> &KdfStateToken {
         &self.token

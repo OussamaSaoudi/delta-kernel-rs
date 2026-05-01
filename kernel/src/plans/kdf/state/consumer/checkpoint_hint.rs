@@ -119,5 +119,4 @@ mod tests {
         assert_eq!(rec.version, 42);
         assert_eq!(rec.num_of_add_files, Some(7));
     }
-
 }

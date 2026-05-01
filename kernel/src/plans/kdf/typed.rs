@@ -10,11 +10,10 @@
 
 use std::any::Any;
 
-use crate::delta_error;
-use crate::plans::errors::{DeltaError, DeltaErrorCode};
-
 use super::token::KdfStateToken;
 use super::traits::Kdf;
+use crate::delta_error;
+use crate::plans::errors::{DeltaError, DeltaErrorCode};
 
 /// Typed-output companion. Each KDF state impls this once, declaring the
 /// typed output callers receive and how per-partition finalized states
@@ -38,8 +37,8 @@ pub trait KdfOutput: Kdf + Any + Sized + 'static {
     ///
     /// - Partitioned consumers: union/merge accumulators.
     /// - Global consumers: use [`take_single`] and project.
-    /// - Global consumers passing state through unchanged: return the
-    ///   result of [`take_single`] directly.
+    /// - Global consumers passing state through unchanged: return the result of [`take_single`]
+    ///   directly.
     fn into_output(parts: Vec<Self>) -> Result<Self::Output, DeltaError>;
 }
 
