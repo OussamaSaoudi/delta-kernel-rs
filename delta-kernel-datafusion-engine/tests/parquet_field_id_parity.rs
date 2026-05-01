@@ -1,8 +1,9 @@
 //! Integration tests for parquet **root** column matching when the kernel logical schema attaches
 //! parquet field IDs (`parquet.field.id` → Arrow `PARQUET:field_id` when lowering logical schemas).
 //!
-//! This mirrors Delta Kernel parquet-handler semantics for flat tables: match by native parquet field
-//! ID first, then fall back to column name. Nested struct paths are **not** field-ID-resolved here.
+//! This mirrors Delta Kernel parquet-handler semantics for flat tables: match by native parquet
+//! field ID first, then fall back to column name. Nested struct paths are **not** field-ID-resolved
+//! here.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -17,8 +18,7 @@ use delta_kernel::schema::{
 };
 use delta_kernel::FileMeta;
 use delta_kernel_datafusion_engine::DataFusionExecutor;
-use parquet::arrow::ArrowWriter;
-use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
 use url::Url;
 
 fn parquet_field_id_meta(id: i64) -> HashMap<String, String> {
@@ -192,8 +192,8 @@ async fn parquet_scan_mixes_field_id_match_with_name_fallback_per_column() {
     .unwrap();
     write_parquet(&path, arrow_schema, batch);
 
-    // Only `logical_metric` carries a parquet field ID — triggers ID-first adaptation while `plain_label`
-    // stays purely name-aligned (no IDs anywhere on that column).
+    // Only `logical_metric` carries a parquet field ID — triggers ID-first adaptation while
+    // `plain_label` stays purely name-aligned (no IDs anywhere on that column).
     let kernel_schema = Arc::new(
         StructType::try_new(vec![
             StructField::new("plain_label", KernelDataType::STRING, false),

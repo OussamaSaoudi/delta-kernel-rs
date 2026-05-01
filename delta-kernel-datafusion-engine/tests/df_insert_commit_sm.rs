@@ -6,7 +6,7 @@ use delta_kernel::expressions::Scalar;
 use delta_kernel::plans::ir::nodes::WriteSink;
 use delta_kernel::plans::ir::DeclarativePlanNode;
 use delta_kernel::plans::state_machines::df::{
-    commit_action_emit_sm, commit_action_envelopes_literal, insert_write_rows_prepared,
+    commit_action_emit_sm, commit_action_envelopes_literal,
 };
 use delta_kernel::schema::{DataType, StructField, StructType};
 use delta_kernel_datafusion_engine::{DataFusionExecutor, DriveOpts};
@@ -36,9 +36,8 @@ async fn df_insert_sm_writes_parquet_and_row_count_matches_literal_rows() {
         .unwrap()
         .into_write(WriteSink::parquet(dest));
 
-    let prepared = insert_write_rows_prepared(plan);
     let ex = DataFusionExecutor::try_new().unwrap();
-    let n = ex.drive_insert_write_sm(prepared).await.unwrap();
+    let n = ex.drive_insert_write_sm(plan).await.unwrap();
 
     assert_eq!(n, 3);
     assert!(path.exists(), "parquet artifact present");
@@ -49,8 +48,9 @@ async fn df_commit_emit_sm_returns_ordered_json_action_envelopes() {
     let commit = r#"{"commitInfo":{"operation":"WRITE","engineInfo":"kernel-test"}}"#;
     let add = r#"{"add":{"path":"part-00000.parquet","partitionValues":{},"size":42}}"#;
 
-    let prepared = commit_action_envelopes_literal(vec![commit.into(), add.into()]).unwrap();
-    let sm = commit_action_emit_sm(prepared).unwrap();
+    let (plan, extractor) =
+        commit_action_envelopes_literal(vec![commit.into(), add.into()]).unwrap();
+    let sm = commit_action_emit_sm(plan, extractor).unwrap();
     let ex = DataFusionExecutor::try_new().unwrap();
     let out = ex
         .drive_coroutine_sm(sm, DriveOpts::default())

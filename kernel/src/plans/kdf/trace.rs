@@ -2,9 +2,9 @@
 //!
 //! [`TraceContext`] is the "where am I running" identity — set by the
 //! state-machine framework when it hands a plan to the executor. It lives
-//! on every [`crate::plans::kdf::Handle`] and in every `PhaseKdfState`
-//! submission record (the latter lands with the state-machine framework
-//! stack).
+//! on every [`crate::plans::kdf::Handle`] and on every
+//! [`FinishedHandle`](crate::plans::kdf::FinishedHandle) submitted into a
+//! `PhaseState`.
 //!
 //! Distinct from [`crate::plans::kdf::KdfStateToken`]:
 //!

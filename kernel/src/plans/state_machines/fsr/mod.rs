@@ -8,13 +8,14 @@
 
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::expressions::Scalar;
-use crate::plans::errors::{DeltaError, KernelErrAsDelta};
+use crate::plans::errors::{DeltaError, DeltaErrorCode, KernelErrAsDelta};
 use crate::plans::ir::DeclarativePlanNode;
 use crate::plans::kdf::{ConsumerKdf, KdfControl, KdfOutput};
-use crate::plans::state_machines::framework::coroutine::engine::CoroutineSM;
+use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
 use crate::plans::state_machines::framework::coroutine::phase::Phase;
+use crate::plans::state_machines::framework::phase_operation::{PhaseOperation, SchemaQueryNode};
 use crate::schema::SchemaRef;
-use crate::{DeltaResult, EngineData};
+use crate::{delta_error, DeltaResult, EngineData};
 
 /// Row-count consumer used by FSR demo phases (checkpoint manifest strip → parallel discovery).
 #[derive(Debug, Clone, Default)]
@@ -48,7 +49,7 @@ pub struct FsrStripThenFanoutOutcome {
     pub fanout_rows: usize,
 }
 
-/// Two-phase FSR-shaped demo: consume literals as proxy “checkpoint strip” then “file discovery”.
+/// Two-phase FSR-shaped demo: consume literals as proxy "checkpoint strip" then "file discovery".
 pub fn try_build_fsr_strip_then_fanout_sm(
     strip_schema: SchemaRef,
     strip_rows: Vec<Vec<Scalar>>,
@@ -58,19 +59,57 @@ pub fn try_build_fsr_strip_then_fanout_sm(
     CoroutineSM::new(|mut co| async move {
         let mut phase = Phase(&mut co);
 
-        let strip_prep = DeclarativePlanNode::literal(strip_schema, strip_rows)
+        let (strip_plan, strip_extractor) = DeclarativePlanNode::literal(strip_schema, strip_rows)
             .map_err(|e| e.into_delta_default())?
             .consume(RowCounter::default());
-        let strip_rows = phase
-            .execute(strip_prep, "fsr_strip_checkpoint_manifest")
-            .await?;
+        let strip_state = phase
+            .execute(
+                PhaseOperation::Plans(vec![strip_plan]),
+                "fsr_strip_checkpoint_manifest",
+            )
+            .await
+            .map_err(|e| {
+                delta_error!(
+                    DeltaErrorCode::DeltaCommandInvariantViolation,
+                    operation = "fsr::strip::execute",
+                    detail = e.display_with_source_chain(),
+                    source = e,
+                )
+            })?;
+        let strip_rows = strip_extractor.extract(&strip_state).map_err(|e| {
+            delta_error!(
+                DeltaErrorCode::DeltaCommandInvariantViolation,
+                operation = "fsr::strip::extract",
+                detail = e.display_with_source_chain(),
+                source = e,
+            )
+        })?;
 
-        let fan_prep = DeclarativePlanNode::literal(fanout_schema, fanout_rows)
+        let (fan_plan, fan_extractor) = DeclarativePlanNode::literal(fanout_schema, fanout_rows)
             .map_err(|e| e.into_delta_default())?
             .consume(RowCounter::default());
-        let fanout_rows = phase
-            .execute(fan_prep, "fsr_parallel_file_discovery")
-            .await?;
+        let fan_state = phase
+            .execute(
+                PhaseOperation::Plans(vec![fan_plan]),
+                "fsr_parallel_file_discovery",
+            )
+            .await
+            .map_err(|e| {
+                delta_error!(
+                    DeltaErrorCode::DeltaCommandInvariantViolation,
+                    operation = "fsr::fanout::execute",
+                    detail = e.display_with_source_chain(),
+                    source = e,
+                )
+            })?;
+        let fanout_rows = fan_extractor.extract(&fan_state).map_err(|e| {
+            delta_error!(
+                DeltaErrorCode::DeltaCommandInvariantViolation,
+                operation = "fsr::fanout::extract",
+                detail = e.display_with_source_chain(),
+                source = e,
+            )
+        })?;
 
         Ok(FsrStripThenFanoutOutcome {
             strip_rows,
@@ -91,10 +130,33 @@ pub fn try_build_fsr_footer_schema_sm(
 ) -> Result<CoroutineSM<FsrFooterSchemaOutcome>, DeltaError> {
     CoroutineSM::new(|mut co| async move {
         let mut phase = Phase(&mut co);
-        let schema_opt = phase
-            .run_schema_query(parquet_file_url, "fsr_read_footer_schema")
-            .await?;
-        let column_count = schema_opt.map(|s| s.fields().len()).unwrap_or(0);
+        let state = phase
+            .execute(
+                PhaseOperation::SchemaQuery(SchemaQueryNode::new(parquet_file_url)),
+                "fsr_read_footer_schema",
+            )
+            .await
+            .map_err(|e| {
+                delta_error!(
+                    DeltaErrorCode::DeltaCommandInvariantViolation,
+                    operation = "fsr::footer_schema::execute",
+                    detail = e.display_with_source_chain(),
+                    source = e,
+                )
+            })?;
+        // A successful SchemaQuery (no `EngineError`) MUST submit a schema; an
+        // empty slot here means the executor finished the phase without
+        // populating it, which is an executor contract bug -- surface it
+        // rather than silently reporting zero columns.
+        let schema = state.take_schema().ok_or_else(|| {
+            delta_error!(
+                DeltaErrorCode::DeltaCommandInvariantViolation,
+                operation = "fsr::footer_schema::take_schema",
+                detail = "executor reported PhaseOperation::SchemaQuery success but did not \
+                          submit a schema",
+            )
+        })?;
+        let column_count = schema.fields().len();
         Ok(FsrFooterSchemaOutcome { column_count })
     })
 }

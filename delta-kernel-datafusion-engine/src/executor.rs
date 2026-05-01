@@ -19,14 +19,14 @@
 //! Metadata-only parquet footer reads (SchemaQuery-shaped) use
 //! [`DataFusionExecutor::read_parquet_footer_schema`].
 //!
-//! Phase 3.2 submits [`SinkType::ConsumeByKdf`] finalized handles into [`PhaseKdfState`] during
+//! Phase 3.2 submits [`SinkType::ConsumeByKdf`] finalized handles into [`PhaseState`] during
 //! [`Self::execute_phase_operation_with_drive_opts`] using
-//! [`crate::compile::CompileContext::phase_kdf_accumulator`]. Phase 3.3 wires classic checkpoint
+//! [`crate::compile::CompileContext::phase_state`]. Phase 3.3 wires classic checkpoint
 //! parquet materialization via [`Self::checkpoint_write_classic_parquet_and_finalize`] (kernel
 //! [`delta_kernel::plans::state_machines::df::checkpoint_write`] plans + SM phase
 //! `checkpoint_parquet_write`). Phase 3.4 extends [`DriveOpts`] so [`SinkType::Write`] sinks emit
-//! synthetic [`delta_kernel::plans::state_machines::df::WriteRowCount`] under the paired
-//! [`delta_kernel::plans::ir::Prepared`] token ([`Self::drive_insert_write_sm`]).
+//! synthetic [`delta_kernel::plans::state_machines::df::WriteRowCount`] under a caller-supplied
+//! token ([`Self::drive_insert_write_sm`]).
 
 use std::sync::{Arc, Mutex};
 
@@ -42,12 +42,12 @@ use delta_kernel::plans::ir::nodes::SinkType;
 use delta_kernel::plans::ir::Plan;
 use delta_kernel::plans::kdf::{FinishedHandle, KdfStateToken, TraceContext};
 use delta_kernel::plans::state_machines::df::WriteRowCount;
-use delta_kernel::plans::state_machines::framework::coroutine::engine::CoroutineSM;
+use delta_kernel::plans::state_machines::framework::coroutine::driver::CoroutineSM;
 use delta_kernel::plans::state_machines::framework::engine_error::{EngineError, EngineErrorKind};
-use delta_kernel::plans::state_machines::framework::phase_kdf_state::PhaseKdfState;
 use delta_kernel::plans::state_machines::framework::phase_operation::{
     PhaseOperation, SchemaQueryNode,
 };
+use delta_kernel::plans::state_machines::framework::phase_state::PhaseState;
 use delta_kernel::plans::state_machines::framework::state_machine::{AdvanceResult, StateMachine};
 use delta_kernel::schema::SchemaRef as KernelSchemaRef;
 use delta_kernel::{Engine, Error as KernelError, FileMeta};
@@ -82,8 +82,7 @@ fn map_kernel_err(err: KernelError) -> EngineError {
 fn execute_schema_query_phase(
     engine: &Arc<dyn Engine>,
     node: SchemaQueryNode,
-) -> Result<PhaseKdfState, EngineError> {
-    let token = KdfStateToken::parse_display(&node.token).map_err(EngineError::internal)?;
+) -> Result<PhaseState, EngineError> {
     let url = resolve_schema_query_url(&node.file_path)?;
     let meta = engine
         .storage_handler()
@@ -93,23 +92,17 @@ fn execute_schema_query_phase(
         .parquet_handler()
         .read_parquet_footer(&meta)
         .map_err(map_kernel_err)?;
-    let accum = PhaseKdfState::empty();
-    let struct_ty = footer.schema.as_ref().clone();
-    accum.submit(FinishedHandle {
-        token,
-        ctx: TraceContext::new("delta-kernel-datafusion-engine", "schema_query"),
-        partition: 0,
-        erased: Box::new(struct_ty),
-    });
-    Ok(accum)
+    let state = PhaseState::empty();
+    state.submit_schema(footer.schema);
+    Ok(state)
 }
 
 /// Options for [`DataFusionExecutor::drive_coroutine_sm`].
 #[derive(Clone, Debug, Default)]
 pub struct DriveOpts {
-    /// When set, draining a [`SinkType::Write`] plan submits [`WriteRowCount`] keyed by this token
-    /// (cloned from [`delta_kernel::plans::ir::Prepared::token`] by
-    /// [`DataFusionExecutor::drive_insert_write_sm`]).
+    /// When set, draining a [`SinkType::Write`] plan submits [`WriteRowCount`] keyed by this
+    /// token. The matching [`Extractor`](delta_kernel::plans::ir::Extractor) on the SM side will
+    /// pull the row count back out of the resulting [`PhaseState`].
     pub insert_write_telemetry_token: Option<KdfStateToken>,
 }
 
@@ -179,7 +172,7 @@ impl DataFusionExecutor {
     pub async fn execute_phase_operation(
         &self,
         op: PhaseOperation,
-    ) -> Result<PhaseKdfState, EngineError> {
+    ) -> Result<PhaseState, EngineError> {
         self.execute_phase_operation_with_drive_opts(op, &DriveOpts::default())
             .await
     }
@@ -191,11 +184,11 @@ impl DataFusionExecutor {
         &self,
         op: PhaseOperation,
         opts: &DriveOpts,
-    ) -> Result<PhaseKdfState, EngineError> {
-        let (accum, _) = self
+    ) -> Result<PhaseState, EngineError> {
+        let (state, _) = self
             .execute_phase_operation_with_results_capture(op, opts)
             .await?;
-        Ok(accum)
+        Ok(state)
     }
 
     /// Same draining semantics as [`Self::execute_phase_operation_with_drive_opts`], plus optional
@@ -208,7 +201,7 @@ impl DataFusionExecutor {
         &self,
         op: PhaseOperation,
         opts: &DriveOpts,
-    ) -> Result<(PhaseKdfState, Option<Vec<RecordBatch>>), EngineError> {
+    ) -> Result<(PhaseState, Option<Vec<RecordBatch>>), EngineError> {
         self.execute_phase_operation_with_results_capture(op, opts)
             .await
     }
@@ -217,16 +210,16 @@ impl DataFusionExecutor {
         &self,
         op: PhaseOperation,
         opts: &DriveOpts,
-    ) -> Result<(PhaseKdfState, Option<Vec<RecordBatch>>), EngineError> {
+    ) -> Result<(PhaseState, Option<Vec<RecordBatch>>), EngineError> {
         self.clear_kdf_harvest_slot();
 
         match op {
             PhaseOperation::Plans(plans) => {
-                let accum = PhaseKdfState::empty();
+                let state = PhaseState::empty();
                 let ctx = CompileContext {
                     relation_registry: Arc::clone(&self.relation_registry),
                     kdf_harvest_slot: Arc::clone(&self.kdf_harvest_slot),
-                    phase_kdf_accumulator: Some(accum.clone()),
+                    phase_state: Some(state.clone()),
                     engine: Arc::clone(&self.engine),
                 };
                 let mut last_results_batches: Option<Vec<RecordBatch>> = None;
@@ -243,7 +236,7 @@ impl DataFusionExecutor {
                     if let SinkType::Write(_) = &plan.sink.sink_type {
                         if let Some(tok) = opts.insert_write_telemetry_token.clone() {
                             let n = sum_write_sink_row_counts(&batches)?;
-                            accum.submit(FinishedHandle {
+                            state.submit_kdf_handle(FinishedHandle {
                                 token: tok,
                                 ctx: TraceContext::new(
                                     "delta-kernel-datafusion-engine",
@@ -258,11 +251,11 @@ impl DataFusionExecutor {
                         last_results_batches = Some(batches);
                     }
                 }
-                Ok((accum, last_results_batches))
+                Ok((state, last_results_batches))
             }
             PhaseOperation::SchemaQuery(node) => {
-                let accum = execute_schema_query_phase(&self.engine, node)?;
-                Ok((accum, None))
+                let state = execute_schema_query_phase(&self.engine, node)?;
+                Ok((state, None))
             }
         }
     }
@@ -293,37 +286,33 @@ impl DataFusionExecutor {
         }
     }
 
-    /// Phase 3.4 helper — pairs
-    /// [`delta_kernel::plans::state_machines::df::insert_write_rows_prepared`] with
-    /// [`DriveOpts::insert_write_telemetry_token`].
-    pub async fn drive_insert_write_sm(
-        &self,
-        prepared: delta_kernel::plans::ir::Prepared<u64>,
-    ) -> Result<u64, DeltaError> {
-        let tok = prepared.token().clone();
-        let sm = delta_kernel::plans::state_machines::df::insert_write_sm(prepared)?;
+    /// Phase 3.4 helper — drives
+    /// [`delta_kernel::plans::state_machines::df::insert_write_sm`] with
+    /// [`DriveOpts::insert_write_telemetry_token`] set to the SM's matching token.
+    pub async fn drive_insert_write_sm(&self, plan: Plan) -> Result<u64, DeltaError> {
+        let (sm, token) = delta_kernel::plans::state_machines::df::insert_write_sm(plan)?;
         self.drive_coroutine_sm(
             sm,
             DriveOpts {
-                insert_write_telemetry_token: Some(tok),
+                insert_write_telemetry_token: Some(token),
             },
         )
         .await
     }
 
-    /// Phase 3.3 helper — pairs [`delta_kernel::plans::state_machines::df::checkpoint_write`] with
-    /// write-row telemetry (same [`DriveOpts`] contract as [`Self::drive_insert_write_sm`]).
+    /// Phase 3.3 helper — drives
+    /// [`delta_kernel::plans::state_machines::df::checkpoint_classic_parquet_write_sm`] with
+    /// the matching write-row telemetry token.
     pub async fn drive_checkpoint_classic_parquet_write_sm(
         &self,
-        prepared: delta_kernel::plans::ir::Prepared<u64>,
+        plan: Plan,
     ) -> Result<u64, DeltaError> {
-        let tok = prepared.token().clone();
-        let sm =
-            delta_kernel::plans::state_machines::df::checkpoint_classic_parquet_write_sm(prepared)?;
+        let (sm, token) =
+            delta_kernel::plans::state_machines::df::checkpoint_classic_parquet_write_sm(plan)?;
         self.drive_coroutine_sm(
             sm,
             DriveOpts {
-                insert_write_telemetry_token: Some(tok),
+                insert_write_telemetry_token: Some(token),
             },
         )
         .await
@@ -343,7 +332,7 @@ impl DataFusionExecutor {
     ) -> Result<(), DeltaError> {
         use delta_kernel::checkpoint::LastCheckpointHintStats;
         use delta_kernel::plans::state_machines::df::{
-            checkpoint_classic_parquet_write_plan, checkpoint_parquet_write_rows_prepared,
+            checkpoint_classic_parquet_write_plan,
             prepare_classic_checkpoint_parquet_materialization,
         };
 
@@ -353,10 +342,7 @@ impl DataFusionExecutor {
                 .map_err(|e| crate::error::internal_error(e.to_string()))?;
         self.relation_registry.register(handle.id, batches);
         let plan = checkpoint_classic_parquet_write_plan(handle, dest.clone());
-        let prepared = checkpoint_parquet_write_rows_prepared(plan);
-        let _written_rows = self
-            .drive_checkpoint_classic_parquet_write_sm(prepared)
-            .await?;
+        let _written_rows = self.drive_checkpoint_classic_parquet_write_sm(plan).await?;
         let meta = engine
             .storage_handler()
             .head(&dest)

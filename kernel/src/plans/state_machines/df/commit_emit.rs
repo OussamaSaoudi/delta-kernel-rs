@@ -8,13 +8,14 @@ use std::any::Any;
 use crate::arrow::array::{Array, AsArray};
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::expressions::Scalar;
-use crate::plans::errors::DeltaError;
-use crate::plans::ir::{DeclarativePlanNode, Prepared};
+use crate::plans::errors::{DeltaError, DeltaErrorCode};
+use crate::plans::ir::{DeclarativePlanNode, Extractor, Plan};
 use crate::plans::kdf::{ConsumerKdf, Kdf, KdfControl, KdfOutput};
-use crate::plans::state_machines::framework::coroutine::engine::CoroutineSM;
+use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
 use crate::plans::state_machines::framework::coroutine::phase::Phase;
+use crate::plans::state_machines::framework::phase_operation::PhaseOperation;
 use crate::schema::{DataType, SchemaRef, StructField, StructType};
-use crate::{DeltaResult, EngineData};
+use crate::{delta_error, DeltaResult, EngineData};
 
 /// Accumulates UTF-8 JSON lines (one Delta action JSON object per row) from column `action_json`.
 #[derive(Clone, Debug, Default)]
@@ -69,10 +70,11 @@ pub fn commit_action_json_schema() -> SchemaRef {
     )]))
 }
 
-/// Build a literal plan that feeds [`CommitEnvelopeCollector`].
+/// Build a literal plan paired with a typed [`Extractor`] that drains the literal through a
+/// [`CommitEnvelopeCollector`].
 pub fn commit_action_envelopes_literal(
     json_lines: Vec<String>,
-) -> DeltaResult<Prepared<Vec<String>>> {
+) -> DeltaResult<(Plan, Extractor<Vec<String>>)> {
     let schema = commit_action_json_schema();
     let rows: Vec<Vec<Scalar>> = json_lines
         .into_iter()
@@ -84,10 +86,29 @@ pub fn commit_action_envelopes_literal(
 
 /// SM: single phase — collect commit JSON envelopes via [`CommitEnvelopeCollector`].
 pub fn commit_action_emit_sm(
-    prepared: Prepared<Vec<String>>,
+    plan: Plan,
+    extractor: Extractor<Vec<String>>,
 ) -> Result<CoroutineSM<Vec<String>>, DeltaError> {
     CoroutineSM::new(|mut co| async move {
         let mut phase = Phase(&mut co);
-        phase.execute(prepared, "commit_action_emit").await
+        let state = phase
+            .execute(PhaseOperation::Plans(vec![plan]), "commit_action_emit")
+            .await
+            .map_err(|e| {
+                delta_error!(
+                    DeltaErrorCode::DeltaCommandInvariantViolation,
+                    operation = "commit_action_emit_sm::execute",
+                    detail = e.display_with_source_chain(),
+                    source = e,
+                )
+            })?;
+        extractor.extract(&state).map_err(|e| {
+            delta_error!(
+                DeltaErrorCode::DeltaCommandInvariantViolation,
+                operation = "commit_action_emit_sm::extract",
+                detail = e.display_with_source_chain(),
+                source = e,
+            )
+        })
     })
 }

@@ -3,9 +3,8 @@
 use crate::plans::ir::Plan;
 
 /// A metadata-only read: ask the engine to open a parquet file, read its
-/// schema from the footer, and deliver it back through a
-/// [`PhaseKdfState`](super::phase_kdf_state::PhaseKdfState) entry keyed by
-/// `token`.
+/// schema from the footer, and deliver it back through
+/// [`PhaseState::submit_schema`](super::phase_state::PhaseState::submit_schema).
 ///
 /// Distinct from a data-carrying [`Plan`]: no row stream, no sink, no
 /// KDF-producing pipeline — the executor just does a footer read.
@@ -13,16 +12,12 @@ use crate::plans::ir::Plan;
 pub struct SchemaQueryNode {
     /// Path to the parquet file whose schema the kernel wants.
     pub file_path: String,
-    /// Kernel-internal token matching the SM's eventual
-    /// `PhaseKdfState::take_by_token` call.
-    pub token: String,
 }
 
 impl SchemaQueryNode {
-    pub fn new(file_path: impl Into<String>, token: impl Into<String>) -> Self {
+    pub fn new(file_path: impl Into<String>) -> Self {
         Self {
             file_path: file_path.into(),
-            token: token.into(),
         }
     }
 }

@@ -23,10 +23,9 @@ use delta_kernel::expressions::Scalar;
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::plans::ir::nodes::{RelationHandle, WriteSink};
 use delta_kernel::plans::ir::DeclarativePlanNode;
-use delta_kernel::plans::kdf::{ConsumerKdf, KdfOutput, KdfStateToken};
+use delta_kernel::plans::kdf::{ConsumerKdf, KdfOutput};
 use delta_kernel::plans::state_machines::df::{
-    checkpoint_classic_parquet_write_plan, checkpoint_parquet_write_rows_prepared,
-    commit_action_emit_sm, commit_action_envelopes_literal, insert_write_rows_prepared,
+    checkpoint_classic_parquet_write_plan, commit_action_emit_sm, commit_action_envelopes_literal,
     prepare_classic_checkpoint_parquet_materialization, CommitEnvelopeCollector,
 };
 use delta_kernel::plans::state_machines::framework::phase_operation::{
@@ -280,21 +279,16 @@ async fn parity_phase_schema_query_matches_read_parquet_footer_schema_helper() {
     let meta = executor.engine().storage_handler().head(&url).unwrap();
     let kernel_direct = executor.read_parquet_footer_schema(&meta).unwrap();
 
-    let token = KdfStateToken::new("schema_query");
-    let node = SchemaQueryNode::new(url.as_str(), token.to_string());
-    let accum = executor
+    let node = SchemaQueryNode::new(url.as_str());
+    let state = executor
         .execute_phase_operation(PhaseOperation::SchemaQuery(node))
         .await
         .expect("schema query phase");
 
-    let payloads = accum.take_by_token(&token);
-    assert_eq!(payloads.len(), 1);
-    let phase_ty = payloads[0]
-        .downcast_ref::<StructType>()
-        .expect("StructType payload");
+    let phase_schema = state.take_schema().expect("footer schema submitted");
 
     assert_eq!(
-        phase_ty,
+        phase_schema.as_ref(),
         kernel_direct.as_ref(),
         "PhaseOperation::SchemaQuery (DF executor driver) matches direct kernel footer schema read"
     );
@@ -362,8 +356,7 @@ async fn parity_checkpoint_classic_kernel_parquet_write_matches_df_relation_writ
     ex.relation_batch_registry()
         .register(handle.id, batches.clone());
     let plan = checkpoint_classic_parquet_write_plan(handle, dest_checkpoint_url.clone());
-    let prepared = checkpoint_parquet_write_rows_prepared(plan);
-    ex.drive_checkpoint_classic_parquet_write_sm(prepared)
+    ex.drive_checkpoint_classic_parquet_write_sm(plan)
         .await
         .expect("DF checkpoint parquet SM");
 
@@ -408,10 +401,9 @@ async fn parity_insert_kernel_parquet_handler_write_matches_df_insert_sm_rows() 
     let plan = DeclarativePlanNode::literal(Arc::clone(&schema), rows.clone())
         .unwrap()
         .into_write(WriteSink::parquet(df_url));
-    let prepared = insert_write_rows_prepared(plan);
 
     let ex = DataFusionExecutor::try_new_with_engine(Arc::clone(&engine)).unwrap();
-    let written = ex.drive_insert_write_sm(prepared).await.unwrap();
+    let written = ex.drive_insert_write_sm(plan).await.unwrap();
     assert_eq!(written, rows.len() as u64);
 
     let kernel_batches = read_all_parquet_batches(&kernel_path);
@@ -439,8 +431,9 @@ async fn parity_commit_emit_df_sm_matches_direct_commit_envelope_collector() {
     let kernel_reference =
         CommitEnvelopeCollector::into_output(vec![collector]).expect("into_output");
 
-    let prepared = commit_action_envelopes_literal(lines.clone()).expect("literal envelopes");
-    let sm = commit_action_emit_sm(prepared).expect("SM");
+    let (plan, extractor) =
+        commit_action_envelopes_literal(lines.clone()).expect("literal envelopes");
+    let sm = commit_action_emit_sm(plan, extractor).expect("SM");
     let df_lines = DataFusionExecutor::try_new()
         .expect("executor")
         .drive_coroutine_sm(sm, DriveOpts::default())

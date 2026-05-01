@@ -400,12 +400,13 @@ impl RecordBatchStream for KernelProjectStream {
 mod tests {
     use std::sync::Arc;
 
-    use crate::DataFusionExecutor;
     use delta_kernel::arrow::array::{AsArray, Int64Array, StringArray};
     use delta_kernel::arrow::datatypes::DataType as ArrowPhysicalType;
     use delta_kernel::expressions::{column_expr, Expression, Scalar};
     use delta_kernel::plans::ir::DeclarativePlanNode;
     use delta_kernel::schema::{DataType, StructField, StructType};
+
+    use crate::DataFusionExecutor;
 
     #[tokio::test]
     async fn project_struct_spread_to_top_level_columns() {

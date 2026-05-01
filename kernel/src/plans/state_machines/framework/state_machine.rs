@@ -17,8 +17,8 @@
 //! ```
 
 use super::engine_error::EngineError;
-use super::phase_kdf_state::PhaseKdfState;
 use super::phase_operation::PhaseOperation;
+use super::phase_state::PhaseState;
 use crate::plans::errors::DeltaError;
 
 /// Result of advancing a state machine one step.
@@ -59,7 +59,7 @@ impl<R> AdvanceResult<R> {
 ///
 /// Each SM-visible "phase" is one tick of this loop: the executor asks
 /// [`StateMachine::get_operation`] for what to run, executes it, then calls
-/// [`StateMachine::advance`] with the outcome (KDF state on success, an
+/// [`StateMachine::advance`] with the outcome ([`PhaseState`] on success, an
 /// [`EngineError`] on engine failure).
 ///
 /// # Error layering
@@ -86,19 +86,19 @@ pub trait StateMachine {
 
     /// Receive the phase outcome from the driver.
     ///
-    /// - `Ok(PhaseKdfState)` — the executor ran every plan in the phase and gathered per-partition
-    ///   KDF state; the SM takes ownership of the accumulator.
+    /// - `Ok(PhaseState)` — the executor ran every plan in the phase and gathered any KDF state /
+    ///   schema-query result; the SM takes ownership of the accumulator.
     /// - `Err(EngineError)` — a typed engine-side failure; the SM matches on
     ///   [`EngineError::kind`](super::engine_error::EngineError::kind) and decides how to surface
     ///   it.
     fn advance(
         &mut self,
-        result: Result<PhaseKdfState, EngineError>,
+        result: Result<PhaseState, EngineError>,
     ) -> Result<AdvanceResult<Self::Result>, DeltaError>;
 
     /// Static label for logging / diagnostics. Drivers use this in span
     /// names and error contexts; implementations should return the
-    /// currently-active phase name (or a fallback like `"complete"` /
-    /// `"priming"` at the boundaries).
+    /// currently-active phase name (or a fallback like `"complete"` once
+    /// the SM has finished).
     fn phase_name(&self) -> &'static str;
 }

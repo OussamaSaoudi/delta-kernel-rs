@@ -3,15 +3,18 @@
 //! ## Parquet column matching (`PARQUET:field_id`)
 //!
 //! Kernel logical schemas encode parquet native field IDs on Arrow fields as `PARQUET:field_id`
-//! during conversion from kernel `StructType`. The vendored [`ParquetSource`] / `ParquetOpener` adapts decoded physical
-//! parquet columns **by ID first, then by name** at the Arrow-schema root level—matching Delta Kernel
-//! parquet handlers for flat reads when writers kept stable IDs across physical renames/reordering.
+//! during conversion from kernel `StructType`. The vendored [`ParquetSource`] / `ParquetOpener`
+//! adapts decoded physical parquet columns **by ID first, then by name** at the Arrow-schema root
+//! level—matching Delta Kernel parquet handlers for flat reads when writers kept stable IDs across
+//! physical renames/reordering.
 //!
-//! When **no** root-level field IDs are present on the logical schema, behavior stays name-only (upstream DataFusion).
+//! When **no** root-level field IDs are present on the logical schema, behavior stays name-only
+//! (upstream DataFusion).
 //!
-//! **Limits:** nested struct children are not independently matched by parquet field ID in this path.
-//! Predicate pushdown inside the parquet decoder still keys off physical parquet statistics paths;
-//! declarative scans prefer residual [`KernelFilterExec`] after decode to avoid over-pushdown.
+//! **Limits:** nested struct children are not independently matched by parquet field ID in this
+//! path. Predicate pushdown inside the parquet decoder still keys off physical parquet statistics
+//! paths; declarative scans prefer residual [`KernelFilterExec`] after decode to avoid
+//! over-pushdown.
 
 use std::sync::Arc;
 
@@ -148,17 +151,17 @@ fn build_raw_scan(
 ///
 /// ## Predicate
 ///
-/// The scan predicate is evaluated **only** via [`KernelFilterExec`] on decoded record batches using
-/// the kernel Arrow evaluator (same implementation shape as [`FilterNode`] lowering). Native Parquet
-/// / JSON readers are not given pushdown predicates here, which guarantees evaluator parity with the
-/// kernel reference and avoids over-filtering relative to [`ScanNode`] semantics.
+/// The scan predicate is evaluated **only** via [`KernelFilterExec`] on decoded record batches
+/// using the kernel Arrow evaluator (same implementation shape as [`FilterNode`] lowering). Native
+/// Parquet / JSON readers are not given pushdown predicates here, which guarantees evaluator parity
+/// with the kernel reference and avoids over-filtering relative to [`ScanNode`] semantics.
 ///
 /// ## Row index
 ///
-/// Parquet scans with [`ScanNode::row_index_column`] decode arrow-rs virtual [`RowNumber`] columns in
-/// the file reader so indices are physical offsets **before** filtering; [`KernelFilterExec`] then
-/// masks rows without rewriting indices on survivors. JSON scans append contiguous indices with
-/// [`RowIndexExec`] **after** decoding (and after any scan predicate filter).
+/// Parquet scans with [`ScanNode::row_index_column`] decode arrow-rs virtual [`RowNumber`] columns
+/// in the file reader so indices are physical offsets **before** filtering; [`KernelFilterExec`]
+/// then masks rows without rewriting indices on survivors. JSON scans append contiguous indices
+/// with [`RowIndexExec`] **after** decoding (and after any scan predicate filter).
 ///
 /// Virtual Parquet row numbers are file-absolute in arrow-rs across batches from the same file.
 fn wrap_scan_extensions(
@@ -214,8 +217,9 @@ fn compile_scan_single_group(
 /// [`ScanNode::ordered`] is `false`. Parallel multi-file grouping is therefore disabled whenever a
 /// row-index column is requested; file emission order still follows [`ScanNode::files`].
 ///
-/// When **both** `ordered == false` **and** `row_index_column.is_none()`, all files share one native
-/// file group so DataFusion may parallelize partition scheduling across files (unordered scan).
+/// When **both** `ordered == false` **and** `row_index_column.is_none()`, all files share one
+/// native file group so DataFusion may parallelize partition scheduling across files (unordered
+/// scan).
 ///
 /// ## Predicate
 ///

@@ -28,7 +28,7 @@ use delta_kernel::plans::errors::DeltaError;
 use delta_kernel::plans::ir::nodes::{JoinType, RelationHandle, SinkType, WriteSink};
 use delta_kernel::plans::ir::{DeclarativePlanNode, Plan};
 use delta_kernel::plans::kdf::FinishedHandle;
-use delta_kernel::plans::state_machines::framework::phase_kdf_state::PhaseKdfState;
+use delta_kernel::plans::state_machines::framework::phase_state::PhaseState;
 use delta_kernel::schema::SchemaRef;
 use delta_kernel::Engine;
 
@@ -51,14 +51,14 @@ pub struct CompileContext {
     /// Latest finalized [`FinishedHandle`] from a [`SinkType::ConsumeByKdf`] plan run on this
     /// executor.
     pub kdf_harvest_slot: Arc<Mutex<Option<FinishedHandle>>>,
-    /// When [`Some`], [`SinkType::ConsumeByKdf`] pipelines [`PhaseKdfState::submit`] finalized
-    /// handles here for
+    /// When [`Some`], [`SinkType::ConsumeByKdf`] pipelines submit finalized handles into this
+    /// [`PhaseState`] for
     /// [`StateMachine`](delta_kernel::plans::state_machines::framework::state_machine::StateMachine)
     /// phases instead of populating [`Self::kdf_harvest_slot`] only.
     ///
     /// [`None`] preserves single-plan harvesting via
     /// [`crate::executor::DataFusionExecutor::take_last_kdf_finished`].
-    pub phase_kdf_accumulator: Option<PhaseKdfState>,
+    pub phase_state: Option<PhaseState>,
     /// Kernel [`Engine`] for sinks that delegate IO to parquet/json handlers ([`SinkType::Load`]).
     pub engine: Arc<dyn Engine>,
 }
@@ -72,7 +72,7 @@ impl CompileContext {
         Self {
             relation_registry,
             kdf_harvest_slot,
-            phase_kdf_accumulator: None,
+            phase_state: None,
             engine,
         }
     }
@@ -99,7 +99,7 @@ pub fn compile_plan(
                 inner,
                 sink.clone(),
                 Arc::clone(&ctx.kdf_harvest_slot),
-                ctx.phase_kdf_accumulator.clone(),
+                ctx.phase_state.clone(),
             )?))
         }
         SinkType::Load(_) => load_sink::compile_load_terminal(plan, ctx),

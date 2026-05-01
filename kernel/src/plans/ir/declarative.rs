@@ -5,7 +5,7 @@
 //! The prototype uses a fluent-builder style directly on the enum — static
 //! constructors for leaves, chain methods for unary transforms and n-ary
 //! combinators, and terminal methods that produce a [`Plan`] (untyped) or a
-//! [`Prepared<O>`] (typed, via a consumer KDF that also impls
+//! `(Plan, Extractor<O>)` pair (typed, via a consumer KDF that also impls
 //! [`crate::plans::kdf::KdfOutput`]).
 //!
 //! ```ignore
@@ -16,10 +16,12 @@
 //!     .project(projection, output_schema)
 //!     .results();
 //!
-//! // Typed pipeline: scan JSON, drain into a typed consumer KDF, harvest
-//! // the output.
-//! let prepared = DeclarativePlanNode::scan_json_as::<CheckpointHintRecord>(files)
+//! // Typed pipeline: scan JSON, drain into a typed consumer KDF, recover
+//! // the typed output from the resulting PhaseState.
+//! let (plan, extractor) = DeclarativePlanNode::scan_json_as::<CheckpointHintRecord>(files)
 //!     .consume(CheckpointHintReader::default());
+//! // ... after `phase.execute(PhaseOperation::Plans(vec![plan]), name).await?` ...
+//! // let hint = extractor.extract(&state)?;
 //! ```
 //!
 //! ## Leaves
@@ -56,8 +58,10 @@
 //!   IR-only until a DataFusion-backed executor handles it.
 //! - [`DeclarativePlanNode::into_partitioned_write`] — Hive-partitioned file write
 //!   ([`PartitionedWriteSink`]); IR-only for the same reason.
-//! - [`DeclarativePlanNode::consume`] — typed KDF consumer terminal; returns a [`Prepared<O>`]
-//!   whose plan terminates in [`SinkType::ConsumeByKdf`](super::nodes::SinkType::ConsumeByKdf).
+//! - [`DeclarativePlanNode::consume`] — typed KDF consumer terminal; returns a `(Plan,
+//!   Extractor<O>)` pair whose plan terminates in
+//!   [`SinkType::ConsumeByKdf`](super::nodes::SinkType::ConsumeByKdf) and whose extractor pulls the
+//!   typed output from the phase's [`PhaseState`].
 //!
 //! ## Escape hatches
 //!
@@ -86,6 +90,8 @@ use super::plan::Plan;
 use crate::expressions::{Expression, Scalar};
 use crate::plans::kdf::typed::ExtractFn;
 use crate::plans::kdf::{downcast_all, ConsumerKdf, KdfOutput, KdfStateToken};
+use crate::plans::state_machines::framework::engine_error::EngineError;
+use crate::plans::state_machines::framework::phase_state::PhaseState;
 use crate::schema::{SchemaRef, StructType, ToSchema};
 use crate::{DeltaResult, Error, FileMeta};
 
@@ -94,7 +100,7 @@ use crate::{DeltaResult, Error, FileMeta};
 /// Trees are transforms-only: every complete pipeline terminates in a
 /// [`Plan`] via one of the terminal methods (`into_plan`, `results`,
 /// `into_relation`, `into_load`, `into_write`, `into_partitioned_write`, `consume_by_kdf`) or in a
-/// [`Prepared<O>`] via [`DeclarativePlanNode::consume`].
+/// `(Plan, Extractor<O>)` pair via [`DeclarativePlanNode::consume`].
 #[derive(Debug, Clone)]
 pub enum DeclarativePlanNode {
     // Leaves
@@ -368,20 +374,18 @@ impl DeclarativePlanNode {
     }
 
     /// Typed KDF consumer terminal. Wraps `self` in a [`Plan`] terminating in
-    /// [`SinkType::ConsumeByKdf`] and returns a [`Prepared<O>`] carrying the
-    /// typed extractor.
-    pub fn consume<S>(self, state: S) -> Prepared<S::Output>
+    /// [`SinkType::ConsumeByKdf`] and returns the plan paired with an
+    /// [`Extractor<O>`] that pulls the typed output from the resulting
+    /// [`PhaseState`].
+    pub fn consume<S>(self, state: S) -> (Plan, Extractor<S::Output>)
     where
         S: ConsumerKdf + KdfOutput + 'static,
     {
         let node = ConsumeByKdfSink::new_consumer(state);
         let token = node.token.clone();
         let extract = make_extract::<S>(token.clone());
-        Prepared {
-            plan: self.into_plan(SinkType::ConsumeByKdf(node)),
-            token,
-            extract,
-        }
+        let plan = self.into_plan(SinkType::ConsumeByKdf(node));
+        (plan, Extractor { token, extract })
     }
 
     /// Power-user escape hatch: terminate `self` in a [`Plan`] with a
@@ -409,58 +413,59 @@ where
 }
 
 // ============================================================================
-// Typed wrapper: Prepared<O>
+// Typed wrapper: Extractor<O>
 // ============================================================================
 
-/// A fully-assembled [`Plan`] paired with a typed post-execution extractor.
+/// A typed adapter for pulling the output of a single
+/// [`SinkType::ConsumeByKdf`] (or executor-side telemetry sink) out of a
+/// [`PhaseState`].
 ///
-/// Produced by [`DeclarativePlanNode::consume`]. The executor runs `plan`;
-/// the caller harvests the typed output via [`Prepared::extract`].
-pub struct Prepared<O> {
-    /// The assembled plan the executor drives.
-    pub plan: Plan,
+/// Produced as the second half of [`DeclarativePlanNode::consume`]. The
+/// caller hands the paired [`Plan`] to
+/// [`Phase::execute`](crate::plans::state_machines::framework::coroutine::phase::Phase::execute)
+/// (typically wrapped in
+/// [`PhaseOperation::Plans`](crate::plans::state_machines::framework::phase_operation::PhaseOperation::Plans))
+/// then calls [`Extractor::extract`] on the resulting state to recover the typed payload.
+///
+/// `Extractor` is intentionally lightweight: it owns only the
+/// [`KdfStateToken`] identifying the entries it will pull and the boxed
+/// extraction closure. Multiple `Extractor`s freely coexist in a single
+/// phase — each one targets a distinct token.
+pub struct Extractor<O> {
     token: KdfStateToken,
     extract: ExtractFn<O>,
 }
 
-impl<O: Send + 'static> Prepared<O> {
-    /// Assemble a [`Prepared`] when the plan is not built via [`DeclarativePlanNode::consume`].
+impl<O: Send + 'static> Extractor<O> {
+    /// Assemble an [`Extractor`] from a token + extract closure.
     ///
-    /// Used by DF write-path helpers that pair non-KDF sinks (for example [`SinkType::Write`])
-    /// with executor-submitted telemetry keyed by `token`.
-    pub(crate) fn new(plan: Plan, token: KdfStateToken, extract: ExtractFn<O>) -> Self {
-        Self {
-            plan,
-            token,
-            extract,
-        }
+    /// Used by helpers that pair non-KDF sinks (for example
+    /// [`SinkType::Write`]) with executor-submitted telemetry keyed by
+    /// `token`. The KDF-typical path is [`DeclarativePlanNode::consume`].
+    pub(crate) fn new(token: KdfStateToken, extract: ExtractFn<O>) -> Self {
+        Self { token, extract }
     }
 
-    /// Token identifying the KDF state this extractor will consume.
+    /// Token identifying the entries this extractor will pull from a [`PhaseState`].
     pub fn token(&self) -> &KdfStateToken {
         &self.token
     }
 
-    /// Consume the prepared plan, producing the typed output from the
-    /// finalized per-partition states the executor handed back.
-    pub fn extract(
-        self,
-        parts: Vec<Box<dyn std::any::Any + Send>>,
-    ) -> Result<O, crate::plans::errors::DeltaError> {
-        (self.extract)(parts)
-    }
-
-    /// Split into the executable plan and its extractor. Useful for executor
-    /// boundaries where the two live in different scopes.
-    pub fn into_parts(self) -> (Plan, ExtractFn<O>) {
-        (self.plan, self.extract)
+    /// Pull this extractor's payload from `state` and decode it.
+    ///
+    /// Drains the entries under [`Self::token`] from `state` (so a second
+    /// call would see them empty) and runs the typed reduction. Decoding
+    /// failures are wrapped in [`EngineError::internal`] so SM bodies can
+    /// uniformly handle them on the engine-error path.
+    pub fn extract(self, state: &PhaseState) -> Result<O, EngineError> {
+        let parts = state.take_by_token(&self.token);
+        (self.extract)(parts).map_err(EngineError::internal)
     }
 }
 
-impl<O> std::fmt::Debug for Prepared<O> {
+impl<O> std::fmt::Debug for Extractor<O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Prepared")
-            .field("plan", &self.plan)
+        f.debug_struct("Extractor")
             .field("token", &self.token)
             .finish_non_exhaustive()
     }
@@ -987,16 +992,23 @@ mod tests {
     }
 
     #[test]
-    fn consume_produces_prepared_with_kdf_sink() {
-        let prepared =
+    fn consume_produces_plan_and_extractor_with_kdf_sink() {
+        use crate::plans::kdf::{FinishedHandle, TraceContext};
+        use crate::plans::state_machines::framework::phase_state::PhaseState;
+
+        let (plan, extractor) =
             DeclarativePlanNode::scan_json(vec![], simple_schema()).consume(NoopConsumer);
-        assert!(matches!(
-            prepared.plan.sink.sink_type,
-            SinkType::ConsumeByKdf(_)
-        ));
-        assert_eq!(prepared.token().kdf_id, "consumer.noop");
-        let parts: Vec<Box<dyn Any + Send>> = vec![Box::new(NoopConsumer)];
-        assert!(prepared.extract(parts).unwrap());
+        assert!(matches!(plan.sink.sink_type, SinkType::ConsumeByKdf(_)));
+        assert_eq!(extractor.token().kdf_id, "consumer.noop");
+
+        let state = PhaseState::empty();
+        state.submit_kdf_handle(FinishedHandle {
+            token: extractor.token().clone(),
+            ctx: TraceContext::new("test", "consume"),
+            partition: 0,
+            erased: Box::new(NoopConsumer),
+        });
+        assert!(extractor.extract(&state).unwrap());
     }
 
     #[test]

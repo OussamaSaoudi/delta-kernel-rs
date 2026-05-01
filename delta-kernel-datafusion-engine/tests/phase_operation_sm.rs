@@ -12,7 +12,7 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::expressions::Scalar;
 use delta_kernel::plans::ir::nodes::{ConsumeByKdfSink, RelationHandle};
 use delta_kernel::plans::ir::DeclarativePlanNode;
-use delta_kernel::plans::kdf::{ConsumerKdf, Kdf, KdfControl, KdfStateToken};
+use delta_kernel::plans::kdf::{ConsumerKdf, Kdf, KdfControl};
 use delta_kernel::plans::state_machines::framework::phase_operation::{
     PhaseOperation, SchemaQueryNode,
 };
@@ -73,10 +73,10 @@ async fn phase_plans_runs_relation_producer_then_consumer_in_one_tick() {
         .await
         .expect("phase execution");
 
-    assert!(
-        accum.is_empty(),
-        "Results sink does not submit KDF handles; relation traffic stays in-registry"
-    );
+    // Results sink does not submit KDF handles -- relation traffic stays in
+    // the registry. The accumulator should observe neither a KDF token nor a
+    // schema submission.
+    assert!(accum.take_schema().is_none());
 
     let read_back = DeclarativePlanNode::relation(handle).results();
     let batches = executor
@@ -117,7 +117,7 @@ async fn phase_plans_submits_consume_by_kdf_into_phase_kdf_state_not_harvest_slo
 }
 
 #[tokio::test]
-async fn phase_schema_query_footer_round_trips_schema_under_display_token() {
+async fn phase_schema_query_footer_round_trips_schema_via_take_schema() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("chunk.parquet");
     let arrow_schema = ArrowSchema::new(vec![Field::new("id", ArrowDataType::Int64, false)]);
@@ -132,23 +132,18 @@ async fn phase_schema_query_footer_round_trips_schema_under_display_token() {
     writer.close().unwrap();
 
     let url = Url::from_file_path(&path).unwrap();
-    let token = KdfStateToken::new("schema_query");
-    let node = SchemaQueryNode::new(url.as_str(), token.to_string());
+    let node = SchemaQueryNode::new(url.as_str());
 
     let executor = DataFusionExecutor::try_new().unwrap();
-    let accum = executor
+    let state = executor
         .execute_phase_operation(PhaseOperation::SchemaQuery(node))
         .await
         .expect("schema query phase");
 
-    let payloads = accum.take_by_token(&token);
-    assert_eq!(payloads.len(), 1);
-    let ty = payloads[0]
-        .downcast_ref::<StructType>()
-        .expect("footer schema payload");
+    let schema = state.take_schema().expect("schema submitted");
     assert!(
-        ty.fields().any(|f| f.name() == "id"),
-        "expected id column in footer schema: {ty:?}"
+        schema.fields().any(|f| f.name() == "id"),
+        "expected id column in footer schema: {schema:?}"
     );
 }
 

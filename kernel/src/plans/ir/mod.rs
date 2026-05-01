@@ -9,6 +9,6 @@ pub mod declarative;
 pub mod nodes;
 pub mod plan;
 
-pub use declarative::{DeclarativePlanNode, Prepared};
+pub use declarative::{DeclarativePlanNode, Extractor};
 pub use nodes::{ConsumeByKdfSink, RelationHandle};
 pub use plan::Plan;

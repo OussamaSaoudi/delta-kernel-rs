@@ -33,9 +33,11 @@ use crate::Version;
 /// `std::error::Error::source()` via `thiserror`'s implicit `#[source]` on
 /// any field named `source`.
 ///
-/// `Clone` is implemented manually: cloning drops the `source` chain. This
-/// matches the same-batch re-use path in the coroutine driver, where we
-/// only need the kind's `Display` output on replay, not the full chain.
+/// `Clone` is implemented manually: cloning drops the `source` chain
+/// (boxed `dyn Error` is not `Clone`). The kind is preserved, which is
+/// what kernel call sites match on; callers that need the underlying
+/// cause should walk `std::error::Error::source()` on the original
+/// before cloning, or render it via [`Self::display_with_source_chain`].
 #[derive(Debug, thiserror::Error)]
 #[error("{kind}")]
 pub struct EngineError {
@@ -181,11 +183,13 @@ impl EngineError {
     /// [`EngineErrorKind::Internal`] carries its entire diagnostic payload
     /// in `source`, so `to_string()` collapses to the static string
     /// `"internal engine error"` when a wire-reconstructed `Internal`
-    /// comes back from the engine across the FFI. Any code path that
-    /// surfaces an `EngineError` as a rendered `detail` (e.g. the
-    /// `Phase::await_handle` guards) must use this method instead of
-    /// `to_string`, or the underlying cause is silently swallowed and
-    /// the log line reads just `"internal engine error"`.
+    /// comes back from the engine across the FFI. SM bodies that lift an
+    /// `EngineError` returned by
+    /// [`Phase::execute`](crate::plans::state_machines::framework::coroutine::phase::Phase::execute)
+    /// into a [`DeltaError`](crate::plans::errors::DeltaError) `detail`
+    /// must use this method instead of `to_string`, or the underlying
+    /// cause is silently swallowed and the log line reads just
+    /// `"internal engine error"`.
     pub fn display_with_source_chain(&self) -> String {
         use std::error::Error;
         let mut out = self.kind.to_string();
@@ -235,9 +239,9 @@ impl From<EngineErrorKind> for EngineError {
 // === Manual Clone ===
 //
 // `Box<dyn Error>` is not `Clone`, so we can't derive it. Cloning an
-// `EngineError` drops the source chain; the kind is preserved. This
-// matches the coroutine driver's same-batch-replay path, where we only
-// need the Display output of the error on replay.
+// `EngineError` drops the source chain; the kind is preserved.
+// Callers that need the underlying cause should consume the original
+// (or render it via `display_with_source_chain`) before cloning.
 impl Clone for EngineError {
     fn clone(&self) -> Self {
         Self {

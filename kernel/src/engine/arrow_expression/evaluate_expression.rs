@@ -150,8 +150,8 @@ fn evaluate_struct_expression(
     };
     let fields: ArrowFields = output_fields.into();
     // SAFETY: Nested nullable masks may disagree with Delta logical NOT NULL fields once outer
-    // struct validity is flattened through intermediate RecordBatch decomposition (same rationale as
-    // `apply_schema`).
+    // struct validity is flattened through intermediate RecordBatch decomposition (same rationale
+    // as `apply_schema`).
     let data = unsafe { StructArray::new_unchecked(fields, output_cols, null_buffer) };
     Ok(Arc::new(data))
 }

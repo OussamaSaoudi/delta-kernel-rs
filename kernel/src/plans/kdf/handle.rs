@@ -85,7 +85,7 @@ impl<K: ConsumerKdf + ?Sized> Handle<K> {
 
 impl<K: Kdf + ?Sized> Handle<K> {
     /// Consume the handle, returning `(token, ctx, partition, erased state)`.
-    /// The submission-time record in `PhaseKdfState` uses the (ctx, partition)
+    /// The submission-time record in `PhaseState` uses the (ctx, partition)
     /// for its safety cross-check.
     #[tracing::instrument(
         level = "debug",
@@ -111,7 +111,8 @@ impl<K: Kdf + ?Sized> Handle<K> {
 }
 
 /// Output of [`Handle::finish`] — carries the token, execution context,
-/// partition number, and erased final state. Consumed by `PhaseKdfState::submit`.
+/// partition number, and erased final state. Consumed by
+/// `PhaseState::submit_kdf_handle`.
 #[derive(Debug)]
 pub struct FinishedHandle {
     pub token: KdfStateToken,

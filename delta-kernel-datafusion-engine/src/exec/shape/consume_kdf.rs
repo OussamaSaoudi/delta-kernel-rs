@@ -20,14 +20,14 @@ use delta_kernel::arrow::array::RecordBatch;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::plans::ir::nodes::ConsumeByKdfSink;
 use delta_kernel::plans::kdf::{ConsumerKdf, FinishedHandle, Handle, KdfControl, TraceContext};
-use delta_kernel::plans::state_machines::framework::phase_kdf_state::PhaseKdfState;
+use delta_kernel::plans::state_machines::framework::phase_state::PhaseState;
 use futures::{Stream, StreamExt};
 
 pub struct KernelConsumeByKdfExec {
     child: Arc<dyn ExecutionPlan>,
     sink: Arc<Mutex<ConsumeByKdfSink>>,
     harvest_slot: Arc<Mutex<Option<FinishedHandle>>>,
-    phase_kdf_accumulator: Option<PhaseKdfState>,
+    phase_state: Option<PhaseState>,
     schema: delta_kernel::arrow::datatypes::SchemaRef,
     properties: Arc<PlanProperties>,
 }
@@ -37,7 +37,7 @@ impl KernelConsumeByKdfExec {
         child: Arc<dyn ExecutionPlan>,
         sink: ConsumeByKdfSink,
         harvest_slot: Arc<Mutex<Option<FinishedHandle>>>,
-        phase_kdf_accumulator: Option<PhaseKdfState>,
+        phase_state: Option<PhaseState>,
     ) -> Result<Self, delta_kernel::plans::errors::DeltaError> {
         if sink.requires_ordering.is_some() {
             return Err(crate::error::unsupported(
@@ -57,7 +57,7 @@ impl KernelConsumeByKdfExec {
             child,
             sink: Arc::new(Mutex::new(sink)),
             harvest_slot,
-            phase_kdf_accumulator,
+            phase_state,
             schema,
             properties,
         })
@@ -130,7 +130,7 @@ impl ExecutionPlan for KernelConsumeByKdfExec {
                     })?
                     .clone(),
                 Arc::clone(&self.harvest_slot),
-                self.phase_kdf_accumulator.clone(),
+                self.phase_state.clone(),
             )
             .map_err(|e| DataFusionError::External(Box::new(e)))?,
         ))
@@ -166,7 +166,7 @@ impl ExecutionPlan for KernelConsumeByKdfExec {
             inner: Some(inner),
             handle: Some(handle),
             harvest_slot: Arc::clone(&self.harvest_slot),
-            phase_kdf_accumulator: self.phase_kdf_accumulator.clone(),
+            phase_state: self.phase_state.clone(),
             finished: false,
         }))
     }
@@ -177,7 +177,7 @@ struct ConsumeKdfStream {
     inner: Option<SendableRecordBatchStream>,
     handle: Option<Handle<dyn ConsumerKdf>>,
     harvest_slot: Arc<Mutex<Option<FinishedHandle>>>,
-    phase_kdf_accumulator: Option<PhaseKdfState>,
+    phase_state: Option<PhaseState>,
     finished: bool,
 }
 
@@ -189,8 +189,8 @@ impl ConsumeKdfStream {
         self.inner.take();
         if let Some(h) = self.handle.take() {
             let done = h.finish();
-            if let Some(acc) = self.phase_kdf_accumulator.as_ref() {
-                acc.submit(done);
+            if let Some(state) = self.phase_state.as_ref() {
+                state.submit_kdf_handle(done);
             } else {
                 let mut guard = self.harvest_slot.lock().unwrap_or_else(|e| e.into_inner());
                 *guard = Some(done);

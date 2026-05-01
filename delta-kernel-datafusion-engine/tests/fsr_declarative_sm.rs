@@ -1,5 +1,5 @@
 //! FSR declarative scaffold: kernel
-//! [`CoroutineSM`](delta_kernel::plans::state_machines::framework::coroutine::engine::CoroutineSM)
+//! [`CoroutineSM`](delta_kernel::plans::state_machines::framework::coroutine::driver::CoroutineSM)
 //! bodies in [`delta_kernel::plans::state_machines::fsr`] driven by
 //! [`DataFusionExecutor::drive_coroutine_sm`].
 
@@ -10,7 +10,7 @@ use delta_kernel::arrow::array::Int64Array;
 use delta_kernel::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use delta_kernel::arrow::record_batch::RecordBatch as ArrowRecordBatch;
 use delta_kernel::expressions::Scalar;
-use delta_kernel::plans::state_machines::framework::coroutine::engine::CoroutineSM;
+use delta_kernel::plans::state_machines::framework::coroutine::driver::CoroutineSM;
 use delta_kernel::plans::state_machines::framework::state_machine::{AdvanceResult, StateMachine};
 use delta_kernel::plans::state_machines::fsr::{
     try_build_fsr_footer_schema_sm, try_build_fsr_strip_then_fanout_sm, FsrFooterSchemaOutcome,

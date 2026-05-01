@@ -3,9 +3,9 @@
 //!
 //! - [`framework`] — the framework SMs are built on: the
 //!   [`StateMachine`](framework::state_machine::StateMachine) trait, the
-//!   [`CoroutineSM`](framework::coroutine::engine::CoroutineSM) driver, the typed `Phase` /
-//!   `PhaseKdfState` / `Prepared<O>` surface, and the hand-rolled coroutine shim that replaces
-//!   `genawaiter`.
+//!   [`CoroutineSM`](framework::coroutine::driver::CoroutineSM) driver, the typed `Phase` /
+//!   `PhaseState` surface, the `Extractor<O>` typed adapter, and the hand-rolled coroutine shim
+//!   that replaces `genawaiter`.
 //!
 //! Concrete SMs (Snapshot, Scan, DML) land in follow-on PRs. Until then,
 //! much of the framework surface has no in-tree caller — `dead_code` is

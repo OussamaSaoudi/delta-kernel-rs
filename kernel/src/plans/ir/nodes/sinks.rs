@@ -18,7 +18,7 @@ use crate::schema::SchemaRef;
 ///   [`Handle`](crate::plans::kdf::Handle).
 /// - `partitionable_by`: optional hash-partition expression (unused by consumers today).
 /// - `requires_ordering`: stamped from [`ConsumerKdf::required_ordering`] at construction.
-/// - `token`: joins finalized state back to phase `PhaseKdfState`.
+/// - `token`: joins finalized state back to the phase's `PhaseState`.
 pub struct ConsumeByKdfSink {
     pub initial_state: Box<dyn ConsumerKdf>,
     pub partitionable_by: Option<Arc<Expression>>,
@@ -320,9 +320,9 @@ pub enum SinkType {
     /// [`crate::plans::ir::declarative::DeclarativePlanNode::Relation`].
     Relation(RelationHandle),
     /// Drain every output batch through the wrapped consumer KDF. The KDF's
-    /// finalized per-partition state is harvested by the engine via phase
-    /// `PhaseKdfState` (or the typed
-    /// [`Prepared`](crate::plans::ir::declarative::Prepared) extractor that yields
+    /// finalized per-partition state is harvested by the engine into the
+    /// phase's `PhaseState` (and recovered by the typed
+    /// [`Extractor`](crate::plans::ir::declarative::Extractor) that yields
     /// `O = ConsumerKdf::Output`).
     ConsumeByKdf(ConsumeByKdfSink),
     /// File-reader sink — for each upstream row, read a file and materialize

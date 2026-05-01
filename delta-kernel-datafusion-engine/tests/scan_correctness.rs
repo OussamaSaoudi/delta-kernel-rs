@@ -62,8 +62,8 @@ fn read_parquet_batches(path: &Path) -> Vec<RecordBatch> {
     reader.into_iter().map(|r| r.unwrap()).collect()
 }
 
-/// Matches [`delta_kernel_datafusion_engine::exec::KernelFilterExec`] batch semantics (NULL predicates
-/// keep rows).
+/// Matches [`delta_kernel_datafusion_engine::exec::KernelFilterExec`] batch semantics (NULL
+/// predicates keep rows).
 fn filter_batches_kernel_semantics(
     batches: &[RecordBatch],
     kernel_schema: Arc<StructType>,

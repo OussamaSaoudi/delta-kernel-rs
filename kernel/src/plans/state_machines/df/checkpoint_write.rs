@@ -24,9 +24,10 @@ use crate::checkpoint::CheckpointWriter;
 use crate::engine::arrow_data::EngineDataArrowExt;
 use crate::plans::errors::DeltaError;
 use crate::plans::ir::nodes::{RelationHandle, WriteSink};
-use crate::plans::ir::{DeclarativePlanNode, Plan, Prepared};
-use crate::plans::state_machines::df::insert::insert_write_rows_prepared;
-use crate::plans::state_machines::framework::coroutine::engine::CoroutineSM;
+use crate::plans::ir::{DeclarativePlanNode, Plan};
+use crate::plans::kdf::KdfStateToken;
+use crate::plans::state_machines::df::insert::insert_write_sm;
+use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
 use crate::{DeltaResult, Engine};
 
 /// Materialize checkpoint rows as Arrow batches and mint a [`RelationHandle`] for DF consumption.
@@ -63,24 +64,12 @@ pub fn checkpoint_classic_parquet_write_plan(handle: RelationHandle, destination
     DeclarativePlanNode::Relation(handle).into_write(WriteSink::parquet(destination))
 }
 
-/// Pair a checkpoint parquet [`Plan`] with write-row telemetry (`Prepared<u64>`).
-/// Equivalent to [`super::insert_write_rows_prepared`]; checkpoint code paths import this alias so
-/// DF drivers can attach write-row telemetry tokens alongside semantic checkpoint naming.
-pub fn checkpoint_parquet_write_rows_prepared(plan: Plan) -> Prepared<u64> {
-    insert_write_rows_prepared(plan)
-}
-
-/// Single-phase SM: dispatch checkpoint parquet [`Prepared`] (telemetry keyed like insert writes).
+/// Single-phase SM: write a classic parquet checkpoint plan with row-count telemetry.
 ///
-/// Drivers must clone [`Prepared::token`] into the executor write telemetry slot when draining
+/// Drivers must pass the returned [`KdfStateToken`] through their drive options when draining
 /// write sinks (same contract as [`super::insert_write_sm`]).
 pub fn checkpoint_classic_parquet_write_sm(
-    prepared: Prepared<u64>,
-) -> Result<CoroutineSM<u64>, DeltaError> {
-    use crate::plans::state_machines::framework::coroutine::phase::Phase;
-
-    CoroutineSM::new(|mut co| async move {
-        let mut phase = Phase(&mut co);
-        phase.execute(prepared, "checkpoint_parquet_write").await
-    })
+    plan: Plan,
+) -> Result<(CoroutineSM<u64>, KdfStateToken), DeltaError> {
+    insert_write_sm(plan)
 }

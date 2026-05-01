@@ -1,8 +1,9 @@
 //! Scan log replay via declarative plans — Phase 4.x (`CoroutineSM` path).
 //!
 //! The canonical entrypoint is [`scan_log_replay_sm`], which returns a
-//! [`CoroutineSM`](crate::plans::state_machines::framework::coroutine::engine::CoroutineSM)
-//! driven like insert/checkpoint SMs (`dispatch` feeders + await results plan).
+//! [`CoroutineSM`](crate::plans::state_machines::framework::coroutine::driver::CoroutineSM)
+//! that runs the JSON-commit dedup plan plus any checkpoint feeders in a single
+//! [`PhaseOperation::Plans`] call.
 //!
 //! [`ScanLogReplayAntiJoinSM`] is a deprecated thin wrapper implementing
 //! [`StateMachine`](crate::plans::state_machines::framework::state_machine::StateMachine); prefer
@@ -17,15 +18,15 @@ use crate::plans::ir::nodes::{
     JoinHint, JoinNode, JoinType, RelationHandle, WindowFunction, WindowNode,
 };
 use crate::plans::ir::{DeclarativePlanNode, Plan};
-use crate::plans::state_machines::framework::coroutine::engine::CoroutineSM;
-use crate::plans::state_machines::framework::coroutine::phase::{PhaseCo, PhaseResume, PhaseYield};
+use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
+use crate::plans::state_machines::framework::coroutine::phase::{Phase, PhaseCo};
 use crate::plans::state_machines::framework::engine_error::EngineError;
-use crate::plans::state_machines::framework::phase_kdf_state::PhaseKdfState;
 use crate::plans::state_machines::framework::phase_operation::PhaseOperation;
+use crate::plans::state_machines::framework::phase_state::PhaseState;
 use crate::plans::state_machines::framework::state_machine::{AdvanceResult, StateMachine};
 use crate::scan::scan_row_schema;
 use crate::schema::{DataType, SchemaRef, StructField, StructType};
-use crate::{bail_delta, FileMeta, Snapshot};
+use crate::{bail_delta, delta_error, FileMeta, Snapshot};
 
 /// Synthetic top-level column carrying `coalesce(add.path, remove.path)` so DataFusion-backed
 /// executors can hash-partition `row_number()` and anti-join without non-column expressions in
@@ -86,7 +87,7 @@ impl StateMachine for ScanLogReplayAntiJoinSM {
 
     fn advance(
         &mut self,
-        result: Result<PhaseKdfState, EngineError>,
+        result: Result<PhaseState, EngineError>,
     ) -> Result<AdvanceResult<Self::Result>, DeltaError> {
         self.inner.advance(result)
     }
@@ -303,54 +304,27 @@ fn build_plans(snapshot: &Snapshot) -> Result<ScanPlans, DeltaError> {
     })
 }
 
-async fn run_phase(co: PhaseCo, plans: ScanPlans) -> Result<(), DeltaError> {
+async fn run_phase(mut co: PhaseCo, plans: ScanPlans) -> Result<(), DeltaError> {
     let ScanPlans { results, feeders } = plans;
+    // Single-phase: feeders + results execute together as one PhaseOperation::Plans.
+    // The DataFusion executor wires the relation handles, so feeders materialize before
+    // results consumes them.
+    let mut all_plans = feeders;
+    all_plans.push(results);
 
-    for feeder in feeders {
-        let _ = co
-            .yield_(PhaseYield::Dispatch {
-                plan: feeder,
-                phase_name: PHASE_NAME,
-            })
-            .await;
-    }
-
-    let resume = co
-        .yield_(PhaseYield::Dispatch {
-            plan: results,
-            phase_name: PHASE_NAME,
-        })
-        .await;
-    let task_id = match resume {
-        PhaseResume::Dispatched { task_id } => task_id,
-        PhaseResume::Completed(_) => {
-            bail_delta!(
+    let mut phase = Phase(&mut co);
+    let _state = phase
+        .execute(PhaseOperation::Plans(all_plans), PHASE_NAME)
+        .await
+        .map_err(|e| {
+            delta_error!(
                 DeltaErrorCode::DeltaCommandInvariantViolation,
                 operation = "scan_log_replay_sm::run_phase",
-                detail = "expected Dispatched on results plan, got Completed",
-            );
-        }
-    };
-    let final_resume = co
-        .yield_(PhaseYield::Await {
-            task_id,
-            phase_name: PHASE_NAME,
-        })
-        .await;
-    match final_resume {
-        PhaseResume::Completed(Ok(_kdf_state)) => Ok(()),
-        PhaseResume::Completed(Err(e)) => Err(crate::delta_error!(
-            DeltaErrorCode::DeltaCommandInvariantViolation,
-            operation = "scan_log_replay_sm::run_phase",
-            detail = e.display_with_source_chain(),
-            source = e,
-        )),
-        PhaseResume::Dispatched { .. } => bail_delta!(
-            DeltaErrorCode::DeltaCommandInvariantViolation,
-            operation = "scan_log_replay_sm::run_phase",
-            detail = "expected Completed on await, got Dispatched",
-        ),
-    }
+                detail = e.display_with_source_chain(),
+                source = e,
+            )
+        })?;
+    Ok(())
 }
 
 #[cfg(test)]

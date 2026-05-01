@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::expressions::Scalar;
 use crate::plans::errors::DeltaErrAsKernel;
-use crate::plans::state_machines::framework::coroutine::engine::CoroutineSM;
+use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
 use crate::plans::state_machines::fsr::{
     try_build_fsr_strip_then_fanout_sm, FsrStripThenFanoutOutcome,
 };
