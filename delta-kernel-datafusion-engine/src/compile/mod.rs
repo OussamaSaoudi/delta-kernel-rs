@@ -40,7 +40,7 @@ use crate::exec::{
 
 mod join;
 mod load_sink;
-mod scan;
+pub mod scan;
 mod window;
 mod write_sink;
 

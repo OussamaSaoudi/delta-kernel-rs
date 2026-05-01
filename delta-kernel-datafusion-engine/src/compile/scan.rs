@@ -130,15 +130,24 @@ fn build_raw_scan(
     Ok(scan)
 }
 
-/// Applies nullability coercion, optional scan predicate (kernel residual filter), and optional row
-/// index.
+/// Applies nullability coercion, [`KernelFilterExec`] when [`ScanNode::predicate`] is set, and
+/// optional row index augmentation.
 ///
-/// Parquet scans with [`ScanNode::row_index_column`] feed arrow-rs virtual [`RowNumber`] values
-/// through the decoder. Residual [`KernelFilterExec`] keeps the row-index array aligned with
-/// filtered rows. JSON scans still append indices with [`RowIndexExec`].
+/// ## Predicate
 ///
-/// Note: virtual row numbers follow the parquet reader's batching (offsets are file-absolute in
-/// arrow-rs, but combine with multi-batch emission when reasoning about tests).
+/// The scan predicate is evaluated **only** via [`KernelFilterExec`] on decoded record batches using
+/// the kernel Arrow evaluator (same implementation shape as [`FilterNode`] lowering). Native Parquet
+/// / JSON readers are not given pushdown predicates here, which guarantees evaluator parity with the
+/// kernel reference and avoids over-filtering relative to [`ScanNode`] semantics.
+///
+/// ## Row index
+///
+/// Parquet scans with [`ScanNode::row_index_column`] decode arrow-rs virtual [`RowNumber`] columns in
+/// the file reader so indices are physical offsets **before** filtering; [`KernelFilterExec`] then
+/// masks rows without rewriting indices on survivors. JSON scans append contiguous indices with
+/// [`RowIndexExec`] **after** decoding (and after any scan predicate filter).
+///
+/// Virtual Parquet row numbers are file-absolute in arrow-rs across batches from the same file.
 fn wrap_scan_extensions(
     scan: Arc<dyn ExecutionPlan>,
     node: &ScanNode,
@@ -185,16 +194,26 @@ fn compile_scan_single_group(
 
 /// Convert kernel [`ScanNode`] into DataFusion physical scan.
 ///
-/// Multi-file scans use a single native file group when `ordered == false` and no row-index column
-/// is requested (engines may parallelize). Otherwise files are lowered as an [`OrderedUnionExec`]
-/// over per-file scans so cross-file order matches `files` and row indices reset per file.
+/// ## Multi-file layout
 ///
-/// Scan predicates are applied via [`KernelFilterExec`] on decoded batches so semantics match the
-/// kernel evaluator (no parquet/json pushdown yet — avoids over-filtering).
+/// When [`ScanNode::row_index_column`] is [`Some`], indices must restart at zero for each file.
+/// That requires one native scan subtree per file (see [`OrderedUnionExec`]), even if
+/// [`ScanNode::ordered`] is `false`. Parallel multi-file grouping is therefore disabled whenever a
+/// row-index column is requested; file emission order still follows [`ScanNode::files`].
 ///
-/// Parquet row-index columns requested via [`ScanNode::row_index_column`] use arrow-rs native
-/// [`RowNumber`] virtual columns before residual filtering so surviving rows retain physical file
-/// offsets. JSON scans still use [`RowIndexExec`] after decoding.
+/// When **both** `ordered == false` **and** `row_index_column.is_none()`, all files share one native
+/// file group so DataFusion may parallelize partition scheduling across files (unordered scan).
+///
+/// ## Predicate
+///
+/// [`ScanNode::predicate`] is applied exclusively via [`KernelFilterExec`] after decode (no reader
+/// pushdown). Engines may later add conservative pushdown optimizations while retaining this filter
+/// as a residual guardrail.
+///
+/// ## Row-index implementation
+///
+/// Parquet uses arrow-rs [`RowNumber`] virtual columns decoded with each batch. JSON uses
+/// [`RowIndexExec`].
 pub fn compile_scan(node: &ScanNode) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
     let arrow_schema: Arc<Schema> = Arc::new(
         node.schema

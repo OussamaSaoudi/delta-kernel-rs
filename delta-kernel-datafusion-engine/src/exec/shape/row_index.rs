@@ -1,3 +1,15 @@
+//! Fallback row-index injection for formats without native decoder support (JSON today).
+//!
+//! [`RowIndexExec`] assigns contiguous `0..` indices within **each execution partition stream**
+//! emitted by its child. Multi-file scans that need per-file resets therefore compile as one scan
+//! arm per file under [`crate::exec::OrderedUnionExec`] whenever `ScanNode::row_index_column` is set
+//! (even when `ScanNode::ordered` is `false`; see [`crate::compile::scan::compile_scan`]).
+//!
+//! **Limitation:** A single physical file scanned through multiple concurrent partitions could yield
+//! duplicate indices across partitions; Parquet scans prefer native [`RowNumber`] columns instead.
+//!
+//! [`RowNumber`]: parquet::arrow::RowNumber
+
 use std::any::Any;
 use std::fmt;
 use std::pin::Pin;
@@ -17,6 +29,7 @@ use delta_kernel::arrow::array::{ArrayRef, Int64Array, RecordBatch};
 use delta_kernel::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use futures::{Stream, StreamExt};
 
+/// Appends a synthetic `INT64` row-index column by counting rows along each output partition stream.
 #[derive(Debug)]
 pub struct RowIndexExec {
     child: Arc<dyn ExecutionPlan>,
