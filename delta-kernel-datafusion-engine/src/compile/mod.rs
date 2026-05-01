@@ -38,6 +38,7 @@ use crate::exec::{
     RelationBatchRegistry, RelationRefExec, RelationSinkExec,
 };
 
+pub mod expr_translator;
 mod join;
 mod load_sink;
 pub mod scan;
