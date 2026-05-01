@@ -1,5 +1,6 @@
-//! Phase 4.3 — explicit **kernel/reference vs DataFusion executor** parity for every v1 declarative
-//! state machine wired today (`plans::state_machines::{fsr, df}` + framework phase ops).
+//! Phase 4.3 — explicit **kernel/reference vs DataFusion executor** parity for declarative
+//! state machines wired today (`plans::state_machines::df` insert/checkpoint flows plus framework
+//! phase ops). Real FSR multi-phase execution is covered by dedicated FSR integration tests.
 //!
 //! ## Deferred / out of scope (documented here only)
 //!
@@ -28,10 +29,6 @@ use delta_kernel::plans::state_machines::df::{
 };
 use delta_kernel::plans::state_machines::framework::phase_operation::{
     PhaseOperation, SchemaQueryNode,
-};
-use delta_kernel::plans::state_machines::fsr::{
-    try_build_fsr_footer_schema_sm, try_build_fsr_strip_then_fanout_sm, FsrFooterSchemaOutcome,
-    FsrStripThenFanoutOutcome,
 };
 use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
 use delta_kernel::{Engine as KernelEngine, EngineData, EvaluationHandler, Snapshot};
@@ -163,81 +160,6 @@ fn kernel_literal_record_batch(schema: SchemaRef, rows: &[Vec<Scalar>]) -> Recor
         .expect("create_many")
         .try_into_record_batch()
         .expect("record batch")
-}
-
-#[tokio::test]
-async fn parity_fsr_strip_fanout_df_matches_literal_row_count_reference() {
-    let strip_schema =
-        Arc::new(StructType::try_new([StructField::not_null("x", DataType::LONG)]).unwrap());
-    let strip_rows = vec![vec![Scalar::Long(1)], vec![Scalar::Long(2)]];
-    let fanout_schema = Arc::clone(&strip_schema);
-    let fanout_rows = vec![
-        vec![Scalar::Long(10)],
-        vec![Scalar::Long(11)],
-        vec![Scalar::Long(12)],
-    ];
-
-    let kernel_reference = FsrStripThenFanoutOutcome {
-        strip_rows: strip_rows.len(),
-        fanout_rows: fanout_rows.len(),
-    };
-
-    let sm =
-        try_build_fsr_strip_then_fanout_sm(strip_schema, strip_rows, fanout_schema, fanout_rows)
-            .expect("build SM");
-
-    let ex = DataFusionExecutor::try_new().expect("executor");
-    let df_outcome = ex.drive_coroutine_sm(sm).await.expect("drive");
-
-    assert_eq!(
-        df_outcome, kernel_reference,
-        "FSR RowCounter totals match deterministic literal row counts (kernel semantics reference)"
-    );
-}
-
-#[tokio::test]
-async fn parity_fsr_footer_schema_coroutine_matches_direct_kernel_footer_schema() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("probe.parquet");
-    use delta_kernel::arrow::array::Int64Array;
-    use delta_kernel::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
-    let arrow_schema = ArrowSchema::new(vec![Field::new("z", ArrowDataType::Int64, false)]);
-    let batch = RecordBatch::try_new(
-        Arc::new(arrow_schema.clone()),
-        vec![Arc::new(Int64Array::from(vec![9_i64]))],
-    )
-    .unwrap();
-    let file = fs::File::create(&path).unwrap();
-    let mut writer =
-        parquet::arrow::ArrowWriter::try_new(file, Arc::new(arrow_schema), None).unwrap();
-    writer.write(&batch).unwrap();
-    writer.close().unwrap();
-
-    let url = Url::from_file_path(&path).unwrap();
-
-    let sm = try_build_fsr_footer_schema_sm(url.to_string()).expect("build SM");
-    let ex = DataFusionExecutor::try_new().expect("executor");
-    let df_out = ex.drive_coroutine_sm(sm).await.expect("drive");
-
-    let meta = ex
-        .engine()
-        .storage_handler()
-        .head(&url)
-        .expect("head parquet");
-    let kernel_footer_schema = ex
-        .engine()
-        .parquet_handler()
-        .read_parquet_footer(&meta)
-        .expect("footer schema")
-        .schema;
-
-    assert_eq!(
-        df_out,
-        FsrFooterSchemaOutcome {
-            column_count: kernel_footer_schema.fields().len(),
-        },
-        "FSR schema-query SM outcome aligns with kernel ParquetHandler footer schema column count"
-    );
 }
 
 #[tokio::test]
@@ -404,4 +326,3 @@ async fn parity_insert_kernel_parquet_handler_write_matches_df_insert_sm() {
         &concat_or_clone(&df_batches),
     );
 }
-

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use delta_kernel::arrow::array::{AsArray, RecordBatch};
 use delta_kernel::arrow::datatypes::Int64Type;
-use delta_kernel::expressions::{Expression, Scalar};
+use delta_kernel::expressions::{ColumnName, Expression, Scalar};
 use delta_kernel::plans::ir::nodes::{OrderingSpec, WindowFunction};
 use delta_kernel::plans::ir::DeclarativePlanNode;
 use delta_kernel::schema::{DataType, StructField, StructType};
@@ -37,7 +37,7 @@ fn sample_schema() -> Arc<StructType> {
 }
 
 #[test]
-fn row_number_resets_on_partition_change_stream_order() {
+fn row_number_resets_on_partition_change_ordered_by_v() {
     let schema = sample_schema();
     let rows = vec![
         vec![Scalar::Long(1), Scalar::Long(10)],
@@ -54,8 +54,9 @@ fn row_number_resets_on_partition_change_stream_order() {
                 output_col: "_rn".into(),
             }],
             vec![Arc::new(Expression::column(["part"]))],
-            vec![],
+            vec![OrderingSpec::asc(ColumnName::new(["v"]))],
         )
+        .expect("window")
         .into_results();
 
     let exec = DataFusionExecutor::try_new().expect("executor");
@@ -83,8 +84,9 @@ fn row_number_global_when_no_partition_keys() {
                 output_col: "rn".into(),
             }],
             vec![],
-            vec![],
+            vec![OrderingSpec::asc(ColumnName::new(["v"]))],
         )
+        .expect("window")
         .into_results();
 
     let exec = DataFusionExecutor::try_new().expect("executor");
@@ -117,8 +119,9 @@ fn multiple_row_number_functions_duplicate_rank_column() {
                 },
             ],
             vec![Arc::new(Expression::column(["part"]))],
-            vec![],
+            vec![OrderingSpec::asc(ColumnName::new(["v"]))],
         )
+        .expect("window")
         .into_results();
 
     let exec = DataFusionExecutor::try_new().expect("executor");
@@ -153,10 +156,9 @@ fn row_number_with_order_by_desc_assigns_rank_within_partition() {
                 output_col: "_rn".into(),
             }],
             vec![Arc::new(Expression::column(["part"]))],
-            vec![OrderingSpec::desc(
-                delta_kernel::expressions::ColumnName::new(["v"]),
-            )],
+            vec![OrderingSpec::desc(ColumnName::new(["v"]))],
         )
+        .expect("window")
         .into_results();
 
     let exec = DataFusionExecutor::try_new().expect("executor");
@@ -184,13 +186,7 @@ fn row_number_with_order_by_desc_assigns_rank_within_partition() {
 
     // For partition=1, sorted DESC by v: (30, 1), (20, 2), (10, 3).
     // For partition=2, sorted DESC by v: (50, 1), (40, 2).
-    let expected = vec![
-        (1, 10, 3),
-        (1, 20, 2),
-        (1, 30, 1),
-        (2, 40, 2),
-        (2, 50, 1),
-    ];
+    let expected = vec![(1, 10, 3), (1, 20, 2), (1, 30, 1), (2, 40, 2), (2, 50, 1)];
     assert_eq!(tuples, expected);
 }
 
@@ -212,10 +208,9 @@ fn row_number_with_order_by_asc_matches_inverted_desc() {
                 output_col: "_rn".into(),
             }],
             vec![Arc::new(Expression::column(["part"]))],
-            vec![OrderingSpec::asc(
-                delta_kernel::expressions::ColumnName::new(["v"]),
-            )],
+            vec![OrderingSpec::asc(ColumnName::new(["v"]))],
         )
+        .expect("window")
         .into_results();
 
     let exec = DataFusionExecutor::try_new().expect("executor");

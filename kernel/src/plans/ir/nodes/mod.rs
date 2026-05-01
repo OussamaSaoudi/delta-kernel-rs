@@ -353,12 +353,10 @@ pub struct WindowFunction {
 ///
 /// Output schema = `Schema(child) ++ (one LONG NOT NULL column per function)`.
 ///
-/// Today the executor implements `row_number()` only, with empty `order_by`
-/// interpreted as upstream stream order (the canonical "first row per group"
-/// pattern: `Window(row_number()) → Filter(_rn = 1) → Project(<orig cols>)`).
-/// Non-empty `order_by` is reserved for engines that pattern-match to
-/// `WindowGroupLimit` / `PhotonTopK`; the in-process executor errors at build
-/// time if it can't honor the requested ordering.
+/// Producers must supply a non-empty `order_by` so `row_number()` ranking is deterministic
+/// (for example `ORDER BY version DESC` for newest-wins dedup). [`WindowNode::try_new`] and
+/// [`DeclarativePlanNode::window`](crate::plans::ir::DeclarativePlanNode::window) enforce this at
+/// construction time; the DataFusion executor also rejects empty `order_by` when compiling plans.
 ///
 /// Spec: `declarative_plan_docs/algebra/plan_nodes.md` §3.2 (`WindowNode`).
 #[derive(Debug, Clone)]
@@ -366,6 +364,27 @@ pub struct WindowNode {
     pub functions: Vec<WindowFunction>,
     pub partition_by: Vec<Arc<Expression>>,
     pub order_by: Vec<OrderingSpec>,
+}
+
+impl WindowNode {
+    /// Construct a [`WindowNode`] after validating IR invariants.
+    pub fn try_new(
+        functions: Vec<WindowFunction>,
+        partition_by: Vec<Arc<Expression>>,
+        order_by: Vec<OrderingSpec>,
+    ) -> DeltaResult<Self> {
+        if order_by.is_empty() {
+            return Err(Error::generic(
+                "WindowNode requires non-empty order_by; explicit ORDER BY columns are required \
+                 for deterministic row_number semantics",
+            ));
+        }
+        Ok(Self {
+            functions,
+            partition_by,
+            order_by,
+        })
+    }
 }
 
 // ============================================================================

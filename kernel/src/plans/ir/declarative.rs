@@ -30,8 +30,8 @@
 //! - [`DeclarativePlanNode::scan_as`] / [`scan_json_as`] / [`scan_parquet_as`] — schemas inferred
 //!   from a struct via [`crate::schema::ToSchema`].
 //! - [`DeclarativePlanNode::listing`] — storage prefix listing.
-//! - [`DeclarativePlanNode::values`] / [`values_row`] — kernel-provided constant rows (`VALUES`-style).
-//!   Aligned with [`crate::EvaluationHandler::create_many`].
+//! - [`DeclarativePlanNode::values`] / [`values_row`] — kernel-provided constant rows
+//!   (`VALUES`-style). Aligned with [`crate::EvaluationHandler::create_many`].
 //! - [`DeclarativePlanNode::union`] / [`union_unordered`] — concatenate N children.
 //!
 //! ## Transforms
@@ -219,7 +219,8 @@ impl DeclarativePlanNode {
         })
     }
 
-    /// Multi-row `VALUES`-style literal table. Rows × columns layout; see [`ValuesNode`] invariants.
+    /// Multi-row `VALUES`-style literal table. Rows × columns layout; see [`ValuesNode`]
+    /// invariants.
     pub fn values(schema: SchemaRef, rows: Vec<Vec<Scalar>>) -> DeltaResult<Self> {
         Ok(Self::Values(ValuesNode::try_new(schema, rows)?))
     }
@@ -355,20 +356,19 @@ impl DeclarativePlanNode {
     }
 
     /// Wrap `self` in a [`Window`](Self::Window) with partition keys and ordering specs.
+    ///
+    /// Returns an error when `order_by` is empty ([`WindowNode::try_new`]).
     pub fn window(
         self,
         functions: Vec<WindowFunction>,
         partition_by: Vec<Arc<Expression>>,
         order_by: Vec<OrderingSpec>,
-    ) -> Self {
-        Self::Window {
+    ) -> DeltaResult<Self> {
+        let node = WindowNode::try_new(functions, partition_by, order_by)?;
+        Ok(Self::Window {
             child: Box::new(self),
-            node: WindowNode {
-                functions,
-                partition_by,
-                order_by,
-            },
-        }
+            node,
+        })
     }
 
     /// Wrap `self` in an [`Assert`](Self::Assert) with the given checks.
@@ -602,6 +602,7 @@ mod tests {
     use super::*;
     use crate::expressions::{ColumnName, Expression};
     use crate::plans::errors::DeltaError;
+    use crate::plans::ir::nodes::{OrderingSpec, WindowFunction};
     use crate::plans::kdf::{ConsumerKdf, Kdf, KdfControl, KdfOutput};
     use crate::schema::{DataType, StructField, StructType};
 
@@ -956,6 +957,45 @@ mod tests {
             .filter(Arc::new(Expression::literal(true)));
         let err = plan.with_row_index("rowidx").unwrap_err();
         assert!(format!("{err}").contains("requires a Scan node"));
+    }
+
+    #[test]
+    fn window_rejects_empty_order_by() {
+        let plan = DeclarativePlanNode::scan_json(vec![], simple_schema());
+        let wf = WindowFunction {
+            function_name: "row_number".into(),
+            args: vec![],
+            output_col: "_rn".into(),
+        };
+        let err = plan
+            .window(
+                vec![wf],
+                vec![Arc::new(Expression::column(["version"]))],
+                vec![],
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("non-empty order_by"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn window_accepts_nonempty_order_by() {
+        let wf = WindowFunction {
+            function_name: "row_number".into(),
+            args: vec![],
+            output_col: "_rn".into(),
+        };
+        let plan = DeclarativePlanNode::scan_json(vec![], simple_schema())
+            .window(
+                vec![wf],
+                vec![Arc::new(Expression::column(["version"]))],
+                vec![OrderingSpec::asc(ColumnName::new(["version"]))],
+            )
+            .unwrap();
+        assert!(matches!(plan, DeclarativePlanNode::Window { .. }));
     }
 
     // === Consumer-KDF tests (validated via a test-local consumer state) ===

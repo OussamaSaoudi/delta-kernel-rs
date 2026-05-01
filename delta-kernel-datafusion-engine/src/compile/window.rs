@@ -1,15 +1,10 @@
 //! Compile [`WindowNode`] to a DataFusion physical operator.
 //!
-//! Two lowering paths share the same input node:
-//!
-//! - **Empty `order_by`**: lowers to the legacy [`KernelRowNumberWindowExec`] which uses upstream
-//!   stream order to compute `row_number()`. Required by the `scan_log_replay_sm` legacy
-//!   producer; this path is deleted in a follow-up commit when [`WindowNode::try_new`] enforces
-//!   non-empty `order_by` at the IR layer (see `fsr_multi-plan_migration` plan, commit 8).
-//! - **Non-empty `order_by`**: lowers to a native DataFusion physical Window — a
-//!   [`SortExec`] over `(partition_by ASC NULLS LAST, order_by)` feeding a
-//!   [`WindowAggExec`] whose [`row_number_udwf`] window expression carries the same
-//!   `partition_by` and `order_by`. This is the path FSR Plan A3 takes.
+//! Lowers `WindowNode { row_number, partition_by, order_by }` to a native DataFusion physical
+//! window — a [`SortExec`] over `(partition_by ASC NULLS LAST, order_by)` feeding a
+//! [`WindowAggExec`] whose [`row_number_udwf`] window expression carries the same
+//! `partition_by` and `order_by`. Empty `order_by` is rejected at compile time so ranking is
+//! always deterministic.
 //!
 //! Only `row_number()` is supported as a window function today (matches kernel IR's
 //! [`WindowNode`] semantics). Lowering to DataFusion `LogicalPlan::Window` is out of scope here
@@ -23,9 +18,7 @@ use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::{WindowFrame, WindowFunctionDefinition};
 use datafusion_functions_window::row_number::row_number_udwf;
 use datafusion_physical_expr::expressions::{CastExpr, Column as PhysColumn};
-use datafusion_physical_expr::{
-    create_physical_expr, LexOrdering, PhysicalExpr, PhysicalSortExpr,
-};
+use datafusion_physical_expr::{create_physical_expr, LexOrdering, PhysicalExpr, PhysicalSortExpr};
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::projection::ProjectionExec;
 use datafusion_physical_plan::sorts::sort::SortExec;
@@ -39,7 +32,6 @@ use delta_kernel::plans::ir::nodes::{OrderingSpec, WindowFunction, WindowNode};
 use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
 
 use crate::compile::expr_translator;
-use crate::exec::KernelRowNumberWindowExec;
 
 pub(crate) fn window_output_kernel_schema(
     input_schema: &SchemaRef,
@@ -73,24 +65,12 @@ pub(crate) fn compile_window_node(
     }
 
     if node.order_by.is_empty() {
-        return compile_window_stream_order(child, input_schema, node);
+        return Err(crate::error::unsupported(
+            "Window(row_number): empty order_by is not supported; add ORDER BY columns for \
+             deterministic row_number (for example a version or tie-break column)",
+        ));
     }
     compile_window_native(child, input_schema, node)
-}
-
-fn compile_window_stream_order(
-    child: Arc<dyn ExecutionPlan>,
-    input_schema: SchemaRef,
-    node: &WindowNode,
-) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
-    let output_schema = window_output_kernel_schema(&input_schema, node)?;
-    Ok(Arc::new(KernelRowNumberWindowExec::try_new(
-        child,
-        input_schema,
-        output_schema,
-        &node.partition_by,
-        node.functions.len(),
-    )?))
 }
 
 /// Lower a `WindowNode { row_number, partition_by, order_by != [] }` to native DataFusion physical
@@ -101,9 +81,8 @@ fn compile_window_native(
     node: &WindowNode,
 ) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
     let arrow_schema = kernel_to_arrow_schema(&input_schema)?;
-    let dfschema = DFSchema::try_from(arrow_schema.as_ref().clone()).map_err(|e| {
-        crate::error::internal_error(format!("Window: build DFSchema: {e}"))
-    })?;
+    let dfschema = DFSchema::try_from(arrow_schema.as_ref().clone())
+        .map_err(|e| crate::error::internal_error(format!("Window: build DFSchema: {e}")))?;
     // ExecutionProps carries time-of-evaluation context (e.g. `now()`); empty default is
     // fine for the simple expressions we lower here (Column / Literal / arithmetic / etc.).
     let _config = SessionConfig::new();
@@ -277,21 +256,14 @@ fn cast_window_outputs_to_long(
         let col = Arc::new(PhysColumn::new(field.name(), idx)) as Arc<dyn PhysicalExpr>;
         proj_exprs.push((col, field.name().to_string()));
     }
-    for (offset, field) in schema
-        .fields()
-        .iter()
-        .skip(input_col_count)
-        .enumerate()
-    {
+    for (offset, field) in schema.fields().iter().skip(input_col_count).enumerate() {
         let idx = input_col_count + offset;
         let col = Arc::new(PhysColumn::new(field.name(), idx)) as Arc<dyn PhysicalExpr>;
         let casted = Arc::new(CastExpr::new(col, ArrowDataType::Int64, None));
         proj_exprs.push((casted, field.name().to_string()));
     }
     let proj = ProjectionExec::try_new(proj_exprs, window).map_err(|e| {
-        crate::error::internal_error(format!(
-            "Window: cast row_number outputs to Int64: {e}"
-        ))
+        crate::error::internal_error(format!("Window: cast row_number outputs to Int64: {e}"))
     })?;
     Ok(Arc::new(proj))
 }

@@ -9,7 +9,6 @@ pub(crate) mod partitioned_write;
 pub(crate) mod project;
 pub(crate) mod relation_sink;
 pub(crate) mod row_index;
-pub(crate) mod window_row_number;
 
 pub use apply_schema::ApplySchemaExec;
 pub use assert::KernelAssertExec;
@@ -22,4 +21,3 @@ pub use partitioned_write::KernelPartitionedWriteExec;
 pub use project::KernelProjectExec;
 pub use relation_sink::RelationSinkExec;
 pub use row_index::RowIndexExec;
-pub use window_row_number::KernelRowNumberWindowExec;

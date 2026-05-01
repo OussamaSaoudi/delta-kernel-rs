@@ -15,8 +15,12 @@ use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
 use delta_kernel::engine::arrow_data::EngineDataArrowExt as _;
 use delta_kernel::engine::arrow_expression::evaluate_expression::evaluate_expression;
 use delta_kernel::engine::arrow_expression::ArrowEvaluationHandler;
-use delta_kernel::expressions::{column_expr, BinaryExpressionOp, Expression, Predicate, Scalar};
-use delta_kernel::plans::ir::nodes::{AssertCheck, JoinHint, JoinNode, JoinType, WindowFunction};
+use delta_kernel::expressions::{
+    column_expr, BinaryExpressionOp, ColumnName, Expression, Predicate, Scalar,
+};
+use delta_kernel::plans::ir::nodes::{
+    AssertCheck, JoinHint, JoinNode, JoinType, OrderingSpec, WindowFunction,
+};
 use delta_kernel::plans::ir::DeclarativePlanNode;
 use delta_kernel::schema::{DataType, StructField, StructType};
 use delta_kernel::{EvaluationHandler, FileMeta};
@@ -219,7 +223,7 @@ async fn parity_ordered_union_matches_kernel_concat() {
 }
 
 #[tokio::test]
-async fn parity_window_row_number_matches_stream_partition_reference() {
+async fn parity_window_row_number_matches_ordered_partition_reference() {
     let schema = Arc::new(
         StructType::try_new([
             StructField::new("part", DataType::LONG, true),
@@ -273,8 +277,9 @@ async fn parity_window_row_number_matches_stream_partition_reference() {
                 output_col: "_rn".into(),
             }],
             vec![Arc::new(Expression::column(["part"]))],
-            vec![],
+            vec![OrderingSpec::asc(ColumnName::new(["v"]))],
         )
+        .unwrap()
         .into_results();
     let got = df_collect(plan).await;
     assert_batches_equal(&expected, &got);
@@ -487,7 +492,8 @@ async fn parity_scan_single_parquet_matches_arrow_reader() {
     let expected = concat_or_clone(&expected_batches);
 
     let kernel_schema_clone = Arc::clone(&kernel_schema);
-    let plan = DeclarativePlanNode::scan_parquet(vec![file_meta(&path)], kernel_schema).into_results();
+    let plan =
+        DeclarativePlanNode::scan_parquet(vec![file_meta(&path)], kernel_schema).into_results();
     let got = df_collect(plan).await;
     assert_batch_column_data_equal(&kernel_schema_clone, &expected, &concat_or_clone(&got));
 }
