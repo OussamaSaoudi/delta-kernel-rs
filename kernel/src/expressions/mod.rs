@@ -80,6 +80,13 @@ pub enum BinaryExpressionOp {
 pub enum VariadicExpressionOp {
     /// Collapse multiple values into one by taking the first non-null value
     Coalesce,
+    /// Construct an array (List) whose elements are the per-row evaluation of each input
+    /// expression. All input expressions must share the same element type. Each output row's
+    /// list has exactly N elements, where N is the number of input expressions.
+    ///
+    /// Note: this is the dynamic-element constructor for arrays. Static array literals (whose
+    /// elements are all compile-time constants) should use [`Scalar::Array`] instead.
+    Array,
 }
 
 /// A junction (AND/OR) predicate operator.
@@ -808,6 +815,18 @@ impl Expression {
         Self::variadic(VariadicExpressionOp::Coalesce, exprs)
     }
 
+    /// Creates a new array (List) constructor expression whose elements are the per-row
+    /// evaluation of each input expression.
+    ///
+    /// All inputs must share the same element type at evaluation time; the output is a
+    /// `List<element_type>` column with one list per input row, each containing the K
+    /// element values for that row in argument order.
+    ///
+    /// Use [`Expression::literal`] with [`Scalar::Array`] for static (constant) array literals.
+    pub fn array(exprs: impl IntoIterator<Item = impl Into<Expression>>) -> Self {
+        Self::variadic(VariadicExpressionOp::Array, exprs)
+    }
+
     /// Creates a new conditional expression `IF(condition, then_expr, else_expr)`.
     ///
     /// Equivalent to SQL's `CASE WHEN condition THEN then_expr ELSE else_expr END`. NULL
@@ -1065,6 +1084,7 @@ impl Display for VariadicExpressionOp {
         use VariadicExpressionOp::*;
         match self {
             Coalesce => write!(f, "COALESCE"),
+            Array => write!(f, "ARRAY"),
         }
     }
 }
@@ -1286,6 +1306,10 @@ mod tests {
                 ),
                 "IF(Column(x) IS NULL, 0, Column(x))",
             ),
+            (
+                Expr::array([column_expr!("x"), column_expr!("y"), Expr::literal(0)]),
+                "ARRAY(Column(x), Column(y), 0)",
+            ),
         ];
 
         for (expr, expected) in cases {
@@ -1487,6 +1511,16 @@ mod tests {
                 column_expr!("a"),
                 column_expr!("b"),
                 Expression::literal("default"),
+            ]);
+            assert_roundtrip(&expr);
+        }
+
+        #[test]
+        fn test_array_expression_roundtrip() {
+            let expr = Expression::array([
+                column_expr!("a"),
+                column_expr!("b"),
+                Expression::literal(42i64),
             ]);
             assert_roundtrip(&expr);
         }

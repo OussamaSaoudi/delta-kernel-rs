@@ -9,12 +9,13 @@ use tracing::warn;
 use crate::arrow::array::types::*;
 use crate::arrow::array::{
     self as arrow_array, make_array, new_null_array, Array, ArrayBuilder, ArrayData, ArrayRef,
-    AsArray, BooleanArray, Datum, MapArray, MutableArrayData, NullBufferBuilder, RecordBatch,
-    StringArray, StructArray,
+    AsArray, BooleanArray, Datum, ListArray, MapArray, MutableArrayData, NullBufferBuilder,
+    RecordBatch, StringArray, StructArray,
 };
 use crate::arrow::buffer::{NullBuffer, OffsetBuffer};
 use crate::arrow::compute::kernels::cmp::{distinct, eq, gt, gt_eq, lt, lt_eq, neq, not_distinct};
 use crate::arrow::compute::kernels::comparison::in_list_utf8;
+use crate::arrow::compute::kernels::interleave::interleave;
 use crate::arrow::compute::kernels::numeric::{add, div, mul, sub};
 use crate::arrow::compute::kernels::zip::zip;
 use crate::arrow::compute::{and_kleene, cast, is_not_null, is_null, not, or_kleene};
@@ -346,6 +347,13 @@ pub fn evaluate_expression(
             Ok(coalesce_arrays(&arrays, result_type)?)
         }
         (
+            Variadic(VariadicExpression {
+                op: Array,
+                exprs,
+            }),
+            result_type,
+        ) => evaluate_array_expression(exprs, batch, result_type),
+        (
             If(IfExpression {
                 condition,
                 then_expr,
@@ -419,6 +427,88 @@ fn null_to_false(arr: &BooleanArray) -> BooleanArray {
         return arr.clone();
     }
     arr.iter().map(|v| Some(v.unwrap_or(false))).collect()
+}
+
+/// Evaluates a [`VariadicExpressionOp::Array`] expression. Each input expression evaluates to
+/// one column of length R (the batch row count). The K columns are interleaved row-major into
+/// a single `List<element_type>` column of R rows, each row holding the K element values for
+/// that row in argument order.
+fn evaluate_array_expression(
+    exprs: &[Expression],
+    batch: &RecordBatch,
+    result_type: Option<&DataType>,
+) -> DeltaResult<ArrayRef> {
+    if exprs.is_empty() {
+        return Err(Error::generic(
+            "ARRAY(...) requires at least one element expression",
+        ));
+    }
+
+    // Choose the per-element evaluation type from the requested result type if available.
+    let element_type: Option<&DataType> = match result_type {
+        Some(DataType::Array(at)) => Some(at.element_type()),
+        Some(other) => {
+            return Err(Error::generic(format!(
+                "ARRAY(...) requires DataType::Array result type, but got {other:?}"
+            )))
+        }
+        None => None,
+    };
+
+    let element_count = exprs.len();
+    let row_count = batch.num_rows();
+    let child_arrays: Vec<ArrayRef> = exprs
+        .iter()
+        .map(|e| evaluate_expression(e, batch, element_type))
+        .collect::<DeltaResult<_>>()?;
+
+    // All elements must share the same arrow data type (kernel does no implicit casting here;
+    // engines should wrap with explicit casts upstream when needed).
+    let elt_data_type = child_arrays[0].data_type().clone();
+    for (i, arr) in child_arrays.iter().enumerate().skip(1) {
+        if arr.data_type() != &elt_data_type {
+            return Err(Error::generic(format!(
+                "ARRAY(...) requires all elements to share a type; element 0 has type {:?} \
+                 but element {i} has type {:?}",
+                elt_data_type,
+                arr.data_type(),
+            )));
+        }
+        if arr.len() != row_count {
+            return Err(Error::generic(format!(
+                "ARRAY(...) element {i} has length {} but expected {row_count}",
+                arr.len(),
+            )));
+        }
+    }
+
+    // Interleave row-major: for output position row*K+k, take row `row` from child `k`.
+    let array_refs: Vec<&dyn Array> = child_arrays.iter().map(|a| a.as_ref()).collect();
+    let mut indices: Vec<(usize, usize)> = Vec::with_capacity(row_count * element_count);
+    for row in 0..row_count {
+        for k in 0..element_count {
+            indices.push((k, row));
+        }
+    }
+    let values = interleave(&array_refs, &indices)?;
+
+    let offsets =
+        OffsetBuffer::<i32>::from_lengths(std::iter::repeat_n(element_count, row_count));
+
+    // The output ListArray's element field nullability follows the requested type when given;
+    // otherwise we conservatively mark elements nullable.
+    let element_nullable = match result_type {
+        Some(DataType::Array(at)) => at.contains_null(),
+        _ => true,
+    };
+    let field = Arc::new(ArrowField::new(
+        "item",
+        elt_data_type,
+        element_nullable,
+    ));
+
+    let list = ListArray::try_new(field, offsets, values, None)?;
+    validate_array_type(Arc::new(list), result_type)
 }
 
 /// Direction for casting between Arrow view and non-view string/binary types.
@@ -1711,6 +1801,117 @@ mod tests {
         assert_eq!(result_array.value(1), "ok");
         assert_eq!(result_array.value(2), "big");
         assert_eq!(result_array.value(3), "ok");
+    }
+
+    #[test]
+    fn test_array_expression_basic() {
+        // ARRAY(a, b, 0) -- per-row 3-element list of [a, b, 0].
+        let schema = ArrowSchema::new(vec![
+            ArrowField::new("a", ArrowDataType::Int32, false),
+            ArrowField::new("b", ArrowDataType::Int32, false),
+        ]);
+        let a_values = Int32Array::from(vec![1, 2, 3]);
+        let b_values = Int32Array::from(vec![10, 20, 30]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(a_values), Arc::new(b_values)],
+        )
+        .unwrap();
+
+        let expr = Expression::array([
+            Expression::column(["a"]),
+            Expression::column(["b"]),
+            Expression::literal(0i32),
+        ]);
+
+        let result_type = DataType::Array(Box::new(crate::schema::ArrayType::new(
+            DataType::INTEGER,
+            false,
+        )));
+        let result = evaluate_expression(&expr, &batch, Some(&result_type)).unwrap();
+
+        let list = result.as_any().downcast_ref::<ListArray>().unwrap();
+        assert_eq!(list.len(), 3);
+        let row0 = list.value(0);
+        let row0 = row0.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(row0.values(), &[1, 10, 0]);
+        let row1 = list.value(1);
+        let row1 = row1.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(row1.values(), &[2, 20, 0]);
+        let row2 = list.value(2);
+        let row2 = row2.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(row2.values(), &[3, 30, 0]);
+    }
+
+    #[test]
+    fn test_array_expression_strings_with_nulls() {
+        // ARRAY(a, b) where one column has nulls -- list elements preserve nulls.
+        let schema = ArrowSchema::new(vec![
+            ArrowField::new("a", ArrowDataType::Utf8, true),
+            ArrowField::new("b", ArrowDataType::Utf8, true),
+        ]);
+        let a_values = StringArray::from(vec![Some("x"), None, Some("z")]);
+        let b_values = StringArray::from(vec![Some("1"), Some("2"), None]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(a_values), Arc::new(b_values)],
+        )
+        .unwrap();
+
+        let expr = Expression::array([Expression::column(["a"]), Expression::column(["b"])]);
+
+        let result_type = DataType::Array(Box::new(crate::schema::ArrayType::new(
+            DataType::STRING,
+            true,
+        )));
+        let result = evaluate_expression(&expr, &batch, Some(&result_type)).unwrap();
+        let list = result.as_any().downcast_ref::<ListArray>().unwrap();
+        assert_eq!(list.len(), 3);
+
+        let row0 = list.value(0);
+        let row0 = row0.as_any().downcast_ref::<StringArray>().unwrap();
+        assert!(!row0.is_null(0) && row0.value(0) == "x");
+        assert!(!row0.is_null(1) && row0.value(1) == "1");
+
+        let row1 = list.value(1);
+        let row1 = row1.as_any().downcast_ref::<StringArray>().unwrap();
+        assert!(row1.is_null(0));
+        assert!(!row1.is_null(1) && row1.value(1) == "2");
+
+        let row2 = list.value(2);
+        let row2 = row2.as_any().downcast_ref::<StringArray>().unwrap();
+        assert!(!row2.is_null(0) && row2.value(0) == "z");
+        assert!(row2.is_null(1));
+    }
+
+    #[test]
+    fn test_array_expression_type_mismatch_errors() {
+        // ARRAY(int_col, string_literal) -- mixed types should error rather than implicitly cast.
+        let schema = ArrowSchema::new(vec![ArrowField::new("a", ArrowDataType::Int32, false)]);
+        let a_values = Int32Array::from(vec![1, 2]);
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(a_values)]).unwrap();
+
+        let expr = Expression::array([
+            Expression::column(["a"]),
+            Expression::literal("oops"),
+        ]);
+
+        let result = evaluate_expression(&expr, &batch, None);
+        assert!(result.is_err(), "mixed-type ARRAY should error");
+    }
+
+    #[test]
+    fn test_array_expression_empty_errors() {
+        let schema = ArrowSchema::new(vec![ArrowField::new("a", ArrowDataType::Int32, false)]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(Int32Array::from(vec![1, 2]))],
+        )
+        .unwrap();
+
+        let expr = Expression::array(Vec::<Expression>::new());
+        let result = evaluate_expression(&expr, &batch, None);
+        assert!(result.is_err(), "empty ARRAY should error");
     }
 
     #[test]

@@ -202,6 +202,12 @@ pub struct EngineExpressionVisitor {
     /// Visits the `Coalesce` variadic operator belonging to the list identified by
     /// `sibling_list_id`. The operands will be in a list identified by `child_list_id`
     pub visit_coalesce: VisitVariadicFn,
+    /// Visits the `Array` variadic constructor belonging to the list identified by
+    /// `sibling_list_id`. The element expressions will be in a list identified by
+    /// `child_list_id`. All elements share the same element type at evaluation time and the
+    /// engine should construct a list/array column with one element per input expression per
+    /// row.
+    pub visit_array: VisitVariadicFn,
     /// Visits the conditional `If(condition, then_expr, else_expr)` expression belonging to the
     /// list identified by `sibling_list_id`. The three operands will be in a _three_ item list
     /// identified by `child_list_id`, in order: condition (a predicate), then-expression,
@@ -671,6 +677,7 @@ fn visit_expression_impl(
             }
             let visit_fn = match op {
                 VariadicExpressionOp::Coalesce => visitor.visit_coalesce,
+                VariadicExpressionOp::Array => visitor.visit_array,
             };
             visit_fn(visitor.data, sibling_list_id, child_list_id);
         }
