@@ -20,9 +20,12 @@
 //! [`DataFusionExecutor::read_parquet_footer_schema`].
 //!
 //! Phase 3.2 submits [`SinkType::ConsumeByKdf`] finalized handles into [`PhaseKdfState`] during
-//! [`Self::execute_phase_operation_with_drive_opts`] using [`crate::compile::CompileContext::phase_kdf_accumulator`].
-//! Phase 3.4 extends [`DriveOpts`] so [`SinkType::Write`] sinks emit synthetic
-//! [`delta_kernel::plans::state_machines::df::WriteRowCount`] under the paired
+//! [`Self::execute_phase_operation_with_drive_opts`] using
+//! [`crate::compile::CompileContext::phase_kdf_accumulator`]. Phase 3.3 wires classic checkpoint
+//! parquet materialization via [`Self::checkpoint_write_classic_parquet_and_finalize`] (kernel
+//! [`delta_kernel::plans::state_machines::df::checkpoint_write`] plans + SM phase
+//! `checkpoint_parquet_write`). Phase 3.4 extends [`DriveOpts`] so [`SinkType::Write`] sinks emit
+//! synthetic [`delta_kernel::plans::state_machines::df::WriteRowCount`] under the paired
 //! [`delta_kernel::plans::ir::Prepared`] token ([`Self::drive_insert_write_sm`]).
 
 use std::sync::{Arc, Mutex};
@@ -275,8 +278,8 @@ impl DataFusionExecutor {
         .await
     }
 
-    /// Phase 3.3 helper — pairs [`delta_kernel::plans::state_machines::df::checkpoint_write`] with write-row
-    /// telemetry (same [`DriveOpts`] contract as [`Self::drive_insert_write_sm`]).
+    /// Phase 3.3 helper — pairs [`delta_kernel::plans::state_machines::df::checkpoint_write`] with
+    /// write-row telemetry (same [`DriveOpts`] contract as [`Self::drive_insert_write_sm`]).
     pub async fn drive_checkpoint_classic_parquet_write_sm(
         &self,
         prepared: delta_kernel::plans::ir::Prepared<u64>,
@@ -293,10 +296,11 @@ impl DataFusionExecutor {
         .await
     }
 
-    /// Classic single-file checkpoint parquet via declarative [`Plan`] plus `_last_checkpoint` finalize.
+    /// Classic single-file checkpoint parquet via declarative [`Plan`] plus `_last_checkpoint`
+    /// finalize.
     ///
-    /// Requires this executor's [`Engine`] to match the [`CheckpointWriter`] snapshot storage (same as
-    /// [`Snapshot::checkpoint`](delta_kernel::Snapshot::checkpoint)).
+    /// Requires this executor's [`Engine`] to match the [`CheckpointWriter`] snapshot storage (same
+    /// as [`Snapshot::checkpoint`](delta_kernel::Snapshot::checkpoint)).
     ///
     /// `num_sidecars` stays `0` until multipart checkpoint shard plans land (see kernel
     /// `plans::state_machines::df::checkpoint_write` module docs).
@@ -312,13 +316,14 @@ impl DataFusionExecutor {
 
         let engine = self.engine.as_ref();
         let (handle, batches, dest, state) =
-            prepare_classic_checkpoint_parquet_materialization(engine, &writer).map_err(|e| {
-                crate::error::internal_error(e.to_string())
-            })?;
+            prepare_classic_checkpoint_parquet_materialization(engine, &writer)
+                .map_err(|e| crate::error::internal_error(e.to_string()))?;
         self.relation_registry.register(handle.id, batches);
         let plan = checkpoint_classic_parquet_write_plan(handle, dest.clone());
         let prepared = checkpoint_parquet_write_rows_prepared(plan);
-        let _written_rows = self.drive_checkpoint_classic_parquet_write_sm(prepared).await?;
+        let _written_rows = self
+            .drive_checkpoint_classic_parquet_write_sm(prepared)
+            .await?;
         let meta = engine
             .storage_handler()
             .head(&dest)
