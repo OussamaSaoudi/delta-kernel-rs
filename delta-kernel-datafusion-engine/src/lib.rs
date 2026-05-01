@@ -3,8 +3,15 @@
 //! Supported sinks include [`delta_kernel::plans::ir::nodes::SinkType::Results`] (stream batches to
 //! the caller), [`SinkType::Relation`](delta_kernel::plans::ir::nodes::SinkType::Relation)
 //! (materialize into an in-memory registry after draining),
-//! and [`SinkType::ConsumeByKdf`](delta_kernel::plans::ir::nodes::SinkType::ConsumeByKdf) (observe
-//! batches via a [`delta_kernel::plans::kdf::ConsumerKdf`]). Unsupported constructs still return
+//! [`SinkType::ConsumeByKdf`](delta_kernel::plans::ir::nodes::SinkType::ConsumeByKdf) (observe
+//! batches via a [`delta_kernel::plans::kdf::ConsumerKdf`]),
+//! [`SinkType::Write`](delta_kernel::plans::ir::nodes::SinkType::Write) (single-target Parquet /
+//! newline-delimited JSON via DataFusion file sinks when the runtime provides object-store access
+//! for the destination URL),
+//! and [`SinkType::PartitionedWrite`](delta_kernel::plans::ir::nodes::SinkType::PartitionedWrite)
+//! (Hive-style directories under a destination prefix).
+//! [`SinkType::Load`](delta_kernel::plans::ir::nodes::SinkType::Load) remains unsupported here.
+//! Unsupported constructs still return
 //! [`delta_kernel::plans::errors::DeltaError`] via [`error::unsupported`].
 
 pub mod compile;
