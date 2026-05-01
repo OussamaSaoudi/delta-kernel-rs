@@ -26,7 +26,7 @@ use crate::arrow::datatypes::{
 use crate::arrow::error::ArrowError;
 use crate::arrow::json::writer::{make_encoder, EncoderOptions};
 use crate::arrow::json::StructMode;
-use crate::engine::arrow_conversion::{TryFromKernel, TryIntoArrow};
+use crate::engine::arrow_conversion::{TryFromKernel, TryIntoArrow, LIST_ARRAY_ROOT};
 use crate::engine::arrow_expression::opaque::{
     ArrowOpaqueExpressionOpAdaptor, ArrowOpaquePredicateOpAdaptor,
 };
@@ -313,15 +313,14 @@ pub fn evaluate_expression(
             let left_arr = evaluate_expression(left.as_ref(), batch, None)?;
             let right_arr = evaluate_expression(right.as_ref(), batch, None)?;
 
-            type Operation = fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, ArrowError>;
-            let eval: Operation = match op {
-                Plus => add,
-                Minus => sub,
-                Multiply => mul,
-                Divide => div,
+            let out: ArrayRef = match op {
+                Plus => add(&left_arr, &right_arr)?,
+                Minus => sub(&left_arr, &right_arr)?,
+                Multiply => mul(&left_arr, &right_arr)?,
+                Divide => div(&left_arr, &right_arr)?,
             };
 
-            validate_array_type(eval(&left_arr, &right_arr)?, result_type)
+            validate_array_type(out, result_type)
         }
         (
             Variadic(VariadicExpression {
@@ -462,8 +461,21 @@ fn evaluate_array_expression(
         .map(|e| evaluate_expression(e, batch, element_type))
         .collect::<DeltaResult<_>>()?;
 
-    // All elements must share the same arrow data type (kernel does no implicit casting here;
-    // engines should wrap with explicit casts upstream when needed).
+    // Kernel literals often land as Utf8 while scanned columns may be Utf8View (etc.). Arrow's
+    // ARRAY constructor requires identical physical types across elements — normalize UTF-8-like
+    // arrays so mixed variants still compose (FSR `fsr_dedup_key` array arms mix literals + cols).
+    let child_arrays: Vec<ArrayRef> = child_arrays
+        .into_iter()
+        .map(|arr| match arr.data_type() {
+            ArrowDataType::Utf8 => Ok(arr),
+            ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+                Ok(cast(&arr, &ArrowDataType::Utf8)?)
+            }
+            _ => Ok(arr),
+        })
+        .collect::<DeltaResult<_>>()?;
+
+    // Remaining elements must share the same arrow data type after UTF-8 normalization above.
     let elt_data_type = child_arrays[0].data_type().clone();
     for (i, arr) in child_arrays.iter().enumerate().skip(1) {
         if arr.data_type() != &elt_data_type {
@@ -502,7 +514,7 @@ fn evaluate_array_expression(
         _ => true,
     };
     let field = Arc::new(ArrowField::new(
-        "item",
+        LIST_ARRAY_ROOT,
         elt_data_type,
         element_nullable,
     ));
@@ -775,10 +787,91 @@ pub fn evaluate_predicate(
     }
 }
 
-/// Converts a StructArray to JSON-encoded strings
+/// Converts each row's list of UTF-8-like string elements into a JSON array string column.
+///
+/// Used by FSR deduplication keys (`Expression::array` + [`UnaryExpressionOp::ToJson`]) where the
+/// logical key is a variable-length tuple of strings encoded as `List<Utf8>`.
+fn list_utf8_like_to_json_strings(array_ref: &ArrayRef) -> Result<ArrayRef, ArrowError> {
+    use serde_json::Value;
+
+    fn encode_row(values: ArrayRef) -> Result<String, ArrowError> {
+        let values = match values.data_type() {
+            ArrowDataType::Utf8 => values,
+            ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+                cast(&values, &ArrowDataType::Utf8)?
+            }
+            other => {
+                return Err(ArrowError::InvalidArgumentError(format!(
+                    "TO_JSON list row values must be UTF-8-like strings, got {other:?}",
+                )));
+            }
+        };
+        let sa = values.as_string::<i32>();
+        let mut elems = Vec::with_capacity(sa.len());
+        for j in 0..sa.len() {
+            elems.push(if sa.is_null(j) {
+                Value::Null
+            } else {
+                Value::String(sa.value(j).to_string())
+            });
+        }
+        Ok(Value::Array(elems).to_string())
+    }
+
+    let len = array_ref.len();
+    let mut rows: Vec<Option<String>> = Vec::with_capacity(len);
+
+    match array_ref.data_type() {
+        ArrowDataType::List(_) => {
+            let la = array_ref
+                .as_list_opt::<i32>()
+                .ok_or_else(|| ArrowError::InvalidArgumentError("expected ListArray".into()))?;
+            for i in 0..len {
+                if la.is_null(i) {
+                    rows.push(None);
+                } else {
+                    rows.push(Some(encode_row(la.value(i))?));
+                }
+            }
+        }
+        ArrowDataType::LargeList(_) => {
+            let la = array_ref
+                .as_list_opt::<i64>()
+                .ok_or_else(|| ArrowError::InvalidArgumentError("expected LargeListArray".into()))?;
+            for i in 0..len {
+                if la.is_null(i) {
+                    rows.push(None);
+                } else {
+                    rows.push(Some(encode_row(la.value(i))?));
+                }
+            }
+        }
+        other => {
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "internal: list_utf8_like_to_json_strings got {other:?}"
+            )));
+        }
+    }
+
+    Ok(Arc::new(StringArray::from(rows)))
+}
+
+/// Converts supported column types to JSON-encoded strings (structs, or homogeneous UTF-8 lists).
 pub fn to_json(input: &dyn Datum) -> Result<ArrayRef, ArrowError> {
     let (array_ref, _is_scalar) = input.get();
+    let array_ref: ArrayRef = make_array(array_ref.to_data());
     match array_ref.data_type() {
+        ArrowDataType::List(inner) | ArrowDataType::LargeList(inner) => {
+            match inner.data_type() {
+                ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+                    list_utf8_like_to_json_strings(&array_ref)
+                }
+                _ => Err(ArrowError::InvalidArgumentError(format!(
+                    "TO_JSON supports only struct columns and UTF-8 element lists; got list of {:?}",
+                    inner.data_type()
+                ))),
+            }
+        }
         ArrowDataType::Struct(_) => {
             let struct_array = array_ref.as_struct_opt().ok_or_else(|| {
                 ArrowError::InvalidArgumentError(format!(
@@ -832,7 +925,7 @@ pub fn to_json(input: &dyn Datum) -> Result<ArrayRef, ArrowError> {
             Ok(Arc::new(array))
         }
         _ => Err(ArrowError::InvalidArgumentError(format!(
-            "TO_JSON can only be applied to struct arrays, got {:?}",
+            "TO_JSON supports only struct columns and UTF-8 element lists; got {:?}",
             array_ref.data_type()
         ))),
     }

@@ -80,13 +80,10 @@ fn project_with_coalesce_path_key(
         .fields()
         .map(|f| Arc::new(Expression::column([f.name().as_str()])))
         .collect();
-    exprs.push(Arc::new(
-        Expression::coalesce([
-            Expression::column(["add", "path"]),
-            Expression::column(["remove", "path"]),
-        ])
-        .into(),
-    ));
+    exprs.push(Arc::new(Expression::coalesce([
+        Expression::column(["add", "path"]),
+        Expression::column(["remove", "path"]),
+    ])));
     Ok((exprs, ext))
 }
 

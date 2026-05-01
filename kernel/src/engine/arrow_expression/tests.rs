@@ -1180,18 +1180,31 @@ fn test_to_json_with_null_struct() {
 
 #[test]
 fn test_to_json_with_non_struct_array() {
-    // Test that to_json fails when input is not a StructArray
+    // TO_JSON rejects primitives and booleans (lists of UTF-8 strings are supported separately).
     let int_array = Int32Array::from(vec![1, 2, 3]);
     let result = to_json(&int_array);
-    assert_result_error_with_message(result, "TO_JSON can only be applied to struct arrays");
+    assert_result_error_with_message(result, "TO_JSON supports only struct columns and UTF-8 element lists");
 
     let string_array = StringArray::from(vec!["hello", "world"]);
     let result = to_json(&string_array);
-    assert_result_error_with_message(result, "TO_JSON can only be applied to struct arrays");
+    assert_result_error_with_message(result, "TO_JSON supports only struct columns and UTF-8 element lists");
 
     let boolean_array = BooleanArray::from(vec![true, false]);
     let result = to_json(&boolean_array);
-    assert_result_error_with_message(result, "TO_JSON can only be applied to struct arrays");
+    assert_result_error_with_message(result, "TO_JSON supports only struct columns and UTF-8 element lists");
+}
+
+#[test]
+fn test_to_json_utf8_element_list() {
+    use crate::engine::arrow_conversion::LIST_ARRAY_ROOT;
+    let values = StringArray::from(vec!["a", "b", "c", "d"]);
+    let offsets = OffsetBuffer::new(ScalarBuffer::from(vec![0, 2, 4]));
+    let field = Arc::new(Field::new(LIST_ARRAY_ROOT, DataType::Utf8, true));
+    let list = ListArray::new(field.clone(), offsets, Arc::new(values), None);
+    let result = to_json(&list).unwrap();
+    let json_array = result.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(json_array.value(0), r#"["a","b"]"#);
+    assert_eq!(json_array.value(1), r#"["c","d"]"#);
 }
 
 #[test]
