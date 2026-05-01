@@ -54,7 +54,7 @@ pub fn insert_write_extractor() -> (KdfStateToken, Extractor<u64>) {
 /// [`PhaseState`](crate::plans::state_machines::framework::phase_state::PhaseState) under that
 /// token.
 pub fn insert_write_sm(plan: Plan) -> Result<(CoroutineSM<u64>, KdfStateToken), DeltaError> {
-    let (token, extractorfresh) = insert_write_extractor();
+    let (token, extractor) = insert_write_extractor();
     let sm = CoroutineSM::new(|mut co| async move {
         let mut phase = Phase(&mut co);
         let state = phase
