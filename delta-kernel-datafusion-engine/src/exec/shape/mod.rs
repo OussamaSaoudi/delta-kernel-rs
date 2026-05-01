@@ -1,17 +1,21 @@
 pub(crate) mod apply_schema;
 pub(crate) mod assert;
+pub(crate) mod consume_kdf;
 pub(crate) mod filter;
 pub(crate) mod nullability_validation;
 pub(crate) mod ordered_union;
 pub(crate) mod project;
+pub(crate) mod relation_sink;
 pub(crate) mod row_index;
 pub(crate) mod window_row_number;
 
 pub use apply_schema::ApplySchemaExec;
 pub use assert::KernelAssertExec;
+pub use consume_kdf::KernelConsumeByKdfExec;
 pub use filter::KernelFilterExec;
 pub use nullability_validation::NullabilityValidationExec;
 pub use ordered_union::OrderedUnionExec;
 pub use project::KernelProjectExec;
+pub use relation_sink::RelationSinkExec;
 pub use row_index::RowIndexExec;
 pub use window_row_number::KernelRowNumberWindowExec;

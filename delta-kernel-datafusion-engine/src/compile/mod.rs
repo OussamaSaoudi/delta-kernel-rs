@@ -1,12 +1,16 @@
 //! Declarative [`Plan`] -> DataFusion [`ExecutionPlan`] compilation.
 //!
+//! Phase 1.7 extends sinks beyond [`SinkType::Results`]:
+//! [`SinkType::Relation`] (materialize into [`RelationBatchRegistry`]),
+//! [`SinkType::ConsumeByKdf`] (drain via [`KernelConsumeByKdfExec`]).
+//!
 //! Phase 1.2 extends the scaffold with leaf support:
 //! - `Literal`
 //! - `Scan`
 //! - `FileListing`
 //! - `Relation`
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::union::UnionExec;
@@ -14,11 +18,12 @@ use datafusion_physical_plan::ExecutionPlan;
 use delta_kernel::plans::errors::DeltaError;
 use delta_kernel::plans::ir::nodes::{JoinType, RelationHandle, SinkType};
 use delta_kernel::plans::ir::{DeclarativePlanNode, Plan};
+use delta_kernel::plans::kdf::FinishedHandle;
 use delta_kernel::schema::SchemaRef;
 
 use crate::exec::{
-    FileListingExec, KernelAssertExec, KernelFilterExec, KernelProjectExec, LiteralExec,
-    OrderedUnionExec, RelationBatchRegistry, RelationRefExec,
+    FileListingExec, KernelAssertExec, KernelConsumeByKdfExec, KernelFilterExec, KernelProjectExec,
+    LiteralExec, OrderedUnionExec, RelationBatchRegistry, RelationRefExec, RelationSinkExec,
 };
 
 mod join;
@@ -29,11 +34,19 @@ mod window;
 #[derive(Clone)]
 pub struct CompileContext {
     pub relation_registry: Arc<RelationBatchRegistry>,
+    /// Latest finalized [`FinishedHandle`] from a [`SinkType::ConsumeByKdf`] plan run on this executor.
+    pub kdf_harvest_slot: Arc<Mutex<Option<FinishedHandle>>>,
 }
 
 impl CompileContext {
-    pub fn new(relation_registry: Arc<RelationBatchRegistry>) -> Self {
-        Self { relation_registry }
+    pub fn new(
+        relation_registry: Arc<RelationBatchRegistry>,
+        kdf_harvest_slot: Arc<Mutex<Option<FinishedHandle>>>,
+    ) -> Self {
+        Self {
+            relation_registry,
+            kdf_harvest_slot,
+        }
     }
 }
 
@@ -44,12 +57,22 @@ pub fn compile_plan(
 ) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
     match &plan.sink.sink_type {
         SinkType::Results => compile_declarative_node(&plan.root, ctx),
-        SinkType::Relation(_) => Err(crate::error::unsupported(
-            "Relation sink is not implemented for the DataFusion engine scaffold",
-        )),
-        SinkType::ConsumeByKdf(_) => Err(crate::error::unsupported(
-            "ConsumeByKdf sink is not implemented for the DataFusion engine scaffold",
-        )),
+        SinkType::Relation(handle) => {
+            let inner = compile_declarative_node(&plan.root, ctx)?;
+            Ok(Arc::new(RelationSinkExec::new(
+                inner,
+                handle.id,
+                Arc::clone(&ctx.relation_registry),
+            )))
+        }
+        SinkType::ConsumeByKdf(sink) => {
+            let inner = compile_declarative_node(&plan.root, ctx)?;
+            Ok(Arc::new(KernelConsumeByKdfExec::try_new(
+                inner,
+                sink.clone(),
+                Arc::clone(&ctx.kdf_harvest_slot),
+            )?))
+        }
         SinkType::Load(_) => Err(crate::error::unsupported(
             "Load sink is not implemented for the DataFusion engine scaffold",
         )),
