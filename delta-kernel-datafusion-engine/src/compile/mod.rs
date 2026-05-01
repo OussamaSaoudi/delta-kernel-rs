@@ -4,6 +4,12 @@
 //! [`SinkType::Relation`] (materialize into [`RelationBatchRegistry`]),
 //! [`SinkType::ConsumeByKdf`] (drain via [`KernelConsumeByKdfExec`]).
 //!
+//! Phase 2.1 adds [`SinkType::Write`] for single-file Parquet / JsonLines via DataFusion
+//! [`DataSinkExec`](datafusion_datasource::sink::DataSinkExec) (see [`write_sink`]).
+//!
+//! Phase 2.2 adds [`SinkType::PartitionedWrite`] ([`KernelPartitionedWriteExec`]): Hive-style
+//! directories under a `file://` destination with Parquet or newline-delimited JSON.
+//!
 //! Phase 1.2 extends the scaffold with leaf support:
 //! - `Literal`
 //! - `Scan`
@@ -16,19 +22,21 @@ use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::union::UnionExec;
 use datafusion_physical_plan::ExecutionPlan;
 use delta_kernel::plans::errors::DeltaError;
-use delta_kernel::plans::ir::nodes::{JoinType, RelationHandle, SinkType};
+use delta_kernel::plans::ir::nodes::{JoinType, RelationHandle, SinkType, WriteSink};
 use delta_kernel::plans::ir::{DeclarativePlanNode, Plan};
 use delta_kernel::plans::kdf::FinishedHandle;
 use delta_kernel::schema::SchemaRef;
 
 use crate::exec::{
-    FileListingExec, KernelAssertExec, KernelConsumeByKdfExec, KernelFilterExec, KernelProjectExec,
-    LiteralExec, OrderedUnionExec, RelationBatchRegistry, RelationRefExec, RelationSinkExec,
+    FileListingExec, KernelAssertExec, KernelConsumeByKdfExec, KernelFilterExec,
+    KernelPartitionedWriteExec, KernelProjectExec, LiteralExec, OrderedUnionExec,
+    RelationBatchRegistry, RelationRefExec, RelationSinkExec,
 };
 
 mod join;
 mod scan;
 mod window;
+mod write_sink;
 
 /// Context shared by the compiler for leaf nodes that need runtime side state.
 #[derive(Clone)]
@@ -77,13 +85,24 @@ pub fn compile_plan(
         SinkType::Load(_) => Err(crate::error::unsupported(
             "Load sink is not implemented for the DataFusion engine scaffold",
         )),
-        SinkType::Write(_) => Err(crate::error::unsupported(
-            "Write sink is not implemented for the DataFusion engine scaffold",
-        )),
-        SinkType::PartitionedWrite(_) => Err(crate::error::unsupported(
-            "PartitionedWrite sink is not implemented for the DataFusion engine scaffold",
-        )),
+        SinkType::Write(write) => compile_write_terminal(&plan.root, ctx, write),
+        SinkType::PartitionedWrite(sink) => {
+            let inner = compile_declarative_node(&plan.root, ctx)?;
+            Ok(Arc::new(KernelPartitionedWriteExec::try_new(
+                inner,
+                sink.clone(),
+            )?))
+        }
     }
+}
+
+fn compile_write_terminal(
+    root: &DeclarativePlanNode,
+    ctx: &CompileContext,
+    sink: &WriteSink,
+) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
+    let inner = compile_declarative_node(root, ctx)?;
+    write_sink::compile_write_sink(inner, sink)
 }
 
 pub(super) fn compile_declarative_node(

@@ -1627,12 +1627,14 @@ dependencies = [
 name = "delta-kernel-datafusion-engine"
 version = "0.21.0"
 dependencies = [
+ "arrow-json 58.1.0",
  "chrono",
  "datafusion-common",
  "datafusion-datasource",
  "datafusion-datasource-json",
  "datafusion-datasource-parquet",
  "datafusion-execution",
+ "datafusion-expr",
  "datafusion-physical-expr",
  "datafusion-physical-plan",
  "delta_kernel",

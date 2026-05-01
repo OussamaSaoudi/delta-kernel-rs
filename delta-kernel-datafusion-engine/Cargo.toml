@@ -18,6 +18,7 @@ delta_kernel = { path = "../kernel", default-features = false, features = [
 ] }
 
 datafusion-common = { version = "53", default-features = false }
+datafusion-expr = { version = "53", default-features = false }
 datafusion-execution = { version = "53", default-features = false }
 datafusion-physical-expr = { version = "53", default-features = false }
 datafusion-physical-plan = { version = "53", default-features = false }
@@ -27,6 +28,7 @@ datafusion-datasource-parquet = { version = "53", default-features = false }
 
 # Native parquet virtual columns (`RowNumber`) share arrow-rs APIs with DataFusion's parquet crate.
 parquet = { version = "58", default-features = false, features = ["arrow", "async"] }
+arrow-json = { version = "58", default-features = false }
 
 futures = "0.3"
 chrono = "0.4"

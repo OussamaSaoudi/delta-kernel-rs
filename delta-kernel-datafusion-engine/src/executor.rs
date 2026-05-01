@@ -6,6 +6,9 @@
 //! [`SinkType::ConsumeByKdf`](delta_kernel::plans::ir::nodes::SinkType::ConsumeByKdf) drains
 //! through a [`KernelConsumeByKdfExec`](crate::exec::KernelConsumeByKdfExec); harvest the finalized
 //! handle with [`DataFusionExecutor::take_last_kdf_finished`] after fully draining the stream.
+//! [`SinkType::PartitionedWrite`](delta_kernel::plans::ir::nodes::SinkType::PartitionedWrite)
+//! (`KernelPartitionedWriteExec`) writes Hive-style partitions under a `file://` URL and yields no
+//! output batches once drained.
 
 use std::sync::{Arc, Mutex};
 
