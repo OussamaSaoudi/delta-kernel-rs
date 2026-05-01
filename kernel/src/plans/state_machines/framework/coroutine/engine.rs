@@ -21,7 +21,9 @@
 #![allow(clippy::expect_used)]
 
 use std::future::Future;
+use std::ops::Range;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::plans::errors::{DeltaError, DeltaErrorCode, DeltaResultExt};
 use crate::{bail_delta, DeltaResult, Error};
@@ -54,20 +56,17 @@ pub struct CoroutineSM<R: Send + 'static> {
     current: Option<PhaseYield>,
     /// Monotonic task ID counter.
     next_task_id: u64,
-    /// Task IDs dispatched during the current drain pass.
-    current_batch_tasks: Vec<u64>,
+    /// Task ID range dispatched during the current drain pass.
+    current_batch_task_range: Option<Range<u64>>,
     /// Cached engine result for the current batch; used to resolve
     /// same-batch awaits in-memory without an extra engine round-trip.
     current_batch_kdf: Option<Result<PhaseKdfState, EngineError>>,
-    /// Most recent phase name observed (used when yielding `Await`, which
-    /// carries no name of its own).
-    last_phase_name: &'static str,
     /// Stored terminal result when the coroutine completes during a drain
     /// loop; handed out via [`StateMachine::advance`].
     final_result: Option<Result<R, DeltaError>>,
     /// Plans accumulated during the current drain pass. Cleared when a
     /// fresh batch begins.
-    drained_plans: Vec<crate::plans::ir::Plan>,
+    drained_plans: Arc<[crate::plans::ir::Plan]>,
 }
 
 impl<R: Send + 'static> CoroutineSM<R> {
@@ -94,11 +93,10 @@ impl<R: Send + 'static> CoroutineSM<R> {
                     gen,
                     current: Some(phase),
                     next_task_id: 0,
-                    current_batch_tasks: Vec::new(),
+                    current_batch_task_range: None,
                     current_batch_kdf: None,
-                    last_phase_name: "priming",
                     final_result: None,
-                    drained_plans: Vec::new(),
+                    drained_plans: Arc::from(Vec::<crate::plans::ir::Plan>::new()),
                 };
                 sm.drain_dispatches()
                     .or_delta(DeltaErrorCode::DeltaCommandInvariantViolation)?;
@@ -136,18 +134,19 @@ impl<R: Send + 'static> CoroutineSM<R> {
     /// plans and task IDs until an [`Await`](PhaseYield::Await),
     /// [`SchemaQuery`](PhaseYield::SchemaQuery), or completion.
     fn drain_dispatches(&mut self) -> DeltaResult<()> {
-        self.drained_plans.clear();
-        self.current_batch_tasks.clear();
+        let mut drained_plans = Vec::new();
+        let batch_start = self.next_task_id;
         self.current_batch_kdf = None;
 
         loop {
             match self.current.take() {
-                Some(PhaseYield::Dispatch { plan, phase_name }) => {
-                    self.last_phase_name = phase_name;
+                Some(PhaseYield::Dispatch {
+                    plan,
+                    phase_name: _,
+                }) => {
                     let task_id = self.next_task_id;
                     self.next_task_id += 1;
-                    self.current_batch_tasks.push(task_id);
-                    self.drained_plans.push(plan);
+                    drained_plans.push(plan);
 
                     match self.gen.resume_with(PhaseResume::Dispatched { task_id }) {
                         GeneratorState::Yielded(next) => {
@@ -156,23 +155,45 @@ impl<R: Send + 'static> CoroutineSM<R> {
                         }
                         GeneratorState::Complete(result) => {
                             self.final_result = Some(result);
+                            self.current_batch_task_range = if drained_plans.is_empty() {
+                                None
+                            } else {
+                                Some(batch_start..self.next_task_id)
+                            };
+                            self.drained_plans = Arc::from(drained_plans);
                             return Ok(());
                         }
                     }
                 }
                 Some(other) => {
                     // `Await` or `SchemaQuery` — stop draining.
+                    self.current_batch_task_range = if drained_plans.is_empty() {
+                        None
+                    } else {
+                        Some(batch_start..self.next_task_id)
+                    };
+                    self.drained_plans = Arc::from(drained_plans);
                     self.current = Some(other);
                     return Ok(());
                 }
-                None => return Ok(()),
+                None => {
+                    self.current_batch_task_range = if drained_plans.is_empty() {
+                        None
+                    } else {
+                        Some(batch_start..self.next_task_id)
+                    };
+                    self.drained_plans = Arc::from(drained_plans);
+                    return Ok(());
+                }
             }
         }
     }
 
     /// `true` when `task_id` was dispatched during the current drain pass.
     fn is_in_current_batch(&self, task_id: u64) -> bool {
-        self.current_batch_tasks.contains(&task_id)
+        self.current_batch_task_range
+            .as_ref()
+            .is_some_and(|range| range.contains(&task_id))
     }
 
     /// Resolve awaits on tasks from the current batch without an engine
@@ -182,7 +203,7 @@ impl<R: Send + 'static> CoroutineSM<R> {
     fn resolve_same_batch_awaits(&mut self) -> DeltaResult<()> {
         loop {
             match &self.current {
-                Some(PhaseYield::Await { task_id }) if self.is_in_current_batch(*task_id) => {
+                Some(PhaseYield::Await { task_id, .. }) if self.is_in_current_batch(*task_id) => {
                     let kdf = self
                         .current_batch_kdf
                         .as_ref()
@@ -217,7 +238,7 @@ impl<R: Send + 'static> StateMachine for CoroutineSM<R> {
         // them out; next `advance` will produce `Done` with the stored
         // result.
         if self.final_result.is_some() && !self.drained_plans.is_empty() {
-            return Ok(PhaseOperation::Plans(self.drained_plans.clone()));
+            return Ok(PhaseOperation::Plans(self.drained_plans.to_vec()));
         }
         // By the `CoroutineSM::new` invariant, a constructed SM with
         // `final_result` set always has `drained_plans` non-empty at this
@@ -236,7 +257,7 @@ impl<R: Send + 'static> StateMachine for CoroutineSM<R> {
                         detail = "await without any dispatched plans",
                     );
                 }
-                Ok(PhaseOperation::Plans(self.drained_plans.clone()))
+                Ok(PhaseOperation::Plans(self.drained_plans.to_vec()))
             }
             Some(PhaseYield::SchemaQuery { node, .. }) => {
                 Ok(PhaseOperation::SchemaQuery(node.clone()))
@@ -263,7 +284,7 @@ impl<R: Send + 'static> StateMachine for CoroutineSM<R> {
         // stored final result.
         if let Some(final_result) = self.final_result.take() {
             self.current = None;
-            self.drained_plans.clear();
+            self.drained_plans = Arc::from(Vec::<crate::plans::ir::Plan>::new());
             return final_result.map(AdvanceResult::Done);
         }
 
@@ -314,7 +335,7 @@ impl<R: Send + 'static> StateMachine for CoroutineSM<R> {
         match &self.current {
             Some(PhaseYield::Dispatch { phase_name, .. }) => phase_name,
             Some(PhaseYield::SchemaQuery { phase_name, .. }) => phase_name,
-            Some(PhaseYield::Await { .. }) => self.last_phase_name,
+            Some(PhaseYield::Await { phase_name, .. }) => phase_name,
             None => "complete",
         }
     }
@@ -382,7 +403,12 @@ mod tests {
                 PhaseResume::Dispatched { task_id } => task_id,
                 _ => panic!("expected Dispatched"),
             };
-            let _r1 = co.yield_(PhaseYield::Await { task_id: id0 }).await;
+            let _r1 = co
+                .yield_(PhaseYield::Await {
+                    task_id: id0,
+                    phase_name: "phase_a",
+                })
+                .await;
             // Phase 2.
             let r2 = co
                 .yield_(PhaseYield::Dispatch {
@@ -394,7 +420,12 @@ mod tests {
                 PhaseResume::Dispatched { task_id } => task_id,
                 _ => panic!("expected Dispatched"),
             };
-            let _r3 = co.yield_(PhaseYield::Await { task_id: id2 }).await;
+            let _r3 = co
+                .yield_(PhaseYield::Await {
+                    task_id: id2,
+                    phase_name: "phase_b",
+                })
+                .await;
             Ok(42)
         })
         .unwrap();
@@ -448,8 +479,18 @@ mod tests {
             };
             // Await the first — the driver should resolve the second in
             // the same batch without an extra engine round-trip.
-            let _ = co.yield_(PhaseYield::Await { task_id: id0 }).await;
-            let _ = co.yield_(PhaseYield::Await { task_id: id1 }).await;
+            let _ = co
+                .yield_(PhaseYield::Await {
+                    task_id: id0,
+                    phase_name: "a",
+                })
+                .await;
+            let _ = co
+                .yield_(PhaseYield::Await {
+                    task_id: id1,
+                    phase_name: "b",
+                })
+                .await;
             Ok(())
         })
         .unwrap();
@@ -480,7 +521,13 @@ mod tests {
                 PhaseResume::Dispatched { task_id } => task_id,
                 _ => panic!(),
             };
-            match co.yield_(PhaseYield::Await { task_id: id }).await {
+            match co
+                .yield_(PhaseYield::Await {
+                    task_id: id,
+                    phase_name: "p",
+                })
+                .await
+            {
                 PhaseResume::Completed(Err(e)) => Ok(format!("got: {}", e.kind)),
                 other => panic!("unexpected: {other:?}"),
             }

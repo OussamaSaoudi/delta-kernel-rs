@@ -1343,8 +1343,6 @@ dependencies = [
 [[package]]
 name = "datafusion-datasource-parquet"
 version = "53.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32a8e0365e0e08e8ff94d912f0ababcf9065a1a304018ba90b1fc83c855b4997"
 dependencies = [
  "arrow 58.1.0",
  "async-trait",
@@ -1640,6 +1638,8 @@ dependencies = [
  "delta_kernel",
  "futures",
  "parquet 58.1.0",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "url",

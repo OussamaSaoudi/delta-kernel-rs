@@ -25,11 +25,15 @@ datafusion-datasource = { version = "53", default-features = false }
 datafusion-datasource-json = { version = "53", default-features = false }
 datafusion-datasource-parquet = { version = "53", default-features = false }
 
+# Native parquet virtual columns (`RowNumber`) share arrow-rs APIs with DataFusion's parquet crate.
+parquet = { version = "58", default-features = false, features = ["arrow", "async"] }
+
 futures = "0.3"
 chrono = "0.4"
 url = "2"
 
 [dev-dependencies]
-parquet = "58"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -12,11 +12,13 @@ use datafusion_datasource_parquet::source::ParquetSource;
 use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::ExecutionPlan;
+use delta_kernel::arrow::datatypes::{DataType, Field, Schema};
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::object_store::path::Path as StorePath;
 use delta_kernel::plans::errors::DeltaError;
 use delta_kernel::plans::ir::nodes::{FileType, ScanNode};
 use delta_kernel::FileMeta;
+use parquet::arrow::RowNumber;
 
 use crate::exec::{KernelFilterExec, NullabilityValidationExec, OrderedUnionExec, RowIndexExec};
 
@@ -71,14 +73,40 @@ fn file_meta_to_partitioned(file: &FileMeta) -> Result<PartitionedFile, DeltaErr
     Ok(pf)
 }
 
+fn parquet_scan_arrow_schema_and_virtual_columns(
+    node: &ScanNode,
+    kernel_arrow_schema: Arc<Schema>,
+) -> Result<(Arc<Schema>, Vec<Arc<Field>>), DeltaError> {
+    if node.file_type != FileType::Parquet {
+        return Ok((kernel_arrow_schema, Vec::new()));
+    }
+    let Some(name) = node.row_index_column.as_ref() else {
+        return Ok((kernel_arrow_schema, Vec::new()));
+    };
+
+    let row_field = Arc::new(
+        Field::new(name.as_str(), DataType::Int64, false).with_extension_type(RowNumber),
+    );
+    let mut fields = kernel_arrow_schema.fields().iter().cloned().collect::<Vec<_>>();
+    fields.push(Arc::clone(&row_field));
+    Ok((Arc::new(Schema::new(fields)), vec![row_field]))
+}
+
 fn build_raw_scan(
     node: &ScanNode,
     prepared: PreparedScanFiles,
-    arrow_schema: Arc<delta_kernel::arrow::datatypes::Schema>,
+    arrow_schema: Arc<Schema>,
+    parquet_virtual_columns: Vec<Arc<Field>>,
 ) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
     let scan: Arc<dyn ExecutionPlan> = match node.file_type {
         FileType::Parquet => {
-            let source = Arc::new(ParquetSource::new(arrow_schema.clone()));
+            let mut source = ParquetSource::new(arrow_schema.clone());
+            if !parquet_virtual_columns.is_empty() {
+                source = source
+                    .with_virtual_columns(parquet_virtual_columns)
+                    .map_err(crate::error::datafusion_err_to_delta)?;
+            }
+            let source = Arc::new(source);
             let cfg = FileScanConfigBuilder::new(prepared.object_store_url, source)
                 .with_file_group(prepared.file_group)
                 .with_projection_indices(None)
@@ -101,10 +129,17 @@ fn build_raw_scan(
 
 /// Applies nullability coercion, optional scan predicate (kernel residual filter), and optional row
 /// index.
+///
+/// Parquet scans with [`ScanNode::row_index_column`] feed arrow-rs virtual [`RowNumber`] values
+/// through the decoder. Residual [`KernelFilterExec`] keeps the row-index array aligned with filtered
+/// rows. JSON scans still append indices with [`RowIndexExec`].
+///
+/// Note: virtual row numbers follow the parquet reader's batching (offsets are file-absolute in
+/// arrow-rs, but combine with multi-batch emission when reasoning about tests).
 fn wrap_scan_extensions(
     scan: Arc<dyn ExecutionPlan>,
     node: &ScanNode,
-    arrow_schema: Arc<delta_kernel::arrow::datatypes::Schema>,
+    arrow_schema: Arc<Schema>,
 ) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
     let scan = Arc::new(NullabilityValidationExec::new(
         scan,
@@ -122,8 +157,13 @@ fn wrap_scan_extensions(
         scan
     };
 
+    let native_parquet_row_index =
+        matches!(node.file_type, FileType::Parquet) && node.row_index_column.is_some();
+
     if let Some(row_index_col) = &node.row_index_column {
-        return Ok(Arc::new(RowIndexExec::new(scan, row_index_col.clone())));
+        if !native_parquet_row_index {
+            return Ok(Arc::new(RowIndexExec::new(scan, row_index_col.clone())));
+        }
     }
     Ok(scan)
 }
@@ -131,11 +171,13 @@ fn wrap_scan_extensions(
 fn compile_scan_single_group(
     node: &ScanNode,
     files: &[FileMeta],
-    arrow_schema: Arc<delta_kernel::arrow::datatypes::Schema>,
+    kernel_arrow_schema: Arc<Schema>,
 ) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
+    let (scan_arrow_schema, virtual_cols) =
+        parquet_scan_arrow_schema_and_virtual_columns(node, kernel_arrow_schema)?;
     let prepared = prepare_scan_files(files)?;
-    let scan = build_raw_scan(node, prepared, arrow_schema.clone())?;
-    wrap_scan_extensions(scan, node, arrow_schema)
+    let scan = build_raw_scan(node, prepared, scan_arrow_schema.clone(), virtual_cols)?;
+    wrap_scan_extensions(scan, node, scan_arrow_schema)
 }
 
 /// Convert kernel [`ScanNode`] into DataFusion physical scan.
@@ -146,8 +188,11 @@ fn compile_scan_single_group(
 ///
 /// Scan predicates are applied via [`KernelFilterExec`] on decoded batches so semantics match the
 /// kernel evaluator (no parquet/json pushdown yet — avoids over-filtering).
+///
+/// Parquet row-index columns use [`RowIndexExec`] after residual filtering so indices match the
+/// emitted row stream (sequential starting at zero within each batch).
 pub fn compile_scan(node: &ScanNode) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
-    let arrow_schema: Arc<delta_kernel::arrow::datatypes::Schema> = Arc::new(
+    let arrow_schema: Arc<Schema> = Arc::new(
         node.schema
             .as_ref()
             .try_into_arrow()
@@ -241,6 +286,12 @@ mod tests {
 
         let ex = DataFusionExecutor::try_new().unwrap();
         let batches = ex.execute_plan_collect(plan).await.unwrap();
+        assert_eq!(
+            batches[0].num_columns(),
+            2,
+            "schema={:?}",
+            batches[0].schema()
+        );
 
         let rid_idx = batches[0].schema().column_with_name("rid").unwrap().0;
         let mut observed = Vec::new();
@@ -338,6 +389,41 @@ mod tests {
             rids.extend(ra.values().iter().copied());
         }
         assert_eq!(xs, vec![25, 30]);
+        assert_eq!(rids, vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn parquet_row_index_is_sequential_after_residual_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("rows.parquet");
+        write_i64_parquet(&p, &[8, 25, 30]);
+
+        let schema = kernel_schema_one_i64();
+        let pred = Arc::new(Expression::from_pred(Predicate::gt(
+            column_expr!("x"),
+            Expression::literal(delta_kernel::expressions::Scalar::Long(10)),
+        )));
+        let plan = root_plan(
+            DeclarativePlanNode::scan_parquet(vec![file_meta(&p)], Arc::clone(&schema))
+                .with_predicate(pred)
+                .unwrap()
+                .with_row_index("rid")
+                .unwrap(),
+        );
+
+        let ex = DataFusionExecutor::try_new().unwrap();
+        let batches = ex.execute_plan_collect(plan).await.unwrap();
+
+        let rid_idx = batches[0].schema().column_with_name("rid").unwrap().0;
+        let mut rids = Vec::new();
+        for b in &batches {
+            let ra = b
+                .column(rid_idx)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            rids.extend(ra.values().iter().copied());
+        }
         assert_eq!(rids, vec![0, 1]);
     }
 

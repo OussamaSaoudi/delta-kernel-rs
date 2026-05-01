@@ -34,7 +34,8 @@ mod window;
 #[derive(Clone)]
 pub struct CompileContext {
     pub relation_registry: Arc<RelationBatchRegistry>,
-    /// Latest finalized [`FinishedHandle`] from a [`SinkType::ConsumeByKdf`] plan run on this executor.
+    /// Latest finalized [`FinishedHandle`] from a [`SinkType::ConsumeByKdf`] plan run on this
+    /// executor.
     pub kdf_harvest_slot: Arc<Mutex<Option<FinishedHandle>>>,
 }
 

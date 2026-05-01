@@ -1,4 +1,5 @@
-//! Materialize all batches from the child plan into a [`RelationBatchRegistry`] under the sink handle id.
+//! Materialize all batches from the child plan into a [`RelationBatchRegistry`] under the sink
+//! handle id.
 
 use std::any::Any;
 use std::fmt;

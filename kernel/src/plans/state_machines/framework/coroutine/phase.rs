@@ -49,7 +49,10 @@ pub(crate) enum PhaseYield {
     },
     /// Await a previously dispatched task. Blocks until the engine returns
     /// merged [`PhaseKdfState`] for this batch.
-    Await { task_id: u64 },
+    Await {
+        task_id: u64,
+        phase_name: &'static str,
+    },
     /// Request a metadata-only file-schema read.
     SchemaQuery {
         node: SchemaQueryNode,
@@ -152,6 +155,7 @@ impl<'a> Phase<'a> {
             .0
             .yield_(PhaseYield::Await {
                 task_id: handle.task_id,
+                phase_name,
             })
             .await;
         match resume {
@@ -200,6 +204,7 @@ impl<'a> Phase<'a> {
             .0
             .yield_(PhaseYield::Await {
                 task_id: handle.task_id,
+                phase_name: handle.phase_name,
             })
             .await;
         match resume {

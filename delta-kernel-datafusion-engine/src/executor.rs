@@ -3,9 +3,9 @@
 //! Relation sinks ([`delta_kernel::plans::ir::nodes::SinkType::Relation`]) materialize batches into
 //! [`crate::exec::RelationBatchRegistry`] when their stream is drained; subsequent plans read via a
 //! [`DeclarativePlanNode::Relation`](delta_kernel::plans::ir::DeclarativePlanNode::Relation) leaf.
-//! [`SinkType::ConsumeByKdf`](delta_kernel::plans::ir::nodes::SinkType::ConsumeByKdf) drains through a
-//! [`KernelConsumeByKdfExec`](crate::exec::KernelConsumeByKdfExec); harvest the finalized handle with
-//! [`DataFusionExecutor::take_last_kdf_finished`] after fully draining the stream.
+//! [`SinkType::ConsumeByKdf`](delta_kernel::plans::ir::nodes::SinkType::ConsumeByKdf) drains
+//! through a [`KernelConsumeByKdfExec`](crate::exec::KernelConsumeByKdfExec); harvest the finalized
+//! handle with [`DataFusionExecutor::take_last_kdf_finished`] after fully draining the stream.
 
 use std::sync::{Arc, Mutex};
 
@@ -69,7 +69,8 @@ impl DataFusionExecutor {
         physical.execute(0, Arc::clone(&self.task_ctx)).lift()
     }
 
-    /// Take the finalized [`FinishedHandle`] produced by the last fully-drained `ConsumeByKdf` sink plan.
+    /// Take the finalized [`FinishedHandle`] produced by the last fully-drained `ConsumeByKdf` sink
+    /// plan.
     pub fn take_last_kdf_finished(&self) -> Option<FinishedHandle> {
         self.kdf_harvest_slot
             .lock()

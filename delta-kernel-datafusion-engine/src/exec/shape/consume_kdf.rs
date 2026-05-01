@@ -1,4 +1,5 @@
-//! Drain the child stream through a [`ConsumeByKdfSink`] [`ConsumerKdf`] and record the finalized handle.
+//! Drain the child stream through a [`ConsumeByKdfSink`] [`ConsumerKdf`] and record the finalized
+//! handle.
 
 use std::any::Any;
 use std::fmt;
@@ -23,7 +24,7 @@ use futures::{Stream, StreamExt};
 
 pub struct KernelConsumeByKdfExec {
     child: Arc<dyn ExecutionPlan>,
-    sink: ConsumeByKdfSink,
+    sink: Arc<Mutex<ConsumeByKdfSink>>,
     harvest_slot: Arc<Mutex<Option<FinishedHandle>>>,
     schema: delta_kernel::arrow::datatypes::SchemaRef,
     properties: Arc<PlanProperties>,
@@ -51,7 +52,7 @@ impl KernelConsumeByKdfExec {
 
         Ok(Self {
             child,
-            sink,
+            sink: Arc::new(Mutex::new(sink)),
             harvest_slot,
             schema,
             properties,
@@ -61,19 +62,25 @@ impl KernelConsumeByKdfExec {
 
 impl fmt::Debug for KernelConsumeByKdfExec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kdf_id = self
+            .sink
+            .lock()
+            .map(|g| g.initial_state.kdf_id())
+            .unwrap_or_default();
         f.debug_struct("KernelConsumeByKdfExec")
-            .field("kdf_id", &self.sink.initial_state.kdf_id())
+            .field("kdf_id", &kdf_id)
             .finish_non_exhaustive()
     }
 }
 
 impl DisplayAs for KernelConsumeByKdfExec {
     fn fmt_as(&self, _: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "KernelConsumeByKdfExec(kdf_id={})",
-            self.sink.initial_state.kdf_id()
-        )
+        let kdf_id = self
+            .sink
+            .lock()
+            .map(|g| g.initial_state.kdf_id())
+            .unwrap_or_default();
+        write!(f, "KernelConsumeByKdfExec(kdf_id={})", kdf_id)
     }
 }
 
@@ -110,7 +117,14 @@ impl ExecutionPlan for KernelConsumeByKdfExec {
         Ok(Arc::new(
             KernelConsumeByKdfExec::try_new(
                 Arc::clone(&children[0]),
-                self.sink.clone(),
+                self.sink
+                    .lock()
+                    .map_err(|_| {
+                        DataFusionError::Internal(
+                            "KernelConsumeByKdfExec: mutex poisoned rebuilding children".into(),
+                        )
+                    })?
+                    .clone(),
                 Arc::clone(&self.harvest_slot),
             )
             .map_err(|e| DataFusionError::External(Box::new(e)))?,
@@ -128,10 +142,18 @@ impl ExecutionPlan for KernelConsumeByKdfExec {
             )));
         }
 
-        let handle = self.sink.new_handle(
-            TraceContext::new("datafusion-engine", "execute"),
-            partition as u32,
-        );
+        let handle = self
+            .sink
+            .lock()
+            .map_err(|_| {
+                DataFusionError::Internal(
+                    "KernelConsumeByKdfExec: mutex poisoned at execute".into(),
+                )
+            })?
+            .new_handle(
+                TraceContext::new("datafusion-engine", "execute"),
+                partition as u32,
+            );
 
         let inner = self.child.execute(partition, context)?;
         Ok(Box::pin(ConsumeKdfStream {

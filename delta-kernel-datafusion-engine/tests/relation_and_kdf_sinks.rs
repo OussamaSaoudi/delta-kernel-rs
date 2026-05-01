@@ -1,4 +1,5 @@
-//! Integration tests for [`SinkType::Relation`] materialization and [`SinkType::ConsumeByKdf`] harvesting.
+//! Integration tests for [`SinkType::Relation`] materialization and [`SinkType::ConsumeByKdf`]
+//! harvesting.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -9,10 +10,9 @@ use delta_kernel::plans::ir::nodes::{ConsumeByKdfSink, RelationHandle};
 use delta_kernel::plans::ir::DeclarativePlanNode;
 use delta_kernel::plans::kdf::{ConsumerKdf, Kdf, KdfControl};
 use delta_kernel::schema::{DataType, StructField, StructType};
-use delta_kernel::{AsAny, DeltaResult, EngineData};
-use futures::TryStreamExt;
-
+use delta_kernel::{DeltaResult, EngineData};
 use delta_kernel_datafusion_engine::DataFusionExecutor;
+use futures::TryStreamExt;
 
 fn long_schema() -> delta_kernel::schema::SchemaRef {
     Arc::new(StructType::new_unchecked([StructField::not_null(
@@ -51,7 +51,9 @@ async fn relation_sink_registers_batches_readable_via_relation_leaf() {
     let rows = vec![vec![Scalar::Long(1)], vec![Scalar::Long(2)]];
     let handle = RelationHandle::fresh("pipe", schema.clone());
 
-    let producer = DeclarativePlanNode::literal(schema.clone(), rows).into_relation(handle.clone());
+    let producer = DeclarativePlanNode::literal(schema.clone(), rows)
+        .expect("literal")
+        .into_relation(handle.clone());
 
     let executor = DataFusionExecutor::try_new().unwrap();
     let produced = executor.execute_plan_collect(producer).await.unwrap();
@@ -71,7 +73,9 @@ async fn consume_by_kdf_drains_literal_and_harvests_finished_handle() {
     let schema = long_schema();
     let rows = vec![vec![Scalar::Long(10)], vec![Scalar::Long(20)]];
     let sink = ConsumeByKdfSink::new_consumer(SumRowsConsumer(0));
-    let plan = DeclarativePlanNode::literal(schema, rows).consume_by_kdf(sink);
+    let plan = DeclarativePlanNode::literal(schema, rows)
+        .expect("literal")
+        .consume_by_kdf(sink);
 
     let executor = DataFusionExecutor::try_new().unwrap();
     let stream = executor.execute_plan_to_stream(plan).await.unwrap();

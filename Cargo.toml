@@ -14,6 +14,10 @@ members = [
     "unity-catalog-delta-client-api", # WIP: transport-agnostic UC client API traits
     "delta-kernel-datafusion-engine",
 ]
+exclude = [
+    # Patched crates.io snapshot (patched via `[patch.crates-io]`); not a workspace member.
+    "vendor/datafusion-datasource-parquet",
+]
 # note that in addition to the members above, the workspace includes examples:
 # - inspect-table
 # - read-table-changes
@@ -21,6 +25,11 @@ members = [
 # - read-table-single-threaded
 # - write-table
 resolver = "3"
+
+# Patched fork (additive virtual-column hooks for parquet scans). See
+# `vendor/datafusion-datasource-parquet/README.DELTA_KERNEL_PATCH.md`.
+[patch.crates-io]
+datafusion-datasource-parquet = { path = "vendor/datafusion-datasource-parquet" }
 
 [workspace.package]
 edition = "2021"

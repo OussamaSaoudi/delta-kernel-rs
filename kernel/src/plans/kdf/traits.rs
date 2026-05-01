@@ -81,7 +81,7 @@ pub trait Kdf: Send + std::fmt::Debug {
 /// `Box<dyn ConsumerKdf>` is cloneable via the [`DynClone`] supertrait — the
 /// blanket `impl<T: Clone> DynClone for T` covers every concrete KDF state
 /// that derives `Clone`, so impls never write their own `clone_boxed`.
-pub trait ConsumerKdf: Kdf + DynClone {
+pub trait ConsumerKdf: Kdf + DynClone + Send + Sync {
     /// Observe one batch. Return [`KdfControl::Break`] to stop driving
     /// further input; the kernel treats it as "child exhausted."
     fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<KdfControl>;
