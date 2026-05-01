@@ -1,30 +1,32 @@
-//! Canonical Full Snapshot Read (FSR) declarative plans — *window-on-commits + anti-join-on-checkpoint*.
+//! Canonical Full Snapshot Read (FSR) declarative plans — *window-on-commits +
+//! anti-join-on-checkpoint*.
 //!
 //! Mirrors Delta log-replay semantics (`kernel/src/action_reconciliation/log_replay.rs`,
 //! `kernel/src/log_replay/deduplicator.rs`) by composing three or four declarative plans
 //! that flow as one [`PhaseOperation::Plans`] step:
 //!
-//! 1. **commit_load** — `Values(commit metadata) → LoadSink(JSON, action schema, passthrough=[version])`
-//!    materializes the raw per-commit action stream into [`FSR_COMMIT_RAW`]. The kernel cover
-//!    over `ascending_commit_files ∪ ascending_compaction_files` is materialized verbatim so
-//!    that downstream steps can `ORDER BY version DESC` to recover Delta's "newest action wins"
-//!    semantics inside the commit tail.
-//! 2. **commit_dedup** — `RelationRef(commit_raw) → Filter(has identity) → Project(action_cols + key) →
-//!    Window(row_number PARTITION BY key ORDER BY version DESC) → Filter(__rn = 1) → Project(action_cols + key)`
-//!    yields the *commit winners*, materialized into [`FSR_COMMIT_DEDUP`]. Commits supersede
-//!    (and remove-tombstone) checkpoint state for any `(action_kind, identity)` pair they touch.
-//! 3. **(only when `has_sidecars`) sidecar_load** — `Scan(top-level checkpoint, sidecar-only schema) →
-//!    Filter(sidecar IS NOT NULL) → Project(sidecar.path, sidecar.sizeInBytes) →
+//! 1. **commit_load** — `Values(commit metadata) → LoadSink(JSON, action schema,
+//!    passthrough=[version])` materializes the raw per-commit action stream into
+//!    [`FSR_COMMIT_RAW`]. The kernel cover over `ascending_commit_files ∪
+//!    ascending_compaction_files` is materialized verbatim so that downstream steps can `ORDER BY
+//!    version DESC` to recover Delta's "newest action wins" semantics inside the commit tail.
+//! 2. **commit_dedup** — `RelationRef(commit_raw) → Filter(has identity) → Project(action_cols +
+//!    key) → Window(row_number PARTITION BY key ORDER BY version DESC) → Filter(__rn = 1) →
+//!    Project(action_cols + key)` yields the *commit winners*, materialized into
+//!    [`FSR_COMMIT_DEDUP`]. Commits supersede (and remove-tombstone) checkpoint state for any
+//!    `(action_kind, identity)` pair they touch.
+//! 3. **(only when `has_sidecars`) sidecar_load** — `Scan(top-level checkpoint, sidecar-only
+//!    schema) → Filter(sidecar IS NOT NULL) → Project(sidecar.path, sidecar.sizeInBytes) →
 //!    LoadSink(Parquet, action schema)` materializes each V2-multipart sidecar parquet's action
-//!    rows into [`FSR_SIDECAR_ACTIONS`]. V1 / V2-inline checkpoints carry no sidecars; this plan
-//!    is omitted entirely so the executor never opens them.
-//! 4. **results** —
-//!    `(Scan(top-level checkpoint) [∪ RelationRef(sidecar_actions)]) → Filter(has identity) →
-//!    Project(action_cols + key) → LeftAntiJoin(probe=this, build=RelationRef(commit_dedup).project(key))`
-//!    materializes the *checkpoint survivors* (rows the commit tail didn't touch). The plan
-//!    completes with `Union(RelationRef(commit_dedup), survivors) → Filter(retention) →
-//!    Filter(add.path IS NOT NULL) → Project(scan_row_schema) → into_results()` so the engine's
-//!    `Results` consumer sees exactly the live add-action rows that classic kernel scan produces.
+//!    rows into [`FSR_SIDECAR_ACTIONS`]. V1 / V2-inline checkpoints carry no sidecars; this plan is
+//!    omitted entirely so the executor never opens them.
+//! 4. **results** — `(Scan(top-level checkpoint) [∪ RelationRef(sidecar_actions)]) → Filter(has
+//!    identity) → Project(action_cols + key) → LeftAntiJoin(probe=this,
+//!    build=RelationRef(commit_dedup).project(key))` materializes the *checkpoint survivors* (rows
+//!    the commit tail didn't touch). The plan completes with `Union(RelationRef(commit_dedup),
+//!    survivors) → Filter(retention) → Filter(add.path IS NOT NULL) → Project(scan_row_schema) →
+//!    into_results()` so the engine's `Results` consumer sees exactly the live add-action rows that
+//!    classic kernel scan produces.
 //!
 //! The window applies only to the (typically-small) commit-tail stream; the (typically-large)
 //! checkpoint stream goes through a single hash anti-join keyed on the dedup column. Compared
@@ -33,20 +35,20 @@
 //!
 //! ## Decision notes
 //!
-//! - **`dv_unique_id`**: Per-row deletion-vector identity, used only as a `partition_by` /
-//!   join-key contribution to the dedup key. Implemented as
-//!   `If(storageType IS NULL, NULL, ToJson(Array(storageType, pathOrInlineDv)))` —
-//!   semantics-equivalent to [`crate::actions::deletion_vector::DeletionVectorDescriptor::unique_id_from_parts`]
-//!   (matches [`crate::log_replay::deduplicator::Deduplicator::extract_dv_unique_id`]) for
-//!   equality / non-equality but not byte-for-byte. The exact byte form is not protocol-stable,
-//!   so the difference does not affect correctness; it only avoids overloading
-//!   [`crate::expressions::BinaryExpressionOp::Plus`] with UTF-8 concat semantics. Note:
-//!   `offset` is intentionally omitted (UUID DVs have no offset; inline DVs with the same
-//!   `pathOrInlineDv` and distinct offsets would imply two distinct in-line DV byte payloads,
-//!   which is not representable). A follow-up can include `offset` once kernel grows an
-//!   int-to-string cast.
-//! - **`single_action_schema`**: Matches [`crate::scan::scan_row_schema`] (`kernel/src/scan/log_replay.rs::SCAN_ROW_SCHEMA`),
-//!   i.e. the canonical flattened rows [`Snapshot::scan`] exposes (see `kernel/src/scan/mod.rs`).
+//! - **`dv_unique_id`**: Per-row deletion-vector identity, used only as a `partition_by` / join-key
+//!   contribution to the dedup key. Implemented as `If(storageType IS NULL, NULL,
+//!   ToJson(Array(storageType, pathOrInlineDv)))` — semantics-equivalent to
+//!   [`crate::actions::deletion_vector::DeletionVectorDescriptor::unique_id_from_parts`] (matches
+//!   [`crate::log_replay::deduplicator::Deduplicator::extract_dv_unique_id`]) for equality /
+//!   non-equality but not byte-for-byte. The exact byte form is not protocol-stable, so the
+//!   difference does not affect correctness; it only avoids overloading
+//!   [`crate::expressions::BinaryExpressionOp::Plus`] with UTF-8 concat semantics. Note: `offset`
+//!   is intentionally omitted (UUID DVs have no offset; inline DVs with the same `pathOrInlineDv`
+//!   and distinct offsets would imply two distinct in-line DV byte payloads, which is not
+//!   representable). A follow-up can include `offset` once kernel grows an int-to-string cast.
+//! - **`single_action_schema`**: Matches [`crate::scan::scan_row_schema`]
+//!   (`kernel/src/scan/log_replay.rs::SCAN_ROW_SCHEMA`), i.e. the canonical flattened rows
+//!   [`Snapshot::scan`] exposes (see `kernel/src/scan/mod.rs`).
 //! - **Retention thresholds**: Derived like checkpoint reconciliation via
 //!   [`crate::action_reconciliation::deleted_file_retention_timestamp_with_time`] and
 //!   [`crate::action_reconciliation::calculate_transaction_expiration_timestamp`] against
@@ -59,19 +61,20 @@ use std::sync::Arc;
 
 use url::Url;
 
-use crate::actions::{
-    Add, DomainMetadata, Metadata, Protocol, Remove, SetTransaction, Sidecar, ADD_NAME, DOMAIN_METADATA_NAME,
-    METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME, SIDECAR_NAME,
-};
 use crate::action_reconciliation::{
     calculate_transaction_expiration_timestamp, deleted_file_retention_timestamp_with_time,
+};
+use crate::actions::{
+    Add, DomainMetadata, Metadata, Protocol, Remove, SetTransaction, Sidecar, ADD_NAME,
+    DOMAIN_METADATA_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
+    SIDECAR_NAME,
 };
 use crate::expressions::{ColumnName, Expression, Predicate, Scalar, UnaryExpressionOp};
 use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::plans::errors::{DeltaError, DeltaErrorCode, KernelErrAsDelta};
 use crate::plans::ir::nodes::{
-    FileFormat, JoinHint, JoinNode, JoinType, LoadSink, OrderingSpec,     RelationHandle, ScanFileColumns,
-    WindowFunction,
+    FileFormat, JoinHint, JoinNode, JoinType, LoadSink, OrderingSpec, RelationHandle,
+    ScanFileColumns, WindowFunction,
 };
 use crate::plans::ir::{DeclarativePlanNode, Plan};
 use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
@@ -118,9 +121,13 @@ pub struct CheckpointShape {
     pub actions_schema_subset: SchemaRef,
 }
 
-/// Public entry: SM body from the FSR migration plan (`PhaseOperation::SchemaQuery` prelude optional).
+/// Public entry: SM body from the FSR migration plan (`PhaseOperation::SchemaQuery` prelude
+/// optional).
 pub fn full_state_sm(snapshot: Arc<Snapshot>) -> Result<CoroutineSM<()>, DeltaError> {
-    let needs_schema_query = snapshot.log_segment().last_checkpoint_hint_summary().is_none()
+    let needs_schema_query = snapshot
+        .log_segment()
+        .last_checkpoint_hint_summary()
+        .is_none()
         && snapshot_has_checkpoint_files(&snapshot);
     let maybe_checkpoint_url = needs_schema_query
         .then(|| first_checkpoint_url(snapshot.as_ref()))
@@ -193,7 +200,8 @@ pub fn first_checkpoint_url(snapshot: &Snapshot) -> Result<String, DeltaError> {
 }
 
 pub fn checkpoint_shape_from_schema(schema: &SchemaRef) -> Result<CheckpointShape, DeltaError> {
-    // SchemaQuery is executed against an on-disk checkpoint part today — treat as Parquet-shaped reads.
+    // SchemaQuery is executed against an on-disk checkpoint part today — treat as Parquet-shaped
+    // reads.
     let subset = checkpoint_actions_schema_projection(schema)?;
     Ok(CheckpointShape {
         file_format: FileFormat::Parquet,
@@ -202,7 +210,9 @@ pub fn checkpoint_shape_from_schema(schema: &SchemaRef) -> Result<CheckpointShap
     })
 }
 
-pub fn checkpoint_shape_from_last_checkpoint(snapshot: &Snapshot) -> Result<CheckpointShape, DeltaError> {
+pub fn checkpoint_shape_from_last_checkpoint(
+    snapshot: &Snapshot,
+) -> Result<CheckpointShape, DeltaError> {
     let seg = snapshot.log_segment();
     let fmt = seg
         .listed
@@ -257,7 +267,10 @@ fn checkpoint_actions_schema_projection(full: &SchemaRef) -> Result<SchemaRef, D
 /// The single [`PhaseOperation::Plans`] yield wraps all of them; the executor walks them
 /// in submitted order and the relation registry keeps each step's batches available to its
 /// successors.
-pub fn build_fsr_plans(snapshot: &Snapshot, shape: CheckpointShape) -> Result<Vec<Plan>, DeltaError> {
+pub fn build_fsr_plans(
+    snapshot: &Snapshot,
+    shape: CheckpointShape,
+) -> Result<Vec<Plan>, DeltaError> {
     let log_root = snapshot.log_segment().log_root.clone();
     let segment = snapshot.log_segment();
 
@@ -269,8 +282,11 @@ pub fn build_fsr_plans(snapshot: &Snapshot, shape: CheckpointShape) -> Result<Ve
         .map(|p| p.location.clone())
         .collect();
 
-    let commit_raw_schema =
-        load_materialized_schema(&action_read_schema(), &path_size_version_schema(), &["version"])?;
+    let commit_raw_schema = load_materialized_schema(
+        &action_read_schema(),
+        &path_size_version_schema(),
+        &["version"],
+    )?;
     let commit_dedup_schema = augmented_action_schema()?;
 
     let commit_raw_handle = RelationHandle::fresh(FSR_COMMIT_RAW, commit_raw_schema);
@@ -286,8 +302,15 @@ pub fn build_fsr_plans(snapshot: &Snapshot, shape: CheckpointShape) -> Result<Ve
         .map_err(|e| e.into_delta_default())?;
 
     let mut plans = Vec::with_capacity(4);
-    plans.push(build_commit_load_plan(&commits, &commit_raw_handle, &log_root)?);
-    plans.push(build_commit_dedup_plan(&commit_raw_handle, &commit_dedup_handle)?);
+    plans.push(build_commit_load_plan(
+        &commits,
+        &commit_raw_handle,
+        &log_root,
+    )?);
+    plans.push(build_commit_dedup_plan(
+        &commit_raw_handle,
+        &commit_dedup_handle,
+    )?);
 
     let sidecar_handle = if shape.has_sidecars {
         let handle = RelationHandle::fresh(FSR_SIDECAR_ACTIONS, action_read_schema());
@@ -307,7 +330,6 @@ pub fn build_fsr_plans(snapshot: &Snapshot, shape: CheckpointShape) -> Result<Ve
         sidecar_handle.as_ref(),
         &checkpoint_files,
         shape.file_format,
-        &shape.actions_schema_subset,
         min_file_ts,
         txn_expiry,
     )?);
@@ -323,27 +345,30 @@ fn load_materialized_schema(
     let mut fields: Vec<StructField> = file_schema.fields().cloned().collect();
     let up = upstream.as_ref();
     for name in passthrough {
-        let field = up
-            .fields()
-            .find(|f| f.name() == *name)
-            .ok_or_else(|| {
-                delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    operation = "fsr::load_materialized_schema",
-                    detail = format!(
-                        "upstream schema {:?} missing passthrough `{name}`",
-                        upstream
-                    ),
-                )
-            })?;
-        fields.push(StructField::new(*name, field.data_type().clone(), field.is_nullable()));
+        let field = up.fields().find(|f| f.name() == *name).ok_or_else(|| {
+            delta_error!(
+                DeltaErrorCode::DeltaCommandInvariantViolation,
+                operation = "fsr::load_materialized_schema",
+                detail = format!(
+                    "upstream schema {:?} missing passthrough `{name}`",
+                    upstream
+                ),
+            )
+        })?;
+        fields.push(StructField::new(
+            *name,
+            field.data_type().clone(),
+            field.is_nullable(),
+        ));
     }
     StructType::try_new(fields)
         .map(Arc::new)
         .map_err(|e| e.into_delta_default())
 }
 
-fn commit_cover_rows(seg: &crate::log_segment::LogSegment) -> Result<Vec<CommitFileMeta>, DeltaError> {
+fn commit_cover_rows(
+    seg: &crate::log_segment::LogSegment,
+) -> Result<Vec<CommitFileMeta>, DeltaError> {
     let log_root = &seg.log_root;
     let mut rows = Vec::new();
     let merge = itertools::Itertools::merge_by(
@@ -384,6 +409,11 @@ fn path_under_log_root(log_root: &Url, file: &Url) -> Result<String, DeltaError>
     Ok(suffix.trim_start_matches('/').to_string())
 }
 
+/// Per-action read schema used by every FSR plan.
+///
+/// This keeps Delta action schemas exactly as modeled by the protocol types (`Add::to_schema`,
+/// `Remove::to_schema`, ...). Only the top-level action columns are nullable since each log row
+/// carries exactly one action.
 fn action_read_schema() -> SchemaRef {
     Arc::new(StructType::new_unchecked([
         StructField::nullable(ADD_NAME, Add::to_schema()),
@@ -421,18 +451,26 @@ fn single_action_schema() -> SchemaRef {
     scan_row_schema()
 }
 
-/// Tombstone / txn expiration predicate aligned with [`crate::action_reconciliation::log_replay::ActionReconciliationVisitor::is_expired_tombstone`]
+/// Tombstone / txn expiration predicate aligned with
+/// [`crate::action_reconciliation::log_replay::ActionReconciliationVisitor::is_expired_tombstone`]
 /// and txn retention checks in the same visitor (`kernel/src/action_reconciliation/log_replay.rs`).
 ///
-/// `txn_expiration_cutoff` is `None` when `delta.setTransactionRetentionDuration` is unset — txn rows are not filtered by age.
-fn retention_filter(min_file_retention_timestamp: i64, txn_expiration_cutoff: Option<i64>) -> Predicate {
+/// `txn_expiration_cutoff` is `None` when `delta.setTransactionRetentionDuration` is unset — txn
+/// rows are not filtered by age.
+fn retention_filter(
+    min_file_retention_timestamp: i64,
+    txn_expiration_cutoff: Option<i64>,
+) -> Predicate {
     let removal_ts = Expression::coalesce([
         Expression::column(["remove", "deletionTimestamp"]),
         Expression::literal(Scalar::Long(0)),
     ]);
     let remove_ok = Predicate::or(
         Predicate::is_null(Expression::column(["remove"])),
-        Predicate::gt(removal_ts, Expression::literal(Scalar::Long(min_file_retention_timestamp))),
+        Predicate::gt(
+            removal_ts,
+            Expression::literal(Scalar::Long(min_file_retention_timestamp)),
+        ),
     );
 
     let txn_ok = match txn_expiration_cutoff {
@@ -511,9 +549,10 @@ fn fsr_dedup_key() -> Expression {
 
     let txn_arm = Expression::array(vec![Expression::column(["txn", "appId"])]);
 
-    let null_list = Expression::literal(Scalar::Null(DataType::Array(Box::new(
-        ArrayType::new(DataType::STRING, true),
-    ))));
+    let null_list = Expression::literal(Scalar::Null(DataType::Array(Box::new(ArrayType::new(
+        DataType::STRING,
+        true,
+    )))));
 
     Expression::case_when(
         vec![
@@ -622,15 +661,14 @@ fn build_commit_load_plan(
 ///
 /// Steps:
 /// 1. `Filter(fsr_row_has_identity_predicate)` — drop rows that aren't a recognized action.
-/// 2. `Project(action_cols + __fsr_join_k + version)` — materialize the dedup key as a
-///    top-level column so `Window.partition_by` and the downstream LeftAnti can use a column
-///    reference (kernel + DF window/join compilers reject non-column partition keys).
-/// 3. `Window(row_number PARTITION BY __fsr_join_k ORDER BY version DESC)` — assign
-///    a 1-based row number per `(action_kind, identity)`, newest commit first.
+/// 2. `Project(action_cols + __fsr_join_k + version)` — materialize the dedup key as a top-level
+///    column so `Window.partition_by` and the downstream LeftAnti can use a column reference
+///    (kernel + DF window/join compilers reject non-column partition keys).
+/// 3. `Window(row_number PARTITION BY __fsr_join_k ORDER BY version DESC)` — assign a 1-based row
+///    number per `(action_kind, identity)`, newest commit first.
 /// 4. `Filter(__rn = 1)` — keep just the newest action per key.
-/// 5. `Project(action_cols + __fsr_join_k)` — drop `version` and `__rn`; the persisted
-///    relation matches `augmented_action_schema()` so [`build_results_plan`]'s union
-///    schema-checks line up.
+/// 5. `Project(action_cols + __fsr_join_k)` — drop `version` and `__rn`; the persisted relation
+///    matches `augmented_action_schema()` so [`build_results_plan`]'s union schema-checks line up.
 fn build_commit_dedup_plan(
     commit_raw_handle: &RelationHandle,
     commit_dedup_handle: &RelationHandle,
@@ -677,7 +715,9 @@ fn build_commit_dedup_plan(
     // Final project: drop `version` and `__rn`; keep action_cols + __fsr_join_k.
     let final_proj: Vec<Arc<Expression>> = action_identity_projection()
         .into_iter()
-        .chain(std::iter::once(Arc::new(Expression::column([FSR_JOIN_KEY_COL]))))
+        .chain(std::iter::once(Arc::new(Expression::column([
+            FSR_JOIN_KEY_COL,
+        ]))))
         .collect();
 
     Ok(windowed
@@ -730,7 +770,8 @@ fn build_sidecar_load_plan(
 }
 
 /// Plan 4 (terminal): assemble the live snapshot rows from commit winners + checkpoint
-/// survivors and stream them to the [`SinkType::Results`](crate::plans::ir::nodes::SinkType::Results) consumer.
+/// survivors and stream them to the
+/// [`SinkType::Results`](crate::plans::ir::nodes::SinkType::Results) consumer.
 ///
 /// Inline shape:
 ///
@@ -759,10 +800,23 @@ fn build_results_plan(
     sidecar_handle: Option<&RelationHandle>,
     checkpoint_top_files: &[FileMeta],
     checkpoint_top_format: FileFormat,
-    _checkpoint_top_schema: &SchemaRef,
     min_file_retention_timestamp: i64,
     txn_expiration_cutoff: Option<i64>,
 ) -> Result<Plan, DeltaError> {
+    // No checkpoint parts: there is no checkpoint side to anti-join. The full snapshot state is
+    // entirely determined by commit winners.
+    if checkpoint_top_files.is_empty() {
+        return Ok(
+            DeclarativePlanNode::relation_ref(commit_dedup_handle.clone())
+                .filter(Arc::new(
+                    retention_filter(min_file_retention_timestamp, txn_expiration_cutoff).into(),
+                ))
+                .filter(add_path_is_not_null())
+                .project(single_action_projection(), single_action_schema())
+                .into_results(),
+        );
+    }
+
     let dedup_expr = Arc::new(Expression::unary(
         UnaryExpressionOp::ToJson,
         fsr_dedup_key(),
@@ -916,7 +970,10 @@ mod tests {
             plan_sink_kind(&plans[1]),
             PlanTerminalKind::Relation(FSR_COMMIT_DEDUP)
         ));
-        assert!(matches!(plan_sink_kind(&plans[2]), PlanTerminalKind::Results));
+        assert!(matches!(
+            plan_sink_kind(&plans[2]),
+            PlanTerminalKind::Results
+        ));
 
         assert!(
             plan_reads_relation_named(&plans[1], FSR_COMMIT_RAW),
@@ -939,8 +996,8 @@ mod tests {
 
     /// `app-txn-checkpoint` carries a single classic-V1 `.checkpoint.parquet` (no sidecars),
     /// so the planner must still emit exactly three plans (no `sidecar_load`). The terminal
-    /// `results` plan carries an embedded `Scan(Parquet, [<checkpoint.parquet>], action_read_schema())`
-    /// that the LeftAnti probes against the commit-dedup key set.
+    /// `results` plan carries an embedded `Scan(Parquet, [<checkpoint.parquet>],
+    /// action_read_schema())` that the LeftAnti probes against the commit-dedup key set.
     #[test]
     fn fsr_plan_shape_v1_checkpoint_no_sidecars() {
         let (_engine, snapshot, _tmp) = load_test_table("app-txn-checkpoint").unwrap();
@@ -964,7 +1021,10 @@ mod tests {
             plan_sink_kind(&plans[1]),
             PlanTerminalKind::Relation(FSR_COMMIT_DEDUP)
         ));
-        assert!(matches!(plan_sink_kind(&plans[2]), PlanTerminalKind::Results));
+        assert!(matches!(
+            plan_sink_kind(&plans[2]),
+            PlanTerminalKind::Results
+        ));
 
         assert!(plan_reads_relation_named(&plans[1], FSR_COMMIT_RAW));
         assert!(plan_reads_relation_named(&plans[2], FSR_COMMIT_DEDUP));
@@ -1011,7 +1071,10 @@ mod tests {
             plan_sink_kind(&plans[2]),
             PlanTerminalKind::Load(FSR_SIDECAR_ACTIONS)
         ));
-        assert!(matches!(plan_sink_kind(&plans[3]), PlanTerminalKind::Results));
+        assert!(matches!(
+            plan_sink_kind(&plans[3]),
+            PlanTerminalKind::Results
+        ));
 
         assert!(plan_reads_relation_named(&plans[1], FSR_COMMIT_RAW));
         assert!(plan_reads_relation_named(&plans[3], FSR_COMMIT_DEDUP));
@@ -1052,7 +1115,10 @@ mod tests {
         let s = out.as_string::<i32>().value(0);
         // Outer Array(["file", path_coalesce, dv_coalesce]) JSON-encodes to a JSON array; the dv
         // arm is itself a JSON-encoded array string `["u","dvpath"]` embedded as a JSON string.
-        assert!(s.contains("p1.parquet"), "expected `p1.parquet` in json={s}");
+        assert!(
+            s.contains("p1.parquet"),
+            "expected `p1.parquet` in json={s}"
+        );
         assert!(s.contains("dvpath"), "expected `dvpath` in json={s}");
         // The Plus-as-concat byte form must not appear (regression guard).
         let stringy_concat = DeletionVectorDescriptor::unique_id_from_parts("u", "dvpath", Some(7));
@@ -1115,6 +1181,48 @@ mod tests {
             r#"{"remove":{"path":"r1.parquet","deletionTimestamp":1,"dataChange":true,"partitionValues":{}}}"#,
             &["r1.parquet"],
         );
+    }
+
+    #[test]
+    fn fsr_row_has_identity_accepts_protocol_metadata_domain_and_file_actions() {
+        let engine = SyncEngine::new();
+        let schema = action_read_schema();
+        let rows = StringArray::from(vec![
+            // file actions
+            r#"{"add":{"path":"a.parquet","partitionValues":{},"size":1,"modificationTime":1,"dataChange":true}}"#,
+            r#"{"remove":{"path":"r.parquet","deletionTimestamp":1,"dataChange":true,"partitionValues":{}}}"#,
+            // protocol / metadata / domain metadata / txn
+            r#"{"protocol":{"minReaderVersion":1,"minWriterVersion":2}}"#,
+            r#"{"metaData":{"id":"mid-1","name":null,"description":null,"format":{"provider":"parquet","options":{}},"schemaString":"{}","partitionColumns":[],"configuration":{},"createdTime":null}}"#,
+            r#"{"domainMetadata":{"domain":"d1","configuration":"cfg","removed":false}}"#,
+            r#"{"txn":{"appId":"app-1","version":7,"lastUpdated":100}}"#,
+            // no action payload
+            r#"{}"#,
+        ]);
+        let parsed = engine
+            .json_handler()
+            .parse_json(string_array_to_engine_data(rows), Arc::clone(&schema))
+            .unwrap();
+        let arrow = ArrowEngineData::try_from_engine_data(parsed).unwrap();
+        let batch = arrow.record_batch();
+
+        let out = evaluate_expression(
+            &fsr_row_has_identity_predicate().into(),
+            batch,
+            Some(&DataType::BOOLEAN),
+        )
+        .unwrap();
+        let b = out.as_boolean();
+        assert!(b.value(0), "add row should pass identity predicate");
+        assert!(b.value(1), "remove row should pass identity predicate");
+        assert!(b.value(2), "protocol row should pass identity predicate");
+        assert!(b.value(3), "metaData row should pass identity predicate");
+        assert!(
+            b.value(4),
+            "domainMetadata row should pass identity predicate"
+        );
+        assert!(b.value(5), "txn row should pass identity predicate");
+        assert!(!b.value(6), "empty row should fail identity predicate");
     }
 
     #[test]
@@ -1205,7 +1313,11 @@ mod tests {
     fn results_plan_carries_anti_join_against_commit_dedup(plan: &Plan) -> bool {
         fn walk(node: &DeclarativePlanNode) -> bool {
             match node {
-                DeclarativePlanNode::Join { node: jn, build, probe } => {
+                DeclarativePlanNode::Join {
+                    node: jn,
+                    build,
+                    probe,
+                } => {
                     let is_left_anti = matches!(jn.join_type, JoinType::LeftAnti);
                     let build_reads_dedup = subtree_references(build, FSR_COMMIT_DEDUP);
                     let key_is_join_k = jn

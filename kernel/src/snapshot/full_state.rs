@@ -1,74 +1,43 @@
-//! Declarative full snapshot read (FSR) scaffolding for [`Snapshot`].
+//! Declarative full snapshot read (FSR) entry point on [`Snapshot`].
 //!
-//! Phase 4.1 wires snapshot log-segment shape into the FSR strip/fanout coroutine. Engines such as
-//! the DataFusion-backed executor drive the returned [`CoroutineSM`]. Classic
-//! [`crate::scan::ScanBuilder`] replay is unchanged when this module is not used.
+//! Routes [`Snapshot::full_state`] to the canonical FSR coroutine
+//! ([`crate::plans::state_machines::fsr::full_state_sm`]) whose live, ordered scan-row
+//! stream flows to the engine's [`SinkType::Results`](crate::plans::ir::nodes::SinkType::Results)
+//! consumer when the engine drives the returned `CoroutineSM`.
 
 use std::sync::Arc;
 
-use crate::expressions::Scalar;
 use crate::plans::errors::DeltaErrAsKernel;
 use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
-use crate::plans::state_machines::fsr::{
-    try_build_fsr_strip_then_fanout_sm, FsrStripThenFanoutOutcome,
-};
-use crate::schema::{DataType, StructField, StructType};
+use crate::plans::state_machines::fsr::full_state_sm;
+use crate::snapshot::SnapshotRef;
 use crate::{DeltaResult, Snapshot};
 
 impl Snapshot {
-    /// Declarative **full snapshot read** entry: a two-phase FSR [`CoroutineSM`] derived from this
-    /// snapshot's log listing.
+    /// Declarative **full snapshot read** entry: a multi-plan FSR [`CoroutineSM`] derived
+    /// from this snapshot's log listing.
     ///
     /// # What it models
     ///
-    /// Literal plan phases stand in for future checkpoint materialization and tail replay:
+    /// The returned coroutine yields exactly one
+    /// [`PhaseOperation::Plans`](crate::plans::state_machines::framework::phase_operation::PhaseOperation::Plans)
+    /// step (optionally preceded by a
+    /// [`PhaseOperation::SchemaQuery`](crate::plans::state_machines::framework::phase_operation::PhaseOperation::SchemaQuery)
+    /// prelude when `_last_checkpoint` is absent but checkpoint files are present), bundling
+    /// the full *window-on-commits + anti-join-on-checkpoint* algorithm in a single
+    /// engine-driven step. See [`crate::plans::state_machines::fsr::full_state`] for the
+    /// per-plan breakdown and the dedup-key contract.
     ///
-    /// - **Strip** — one row per checkpoint *part* in [`crate::log_segment::LogSegment`], or a
-    ///   single sentinel row when the segment has no checkpoint.
-    /// - **Fanout** — one row per tail *commit* file still present after the checkpoint strip, or a
-    ///   single sentinel row when that set is empty.
+    /// The terminal plan is a `Results` sink; live add-action rows arrive as
+    /// [`crate::scan::scan_row_schema`]-shaped batches in the engine's `Results` consumer.
     ///
     /// # Feature gate
     ///
-    /// Available only with the `declarative-plans` feature. There is **no** runtime fallback: if
-    /// the feature is disabled at compile time, callers rely on [`Snapshot::scan_builder`] and
-    /// classic kernel replay instead.
-    ///
-    /// # Limitations
-    ///
-    /// Does not perform storage I/O or produce active data files — only exercises FSR-shaped
-    /// multi-phase scheduling. Real reads remain on the scan/log-replay path until later phases
-    /// swap literals for declarative checkpoint and file scans.
-    pub fn full_state(&self) -> DeltaResult<CoroutineSM<FsrStripThenFanoutOutcome>> {
-        let listed = &self.log_segment().listed;
-        let n_cp_parts = listed.checkpoint_parts.len();
-        let n_commits = listed.ascending_commit_files.len();
-
-        let strip_schema = Arc::new(StructType::try_new([StructField::not_null(
-            "checkpoint_part_ord",
-            DataType::LONG,
-        )])?);
-        let strip_rows: Vec<Vec<Scalar>> = if n_cp_parts == 0 {
-            vec![vec![Scalar::Long(-1)]]
-        } else {
-            (0..n_cp_parts)
-                .map(|i| vec![Scalar::Long(i as i64)])
-                .collect()
-        };
-
-        let fan_schema = Arc::new(StructType::try_new([StructField::not_null(
-            "commit_tail_ord",
-            DataType::LONG,
-        )])?);
-        let fanout_rows: Vec<Vec<Scalar>> = if n_commits == 0 {
-            vec![vec![Scalar::Long(-1)]]
-        } else {
-            (0..n_commits)
-                .map(|i| vec![Scalar::Long(i as i64)])
-                .collect()
-        };
-
-        try_build_fsr_strip_then_fanout_sm(strip_schema, strip_rows, fan_schema, fanout_rows)
-            .map_err(|e| e.into_kernel_default())
+    /// Available only with the `declarative-plans` feature. There is **no** runtime fallback:
+    /// if the feature is disabled at compile time, callers rely on
+    /// [`Snapshot::scan_builder`](crate::snapshot::Snapshot::scan_builder) and classic
+    /// kernel replay instead.
+    pub fn full_state(self: &SnapshotRef) -> DeltaResult<CoroutineSM<()>> {
+        full_state_sm(Arc::clone(self)).map_err(|e| e.into_kernel_default())
     }
 }
