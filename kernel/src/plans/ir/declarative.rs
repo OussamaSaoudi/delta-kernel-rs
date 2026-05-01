@@ -52,8 +52,8 @@
 //!   [`RelationHandle`](super::nodes::RelationHandle) for another plan in
 //!   the same `PhaseOperation::Plans(...)` to consume.
 //! - [`DeclarativePlanNode::into_load`] — file-reader sink: each upstream
-//!   row describes a file to open and read. Materializes under a named
-//!   relation handle.
+//!   row describes a file to open and read; optional DV masking via
+//!   [`LoadSink::dv_ref`]. Materializes under a named relation handle.
 //! - [`DeclarativePlanNode::consume`] — typed KDF consumer terminal; returns
 //!   a [`Prepared<O>`] whose plan terminates in
 //!   [`SinkType::ConsumeByKdf`](super::nodes::SinkType::ConsumeByKdf).
@@ -504,8 +504,9 @@ impl DeclarativePlanNode {
     }
 
     /// Terminal: file-reader sink. For each upstream row, open the resolved
-    /// file, read [`LoadSink::file_schema`] columns, and materialize the
-    /// result under [`LoadSink::output_relation`] for downstream
+    /// file, read [`LoadSink::file_schema`] columns (with optional DV masking
+    /// when [`LoadSink::dv_ref`] names an upstream descriptor column), and
+    /// materialize the result under [`LoadSink::output_relation`] for downstream
     /// [`Self::relation`] consumers in the same phase. See [`LoadSink`].
     pub fn into_load(self, sink: LoadSink) -> Plan {
         self.into_plan(SinkType::Load(sink))
@@ -622,13 +623,45 @@ mod tests {
                 size: None,
                 record_count: None,
             },
+            dv_ref: None,
             passthrough_columns: vec![],
             row_index_column: None,
             file_type: FileType::Parquet,
         };
         let plan = DeclarativePlanNode::scan_json(vec![], simple_schema()).into_load(load);
         match plan.sink.sink_type {
-            SinkType::Load(ls) => assert_eq!(ls.output_relation, out_handle),
+            SinkType::Load(ls) => {
+                assert_eq!(ls.output_relation, out_handle);
+                assert!(ls.dv_ref.is_none());
+            }
+            other => panic!("expected Load sink, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_sink_preserves_dv_ref_column_hint() {
+        let out_handle = RelationHandle::fresh("loaded_rows", simple_schema());
+        let dv_col = ColumnName::new(["add", "deletionVector"]);
+        let load = LoadSink {
+            output_relation: out_handle.clone(),
+            file_schema: simple_schema(),
+            base_url: None,
+            file_meta: ScanFileColumns {
+                path: ColumnName::new(["path"]),
+                size: None,
+                record_count: None,
+            },
+            dv_ref: Some(dv_col.clone()),
+            passthrough_columns: vec![],
+            row_index_column: None,
+            file_type: FileType::Parquet,
+        };
+        let plan = DeclarativePlanNode::scan_json(vec![], simple_schema()).into_load(load);
+        match plan.sink.sink_type {
+            SinkType::Load(ls) => {
+                assert_eq!(ls.dv_ref.as_ref(), Some(&dv_col));
+                assert_eq!(ls.output_relation, out_handle);
+            }
             other => panic!("expected Load sink, got {other:?}"),
         }
     }

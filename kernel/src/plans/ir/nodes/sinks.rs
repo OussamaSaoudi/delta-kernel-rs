@@ -162,8 +162,8 @@ pub struct ScanFileColumns {
 /// downstream plans in the same phase can consume it through
 /// [`crate::plans::ir::declarative::DeclarativePlanNode::Relation`].
 ///
-/// This Phase 0.6 surface intentionally omits DV-mask (`inline_dv`) and
-/// pushdown predicate; both land with subsequent stack PRs.
+/// Phase 0.7 threads an optional [`Self::dv_ref`] column hint for per-row
+/// deletion-vector masking; pushdown predicate lands with subsequent stack PRs.
 ///
 /// Spec: `declarative_plan_docs/algebra/plan_nodes.md` §5
 /// (`Sink: Load (LoadSinkNode)`).
@@ -180,6 +180,10 @@ pub struct LoadSink {
     pub base_url: Option<url::Url>,
     /// Column-name hints used to read per-row file metadata from upstream.
     pub file_meta: ScanFileColumns,
+    /// Optional upstream column holding the per-row deletion vector descriptor
+    /// (persisted path or inline DV string). When `None`, IR does not request
+    /// DV-masked reads from engines.
+    pub dv_ref: Option<ColumnName>,
     /// Names of upstream columns to broadcast verbatim onto every output row
     /// (e.g. `add.path` for downstream joins back to the manifest).
     pub passthrough_columns: Vec<ColumnName>,
