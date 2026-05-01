@@ -7,7 +7,7 @@
 //!   single-file; DF multipart emission is not modeled
 //!   ([`delta_kernel::plans::state_machines::df::checkpoint_write`]).
 //! - **Raw parquet byte identity**: writers may choose different row-group splits or compression;
-//!   parity asserts decoded Arrow batches (and row-count telemetry), not file hashes.
+//!   parity asserts decoded Arrow batches, not file hashes.
 
 use std::fs;
 use std::path::Path;
@@ -23,10 +23,8 @@ use delta_kernel::expressions::Scalar;
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::plans::ir::nodes::{RelationHandle, WriteSink};
 use delta_kernel::plans::ir::DeclarativePlanNode;
-use delta_kernel::plans::kdf::{ConsumerKdf, KdfOutput};
 use delta_kernel::plans::state_machines::df::{
-    checkpoint_classic_parquet_write_plan, commit_action_emit_sm, commit_action_envelopes_literal,
-    prepare_classic_checkpoint_parquet_materialization, CommitEnvelopeCollector,
+    checkpoint_classic_parquet_write_plan, prepare_classic_checkpoint_parquet_materialization,
 };
 use delta_kernel::plans::state_machines::framework::phase_operation::{
     PhaseOperation, SchemaQueryNode,
@@ -37,7 +35,7 @@ use delta_kernel::plans::state_machines::fsr::{
 };
 use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
 use delta_kernel::{Engine as KernelEngine, EngineData, EvaluationHandler, Snapshot};
-use delta_kernel_datafusion_engine::{DataFusionExecutor, DriveOpts};
+use delta_kernel_datafusion_engine::DataFusionExecutor;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::json;
 use tempfile::tempdir;
@@ -167,18 +165,6 @@ fn kernel_literal_record_batch(schema: SchemaRef, rows: &[Vec<Scalar>]) -> Recor
         .expect("record batch")
 }
 
-fn action_json_batch(lines: &[String]) -> RecordBatch {
-    use delta_kernel::arrow::array::StringArray;
-    use delta_kernel::arrow::datatypes::{DataType as ArrowDT, Field, Schema};
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        "action_json",
-        ArrowDT::Utf8,
-        true,
-    )]));
-    let arr = StringArray::from_iter(lines.iter().map(|s| Some(s.as_str())));
-    RecordBatch::try_new(schema, vec![Arc::new(arr)]).expect("batch")
-}
-
 #[tokio::test]
 async fn parity_fsr_strip_fanout_df_matches_literal_row_count_reference() {
     let strip_schema =
@@ -201,10 +187,7 @@ async fn parity_fsr_strip_fanout_df_matches_literal_row_count_reference() {
             .expect("build SM");
 
     let ex = DataFusionExecutor::try_new().expect("executor");
-    let df_outcome = ex
-        .drive_coroutine_sm(sm, DriveOpts::default())
-        .await
-        .expect("drive");
+    let df_outcome = ex.drive_coroutine_sm(sm).await.expect("drive");
 
     assert_eq!(
         df_outcome, kernel_reference,
@@ -234,17 +217,19 @@ async fn parity_fsr_footer_schema_coroutine_matches_direct_kernel_footer_schema(
 
     let sm = try_build_fsr_footer_schema_sm(url.to_string()).expect("build SM");
     let ex = DataFusionExecutor::try_new().expect("executor");
-    let df_out = ex
-        .drive_coroutine_sm(sm, DriveOpts::default())
-        .await
-        .expect("drive");
+    let df_out = ex.drive_coroutine_sm(sm).await.expect("drive");
 
     let meta = ex
         .engine()
         .storage_handler()
         .head(&url)
         .expect("head parquet");
-    let kernel_footer_schema = ex.read_parquet_footer_schema(&meta).expect("footer schema");
+    let kernel_footer_schema = ex
+        .engine()
+        .parquet_handler()
+        .read_parquet_footer(&meta)
+        .expect("footer schema")
+        .schema;
 
     assert_eq!(
         df_out,
@@ -256,7 +241,7 @@ async fn parity_fsr_footer_schema_coroutine_matches_direct_kernel_footer_schema(
 }
 
 #[tokio::test]
-async fn parity_phase_schema_query_matches_read_parquet_footer_schema_helper() {
+async fn parity_phase_schema_query_matches_kernel_parquet_footer_read() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("chunk.parquet");
     use delta_kernel::arrow::array::Int64Array;
@@ -277,7 +262,12 @@ async fn parity_phase_schema_query_matches_read_parquet_footer_schema_helper() {
     let executor = DataFusionExecutor::try_new().unwrap();
 
     let meta = executor.engine().storage_handler().head(&url).unwrap();
-    let kernel_direct = executor.read_parquet_footer_schema(&meta).unwrap();
+    let kernel_direct = executor
+        .engine()
+        .parquet_handler()
+        .read_parquet_footer(&meta)
+        .unwrap()
+        .schema;
 
     let node = SchemaQueryNode::new(url.as_str());
     let state = executor
@@ -372,7 +362,7 @@ async fn parity_checkpoint_classic_kernel_parquet_write_matches_df_relation_writ
 }
 
 #[tokio::test]
-async fn parity_insert_kernel_parquet_handler_write_matches_df_insert_sm_rows() {
+async fn parity_insert_kernel_parquet_handler_write_matches_df_insert_sm() {
     let dir = tempdir().unwrap();
     let engine: Arc<dyn KernelEngine> =
         Arc::new(DefaultEngineBuilder::new(Arc::new(LocalFileSystem::new())).build());
@@ -403,8 +393,7 @@ async fn parity_insert_kernel_parquet_handler_write_matches_df_insert_sm_rows() 
         .into_write(WriteSink::parquet(df_url));
 
     let ex = DataFusionExecutor::try_new_with_engine(Arc::clone(&engine)).unwrap();
-    let written = ex.drive_insert_write_sm(plan).await.unwrap();
-    assert_eq!(written, rows.len() as u64);
+    ex.drive_insert_write_sm(plan).await.unwrap();
 
     let kernel_batches = read_all_parquet_batches(&kernel_path);
     let df_batches = read_all_parquet_batches(&df_path);
@@ -416,42 +405,3 @@ async fn parity_insert_kernel_parquet_handler_write_matches_df_insert_sm_rows() 
     );
 }
 
-#[tokio::test]
-async fn parity_commit_emit_df_sm_matches_direct_commit_envelope_collector() {
-    let lines: Vec<String> = vec![
-        r#"{"commitInfo":{"operation":"WRITE","engineInfo":"kernel-test"}}"#.into(),
-        r#"{"add":{"path":"part-00000.parquet","partitionValues":{},"size":42}}"#.into(),
-    ];
-
-    let batch = action_json_batch(&lines);
-    let mut collector = CommitEnvelopeCollector::default();
-    collector
-        .apply(&ArrowEngineData::new(batch))
-        .expect("collector apply");
-    let kernel_reference =
-        CommitEnvelopeCollector::into_output(vec![collector]).expect("into_output");
-
-    let (plan, extractor) =
-        commit_action_envelopes_literal(lines.clone()).expect("literal envelopes");
-    let sm = commit_action_emit_sm(plan, extractor).expect("SM");
-    let df_lines = DataFusionExecutor::try_new()
-        .expect("executor")
-        .drive_coroutine_sm(sm, DriveOpts::default())
-        .await
-        .expect("drive");
-
-    assert_eq!(
-        df_lines, kernel_reference,
-        "commit_action_emit SM (DF Plans phase) matches CommitEnvelopeCollector applied in-process \
-         (kernel reference)"
-    );
-
-    assert!(serde_json::from_str::<serde_json::Value>(&df_lines[0])
-        .expect("json")
-        .get("commitInfo")
-        .is_some());
-    assert!(serde_json::from_str::<serde_json::Value>(&df_lines[1])
-        .expect("json")
-        .get("add")
-        .is_some());
-}

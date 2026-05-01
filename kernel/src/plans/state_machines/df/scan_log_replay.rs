@@ -4,10 +4,6 @@
 //! [`CoroutineSM`](crate::plans::state_machines::framework::coroutine::driver::CoroutineSM)
 //! that runs the JSON-commit dedup plan plus any checkpoint feeders in a single
 //! [`PhaseOperation::Plans`] call.
-//!
-//! [`ScanLogReplayAntiJoinSM`] is a deprecated thin wrapper implementing
-//! [`StateMachine`](crate::plans::state_machines::framework::state_machine::StateMachine); prefer
-//! [`scan_log_replay_sm`] for new code.
 
 use std::sync::Arc;
 
@@ -20,10 +16,7 @@ use crate::plans::ir::nodes::{
 use crate::plans::ir::{DeclarativePlanNode, Plan};
 use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
 use crate::plans::state_machines::framework::coroutine::phase::{Phase, PhaseCo};
-use crate::plans::state_machines::framework::engine_error::EngineError;
 use crate::plans::state_machines::framework::phase_operation::PhaseOperation;
-use crate::plans::state_machines::framework::phase_state::PhaseState;
-use crate::plans::state_machines::framework::state_machine::{AdvanceResult, StateMachine};
 use crate::scan::scan_row_schema;
 use crate::schema::{DataType, SchemaRef, StructField, StructType};
 use crate::{bail_delta, delta_error, FileMeta, Snapshot};
@@ -52,49 +45,6 @@ pub fn scan_log_replay_sm(snapshot: Arc<Snapshot>) -> Result<CoroutineSM<()>, De
         let plans = plans;
         async move { run_phase(co, plans).await }
     })
-}
-
-/// Deprecated — use [`scan_log_replay_sm`] and drive the returned [`CoroutineSM`] directly.
-#[deprecated(
-    note = "Use `scan_log_replay_sm` instead; this type is a transitional StateMachine wrapper \
-            around the same CoroutineSM and will be removed after callers migrate."
-)]
-pub struct ScanLogReplayAntiJoinSM {
-    inner: CoroutineSM<()>,
-}
-
-#[allow(deprecated)]
-impl ScanLogReplayAntiJoinSM {
-    /// Deprecated — use [`scan_log_replay_sm`].
-    #[deprecated(
-        note = "Use `scan_log_replay_sm` instead; this wrapper exists only for transitional \
-                StateMachine callers."
-    )]
-    pub fn new(snapshot: Arc<Snapshot>) -> Result<Self, DeltaError> {
-        Ok(Self {
-            inner: scan_log_replay_sm(snapshot)?,
-        })
-    }
-}
-
-#[allow(deprecated)]
-impl StateMachine for ScanLogReplayAntiJoinSM {
-    type Result = ();
-
-    fn get_operation(&mut self) -> Result<PhaseOperation, DeltaError> {
-        self.inner.get_operation()
-    }
-
-    fn advance(
-        &mut self,
-        result: Result<PhaseState, EngineError>,
-    ) -> Result<AdvanceResult<Self::Result>, DeltaError> {
-        self.inner.advance(result)
-    }
-
-    fn phase_name(&self) -> &'static str {
-        self.inner.phase_name()
-    }
 }
 
 fn add_remove_read_schema() -> Result<SchemaRef, DeltaError> {
@@ -344,14 +294,5 @@ mod tests {
             ),
             other => panic!("expected Plans, got {other:?}"),
         }
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn deprecated_wrapper_matches_inner_phase_name_initially() {
-        let (_engine, snapshot, _tmp) = load_test_table("app-txn-no-checkpoint").unwrap();
-        let direct = scan_log_replay_sm(snapshot.clone()).unwrap();
-        let wrapped = ScanLogReplayAntiJoinSM::new(snapshot).unwrap();
-        assert_eq!(wrapped.phase_name(), direct.phase_name());
     }
 }

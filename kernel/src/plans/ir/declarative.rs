@@ -437,15 +437,6 @@ pub struct Extractor<O> {
 }
 
 impl<O: Send + 'static> Extractor<O> {
-    /// Assemble an [`Extractor`] from a token + extract closure.
-    ///
-    /// Used by helpers that pair non-KDF sinks (for example
-    /// [`SinkType::Write`]) with executor-submitted telemetry keyed by
-    /// `token`. The KDF-typical path is [`DeclarativePlanNode::consume`].
-    pub(crate) fn new(token: KdfStateToken, extract: ExtractFn<O>) -> Self {
-        Self { token, extract }
-    }
-
     /// Token identifying the entries this extractor will pull from a [`PhaseState`].
     pub fn token(&self) -> &KdfStateToken {
         &self.token

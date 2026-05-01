@@ -25,7 +25,6 @@ use crate::engine::arrow_data::EngineDataArrowExt;
 use crate::plans::errors::DeltaError;
 use crate::plans::ir::nodes::{RelationHandle, WriteSink};
 use crate::plans::ir::{DeclarativePlanNode, Plan};
-use crate::plans::kdf::KdfStateToken;
 use crate::plans::state_machines::df::insert::insert_write_sm;
 use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
 use crate::{DeltaResult, Engine};
@@ -64,12 +63,10 @@ pub fn checkpoint_classic_parquet_write_plan(handle: RelationHandle, destination
     DeclarativePlanNode::Relation(handle).into_write(WriteSink::parquet(destination))
 }
 
-/// Single-phase SM: write a classic parquet checkpoint plan with row-count telemetry.
+/// Single-phase SM: write a classic parquet checkpoint plan.
 ///
-/// Drivers must pass the returned [`KdfStateToken`] through their drive options when draining
-/// write sinks (same contract as [`super::insert_write_sm`]).
-pub fn checkpoint_classic_parquet_write_sm(
-    plan: Plan,
-) -> Result<(CoroutineSM<u64>, KdfStateToken), DeltaError> {
+/// Thin alias over [`super::insert_write_sm`] — both reduce to "drive one
+/// [`SinkType::Write`](crate::plans::ir::nodes::SinkType::Write) plan to completion."
+pub fn checkpoint_classic_parquet_write_sm(plan: Plan) -> Result<CoroutineSM<()>, DeltaError> {
     insert_write_sm(plan)
 }

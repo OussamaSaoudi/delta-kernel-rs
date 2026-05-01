@@ -7,41 +7,34 @@
 //! through a [`KernelConsumeByKdfExec`](crate::exec::KernelConsumeByKdfExec); harvest the finalized
 //! handle with [`DataFusionExecutor::take_last_kdf_finished`] after fully draining the stream.
 //! [`SinkType::Write`](delta_kernel::plans::ir::nodes::SinkType::Write) lowers to DataFusion file
-//! sinks (`ParquetSink` / `JsonSink`) behind `DataSinkExec` in single-file mode; draining the plan
-//! yields one batch with a `count` column (rows written). Bridging Parquet footer statistics into
-//! Delta-style file metadata is not implemented yet.
+//! sinks (`ParquetSink` / `JsonSink`) behind `DataSinkExec` in single-file mode. Bridging Parquet
+//! footer statistics into Delta-style `Add.stats` (`numRecords`, min/max, ...) is not implemented
+//! yet.
 //! [`SinkType::PartitionedWrite`](delta_kernel::plans::ir::nodes::SinkType::PartitionedWrite)
 //! (`KernelPartitionedWriteExec`) writes Hive-style partitions under a `file://` URL and yields no
 //! output batches once drained.
 //! [`SinkType::Load`](delta_kernel::plans::ir::nodes::SinkType::Load) materializes per-row parquet
 //! or JSON reads via [`KernelLoadSinkExec`](crate::exec::KernelLoadSinkExec) and the kernel's
 //! parquet/json handlers.
-//! Metadata-only parquet footer reads (SchemaQuery-shaped) use
-//! [`DataFusionExecutor::read_parquet_footer_schema`].
 //!
 //! Phase 3.2 submits [`SinkType::ConsumeByKdf`] finalized handles into [`PhaseState`] during
-//! [`Self::execute_phase_operation_with_drive_opts`] using
-//! [`crate::compile::CompileContext::phase_state`]. Phase 3.3 wires classic checkpoint
-//! parquet materialization via [`Self::checkpoint_write_classic_parquet_and_finalize`] (kernel
+//! [`Self::execute_phase_operation`] using [`crate::compile::CompileContext::phase_state`].
+//! Phase 3.3 wires classic checkpoint parquet materialization via
+//! [`Self::checkpoint_write_classic_parquet_and_finalize`] (kernel
 //! [`delta_kernel::plans::state_machines::df::checkpoint_write`] plans + SM phase
-//! `checkpoint_parquet_write`). Phase 3.4 extends [`DriveOpts`] so [`SinkType::Write`] sinks emit
-//! synthetic [`delta_kernel::plans::state_machines::df::WriteRowCount`] under a caller-supplied
-//! token ([`Self::drive_insert_write_sm`]).
+//! `checkpoint_parquet_write`).
 
 use std::sync::{Arc, Mutex};
 
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use datafusion_physical_plan::ExecutionPlan;
-use delta_kernel::arrow::array::AsArray;
-use delta_kernel::arrow::datatypes::UInt64Type;
 use delta_kernel::arrow::record_batch::RecordBatch;
 use delta_kernel::engine::default::DefaultEngineBuilder;
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::plans::errors::DeltaError;
 use delta_kernel::plans::ir::nodes::SinkType;
 use delta_kernel::plans::ir::Plan;
-use delta_kernel::plans::kdf::{FinishedHandle, KdfStateToken, TraceContext};
-use delta_kernel::plans::state_machines::df::WriteRowCount;
+use delta_kernel::plans::kdf::FinishedHandle;
 use delta_kernel::plans::state_machines::framework::coroutine::driver::CoroutineSM;
 use delta_kernel::plans::state_machines::framework::engine_error::{EngineError, EngineErrorKind};
 use delta_kernel::plans::state_machines::framework::phase_operation::{
@@ -49,8 +42,7 @@ use delta_kernel::plans::state_machines::framework::phase_operation::{
 };
 use delta_kernel::plans::state_machines::framework::phase_state::PhaseState;
 use delta_kernel::plans::state_machines::framework::state_machine::{AdvanceResult, StateMachine};
-use delta_kernel::schema::SchemaRef as KernelSchemaRef;
-use delta_kernel::{Engine, Error as KernelError, FileMeta};
+use delta_kernel::{Engine, Error as KernelError};
 use futures::TryStreamExt;
 use url::Url;
 
@@ -97,34 +89,6 @@ fn execute_schema_query_phase(
     Ok(state)
 }
 
-/// Options for [`DataFusionExecutor::drive_coroutine_sm`].
-#[derive(Clone, Debug, Default)]
-pub struct DriveOpts {
-    /// When set, draining a [`SinkType::Write`] plan submits [`WriteRowCount`] keyed by this
-    /// token. The matching [`Extractor`](delta_kernel::plans::ir::Extractor) on the SM side will
-    /// pull the row count back out of the resulting [`PhaseState`].
-    pub insert_write_telemetry_token: Option<KdfStateToken>,
-}
-
-fn sum_write_sink_row_counts(batches: &[RecordBatch]) -> Result<u64, EngineError> {
-    let mut sum = 0u64;
-    for b in batches {
-        if b.num_rows() == 0 {
-            continue;
-        }
-        let col = b.column(0);
-        let arr = col.as_primitive_opt::<UInt64Type>().ok_or_else(|| {
-            EngineError::internal(delta_kernel::Error::generic(
-                "write sink summary batch: expected UInt64 row counts in column 0",
-            ))
-        })?;
-        for i in 0..b.num_rows() {
-            sum = sum.saturating_add(arr.value(i));
-        }
-    }
-    Ok(sum)
-}
-
 /// Minimal executor: holds a [`TaskContext`] for [`ExecutionPlan::execute`] calls.
 ///
 /// Phase 1.1 does not yet wire a full [`SessionContext`](https://docs.rs/datafusion/latest/datafusion/execution/context/struct.SessionContext.html);
@@ -143,8 +107,8 @@ impl DataFusionExecutor {
         Self::try_new_with_engine(default_kernel_engine())
     }
 
-    /// Builds an executor that uses the provided kernel [`Engine`] for IO helpers such as
-    /// [`Self::read_parquet_footer_schema`].
+    /// Builds an executor that uses the provided kernel [`Engine`] for IO helpers (object-store,
+    /// parquet handler, etc).
     pub fn try_new_with_engine(engine: Arc<dyn Engine>) -> Result<Self, DeltaError> {
         let relation_registry = Arc::new(RelationBatchRegistry::new());
         let kdf_harvest_slot = Arc::new(Mutex::new(None));
@@ -168,48 +132,22 @@ impl DataFusionExecutor {
         )
     }
 
-    /// Equivalent to [`Self::execute_phase_operation_with_drive_opts`] with default [`DriveOpts`].
+    /// Drain a [`PhaseOperation`] against the executor and return the resulting [`PhaseState`].
     pub async fn execute_phase_operation(
         &self,
         op: PhaseOperation,
     ) -> Result<PhaseState, EngineError> {
-        self.execute_phase_operation_with_drive_opts(op, &DriveOpts::default())
-            .await
-    }
-
-    /// Like [`Self::execute_phase_operation`], but [`DriveOpts::insert_write_telemetry_token`]
-    /// enables synthetic [`WriteRowCount`] payloads for [`SinkType::Write`] plans (Phase 3.4
-    /// insert SM).
-    pub async fn execute_phase_operation_with_drive_opts(
-        &self,
-        op: PhaseOperation,
-        opts: &DriveOpts,
-    ) -> Result<PhaseState, EngineError> {
-        let (state, _) = self
-            .execute_phase_operation_with_results_capture(op, opts)
-            .await?;
+        let (state, _) = self.execute_phase_operation_with_results_capture(op).await?;
         Ok(state)
     }
 
-    /// Same draining semantics as [`Self::execute_phase_operation_with_drive_opts`], plus optional
-    /// capture of batches produced by the **last** [`SinkType::Results`] plan in the
-    /// [`PhaseOperation::Plans`] slice (when present).
-    ///
-    /// Intended for integration tests and diagnostics that need row-level verification without
-    /// changing [`CoroutineSM`] harness contracts.
-    pub async fn execute_phase_operation_with_results_batches(
-        &self,
-        op: PhaseOperation,
-        opts: &DriveOpts,
-    ) -> Result<(PhaseState, Option<Vec<RecordBatch>>), EngineError> {
-        self.execute_phase_operation_with_results_capture(op, opts)
-            .await
-    }
-
+    /// Same draining semantics as [`Self::execute_phase_operation`], plus capture of the batches
+    /// produced by the **last** [`SinkType::Results`] plan in the [`PhaseOperation::Plans`] slice
+    /// (when present). Used by in-crate tests that need to verify row content of an SM-driven
+    /// `Results` sink without rewriting the SM's `Output` contract.
     async fn execute_phase_operation_with_results_capture(
         &self,
         op: PhaseOperation,
-        opts: &DriveOpts,
     ) -> Result<(PhaseState, Option<Vec<RecordBatch>>), EngineError> {
         self.clear_kdf_harvest_slot();
 
@@ -233,20 +171,6 @@ impl DataFusionExecutor {
                         .await
                         .map_err(|e| EngineError::internal(datafusion_err_to_delta(e)))?;
 
-                    if let SinkType::Write(_) = &plan.sink.sink_type {
-                        if let Some(tok) = opts.insert_write_telemetry_token.clone() {
-                            let n = sum_write_sink_row_counts(&batches)?;
-                            state.submit_kdf_handle(FinishedHandle {
-                                token: tok,
-                                ctx: TraceContext::new(
-                                    "delta-kernel-datafusion-engine",
-                                    "insert_write",
-                                ),
-                                partition: 0,
-                                erased: Box::new(WriteRowCount(n)),
-                            });
-                        }
-                    }
                     if matches!(plan.sink.sink_type, SinkType::Results) {
                         last_results_batches = Some(batches);
                     }
@@ -272,13 +196,10 @@ impl DataFusionExecutor {
     pub async fn drive_coroutine_sm<R: Send + 'static>(
         &self,
         mut sm: CoroutineSM<R>,
-        opts: DriveOpts,
     ) -> Result<R, DeltaError> {
         loop {
             let op = sm.get_operation()?;
-            let phase_result = self
-                .execute_phase_operation_with_drive_opts(op, &opts)
-                .await;
+            let phase_result = self.execute_phase_operation(op).await;
             match sm.advance(phase_result)? {
                 AdvanceResult::Continue => {}
                 AdvanceResult::Done(v) => return Ok(v),
@@ -286,36 +207,23 @@ impl DataFusionExecutor {
         }
     }
 
-    /// Phase 3.4 helper — drives
-    /// [`delta_kernel::plans::state_machines::df::insert_write_sm`] with
-    /// [`DriveOpts::insert_write_telemetry_token`] set to the SM's matching token.
-    pub async fn drive_insert_write_sm(&self, plan: Plan) -> Result<u64, DeltaError> {
-        let (sm, token) = delta_kernel::plans::state_machines::df::insert_write_sm(plan)?;
-        self.drive_coroutine_sm(
-            sm,
-            DriveOpts {
-                insert_write_telemetry_token: Some(token),
-            },
-        )
-        .await
+    /// Phase 3.4 helper — drive
+    /// [`delta_kernel::plans::state_machines::df::insert_write_sm`] to completion.
+    pub async fn drive_insert_write_sm(&self, plan: Plan) -> Result<(), DeltaError> {
+        let sm = delta_kernel::plans::state_machines::df::insert_write_sm(plan)?;
+        self.drive_coroutine_sm(sm).await
     }
 
-    /// Phase 3.3 helper — drives
-    /// [`delta_kernel::plans::state_machines::df::checkpoint_classic_parquet_write_sm`] with
-    /// the matching write-row telemetry token.
+    /// Phase 3.3 helper — drive
+    /// [`delta_kernel::plans::state_machines::df::checkpoint_classic_parquet_write_sm`] to
+    /// completion.
     pub async fn drive_checkpoint_classic_parquet_write_sm(
         &self,
         plan: Plan,
-    ) -> Result<u64, DeltaError> {
-        let (sm, token) =
+    ) -> Result<(), DeltaError> {
+        let sm =
             delta_kernel::plans::state_machines::df::checkpoint_classic_parquet_write_sm(plan)?;
-        self.drive_coroutine_sm(
-            sm,
-            DriveOpts {
-                insert_write_telemetry_token: Some(token),
-            },
-        )
-        .await
+        self.drive_coroutine_sm(sm).await
     }
 
     /// Classic single-file checkpoint parquet via declarative [`Plan`] plus `_last_checkpoint`
@@ -342,7 +250,7 @@ impl DataFusionExecutor {
                 .map_err(|e| crate::error::internal_error(e.to_string()))?;
         self.relation_registry.register(handle.id, batches);
         let plan = checkpoint_classic_parquet_write_plan(handle, dest.clone());
-        let _written_rows = self.drive_checkpoint_classic_parquet_write_sm(plan).await?;
+        self.drive_checkpoint_classic_parquet_write_sm(plan).await?;
         let meta = engine
             .storage_handler()
             .head(&dest)
@@ -379,23 +287,6 @@ impl DataFusionExecutor {
             .take()
     }
 
-    /// Read a parquet footer using
-    /// [`ParquetHandler::read_parquet_footer`](delta_kernel::ParquetHandler::read_parquet_footer).
-    ///
-    /// Matches the intent of
-    /// [`PhaseOperation::SchemaQuery`](delta_kernel::plans::state_machines::framework::phase_operation::PhaseOperation::SchemaQuery):
-    /// metadata-only schema extraction without scanning rows.
-    pub fn read_parquet_footer_schema(
-        &self,
-        file: &FileMeta,
-    ) -> Result<KernelSchemaRef, DeltaError> {
-        self.engine
-            .parquet_handler()
-            .read_parquet_footer(file)
-            .map(|footer| footer.schema)
-            .map_err(|e| crate::error::internal_error(e.to_string()))
-    }
-
     /// Convenience helper for tests / tiny literals.
     pub async fn execute_plan_collect(
         &self,
@@ -405,15 +296,109 @@ impl DataFusionExecutor {
         stream.try_collect().await.lift()
     }
 
-    pub fn task_context(&self) -> &Arc<TaskContext> {
-        &self.task_ctx
-    }
-
     pub fn relation_batch_registry(&self) -> &Arc<RelationBatchRegistry> {
         &self.relation_registry
     }
 
     pub fn engine(&self) -> &Arc<dyn Engine> {
         &self.engine
+    }
+}
+
+#[cfg(test)]
+mod scan_log_replay_tests {
+    //! End-to-end check that the SM-driven scan rows match fixture paths. Lives inside `src/` so it
+    //! can use the private [`DataFusionExecutor::execute_phase_operation_with_results_capture`]
+    //! helper to inspect the last `Results` sink batches without exposing batch capture as
+    //! public API.
+
+    use std::path::Path;
+
+    use delta_kernel::arrow::array::{Array, AsArray};
+    use delta_kernel::arrow::datatypes::DataType as ArrowPhysicalType;
+    use delta_kernel::engine::default::DefaultEngineBuilder;
+    use delta_kernel::object_store::local::LocalFileSystem;
+    use delta_kernel::plans::state_machines::df::scan_log_replay_sm;
+    use delta_kernel::plans::state_machines::framework::state_machine::StateMachine;
+    use delta_kernel::scan::scan_row_schema;
+    use delta_kernel::Snapshot;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn scan_log_replay_sm_no_checkpoint_scan_rows_match_fixture_paths() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let table_root = manifest_dir.join("../kernel/tests/data/app-txn-no-checkpoint");
+        let table_root =
+            std::fs::canonicalize(table_root).expect("canonicalize kernel fixture path");
+
+        let url = Url::from_directory_path(&table_root).expect("table URL");
+        let engine = Arc::new(DefaultEngineBuilder::new(Arc::new(LocalFileSystem::new())).build());
+        let snapshot = Snapshot::builder_for(url.as_str())
+            .build(engine.as_ref())
+            .expect("snapshot");
+
+        let mut sm = scan_log_replay_sm(snapshot).expect("build SM");
+        let exec = DataFusionExecutor::try_new_with_engine(engine).expect("executor");
+
+        let mut last_results_batches: Vec<RecordBatch> = Vec::new();
+
+        loop {
+            let op = sm.get_operation().expect("phase op");
+            let (accum, batches_opt) = exec
+                .execute_phase_operation_with_results_capture(op)
+                .await
+                .expect("phase drain");
+
+            if let Some(bs) = batches_opt {
+                last_results_batches = bs;
+            }
+
+            match sm.advance(Ok(accum)).expect("advance") {
+                AdvanceResult::Continue => {}
+                AdvanceResult::Done(()) => break,
+            }
+        }
+
+        let batch = last_results_batches
+            .iter()
+            .find(|b| b.num_rows() > 0)
+            .expect("non-empty scan rows");
+
+        let scan_schema = scan_row_schema();
+        assert_eq!(
+            batch.num_columns(),
+            scan_schema.fields().len(),
+            "scan-row projection column count must match scan_row_schema"
+        );
+
+        let path_idx = batch
+            .schema()
+            .index_of("path")
+            .expect("'path' column from scan_row_schema");
+        let paths = batch.column(path_idx).as_string::<i32>();
+        let collected: Vec<String> = (0..paths.len())
+            .map(|i| paths.value(i).to_string())
+            .collect();
+        assert!(
+            collected.iter().any(|p| p.contains("modified=2021-02-01")),
+            "expected fixture add path partition 2021-02-01 in {collected:?}",
+        );
+        assert!(
+            collected.iter().any(|p| p.contains("modified=2021-02-02")),
+            "expected fixture add path partition 2021-02-02 in {collected:?}",
+        );
+
+        let fcv_idx = batch
+            .schema()
+            .index_of("fileConstantValues")
+            .expect("nested fileConstantValues column");
+        assert!(
+            matches!(
+                batch.column(fcv_idx).data_type(),
+                ArrowPhysicalType::Struct(_)
+            ),
+            "fileConstantValues must be a struct column in the DataFusion batch"
+        );
     }
 }

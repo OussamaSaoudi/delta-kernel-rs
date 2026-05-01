@@ -8,7 +8,7 @@ use delta_kernel::engine::default::DefaultEngineBuilder;
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::plans::state_machines::fsr::FsrStripThenFanoutOutcome;
 use delta_kernel::{Engine as KernelEngine, Snapshot};
-use delta_kernel_datafusion_engine::{DataFusionExecutor, DriveOpts};
+use delta_kernel_datafusion_engine::DataFusionExecutor;
 use url::Url;
 
 fn fixture_table(name: &str) -> Url {
@@ -29,10 +29,7 @@ async fn snapshot_full_state_no_checkpoint_two_tail_commits() {
 
     let sm = snapshot.full_state().expect("full_state SM");
     let ex = DataFusionExecutor::try_new_with_engine(Arc::clone(&engine)).expect("executor");
-    let out = ex
-        .drive_coroutine_sm(sm, DriveOpts::default())
-        .await
-        .expect("drive FSR SM");
+    let out = ex.drive_coroutine_sm(sm).await.expect("drive FSR SM");
 
     assert_eq!(
         out,
@@ -55,10 +52,7 @@ async fn snapshot_full_state_checkpoint_with_empty_tail_commits() {
 
     let sm = snapshot.full_state().expect("full_state SM");
     let ex = DataFusionExecutor::try_new_with_engine(Arc::clone(&engine)).expect("executor");
-    let out = ex
-        .drive_coroutine_sm(sm, DriveOpts::default())
-        .await
-        .expect("drive FSR SM");
+    let out = ex.drive_coroutine_sm(sm).await.expect("drive FSR SM");
 
     assert_eq!(
         out,

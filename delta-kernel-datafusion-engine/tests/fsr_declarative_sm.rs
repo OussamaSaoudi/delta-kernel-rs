@@ -17,7 +17,7 @@ use delta_kernel::plans::state_machines::fsr::{
     FsrStripThenFanoutOutcome,
 };
 use delta_kernel::schema::{DataType, StructField, StructType};
-use delta_kernel_datafusion_engine::{DataFusionExecutor, DriveOpts};
+use delta_kernel_datafusion_engine::DataFusionExecutor;
 use parquet::arrow::ArrowWriter;
 use tempfile::tempdir;
 use url::Url;
@@ -42,10 +42,7 @@ async fn fsr_drive_two_phase_row_count_outcome() {
     .expect("build SM");
 
     let ex = DataFusionExecutor::try_new().expect("executor");
-    let out = ex
-        .drive_coroutine_sm(sm, DriveOpts::default())
-        .await
-        .expect("drive to completion");
+    let out = ex.drive_coroutine_sm(sm).await.expect("drive to completion");
 
     assert_eq!(
         out,
@@ -107,10 +104,7 @@ async fn fsr_footer_schema_coroutine_via_schema_query_phase() {
     let sm = try_build_fsr_footer_schema_sm(url.to_string()).expect("build SM");
 
     let ex = DataFusionExecutor::try_new().expect("executor");
-    let out = ex
-        .drive_coroutine_sm(sm, DriveOpts::default())
-        .await
-        .expect("drive");
+    let out = ex.drive_coroutine_sm(sm).await.expect("drive");
 
     assert_eq!(out, FsrFooterSchemaOutcome { column_count: 1 });
 }

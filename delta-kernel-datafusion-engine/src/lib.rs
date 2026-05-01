@@ -21,7 +21,7 @@ pub mod exec;
 pub mod executor;
 
 pub use error::{datafusion_err_to_delta, LiftDeltaErr};
-pub use executor::{DataFusionExecutor, DriveOpts};
+pub use executor::DataFusionExecutor;
 
 #[cfg(test)]
 mod tests {

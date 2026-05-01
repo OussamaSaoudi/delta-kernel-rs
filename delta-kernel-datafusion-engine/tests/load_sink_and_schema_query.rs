@@ -348,7 +348,12 @@ async fn parquet_footer_schema_query_matches_file_footer() {
     let meta = FileMeta::new(url, 0, len);
 
     let executor = DataFusionExecutor::try_new().unwrap();
-    let footer_schema = executor.read_parquet_footer_schema(&meta).unwrap();
+    let footer_schema = executor
+        .engine()
+        .parquet_handler()
+        .read_parquet_footer(&meta)
+        .unwrap()
+        .schema;
 
     assert!(
         footer_schema.fields().any(|f| f.name() == "metric"),

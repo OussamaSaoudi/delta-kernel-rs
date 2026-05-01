@@ -48,12 +48,6 @@ impl TraceContext {
         }
     }
 
-    /// Placeholder context for tests and pre-phase construction. Not for
-    /// production use.
-    #[cfg(test)]
-    pub(crate) fn test_ctx() -> Self {
-        Self::new("test", "test")
-    }
 }
 
 impl std::fmt::Display for TraceContext {
