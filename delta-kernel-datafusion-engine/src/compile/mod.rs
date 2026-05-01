@@ -8,15 +8,17 @@
 
 use std::sync::Arc;
 
+use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::union::UnionExec;
 use delta_kernel::plans::errors::DeltaError;
 use delta_kernel::plans::ir::nodes::{RelationHandle, SinkType};
 use delta_kernel::plans::ir::{DeclarativePlanNode, Plan};
 use delta_kernel::schema::SchemaRef;
 
 use crate::exec::{
-    FileListingExec, KernelFilterExec, KernelProjectExec, LiteralExec, RelationBatchRegistry,
-    RelationRefExec,
+    FileListingExec, KernelFilterExec, KernelProjectExec, LiteralExec, OrderedUnionExec,
+    RelationBatchRegistry, RelationRefExec,
 };
 
 mod scan;
@@ -89,6 +91,28 @@ fn compile_declarative_node(
                 node.output_schema.clone(),
             )?))
         }
+        DeclarativePlanNode::Union { children, node } => {
+            if children.is_empty() {
+                return Err(crate::error::unsupported(
+                    "Union with zero children is not supported yet",
+                ));
+            }
+            let child_plans = children
+                .iter()
+                .map(|child| compile_declarative_node(child, ctx))
+                .collect::<Result<Vec<_>, DeltaError>>()?;
+            if node.ordered {
+                let coalesced = child_plans
+                    .into_iter()
+                    .map(|plan| Arc::new(CoalescePartitionsExec::new(plan)) as Arc<dyn ExecutionPlan>)
+                    .collect::<Vec<_>>();
+                Ok(Arc::new(OrderedUnionExec::try_new(coalesced).map_err(crate::error::datafusion_err_to_delta)?))
+            } else {
+                let unioned =
+                    UnionExec::try_new(child_plans).map_err(crate::error::datafusion_err_to_delta)?;
+                Ok(Arc::new(CoalescePartitionsExec::new(unioned)))
+            }
+        }
         other => Err(crate::error::unsupported(format!(
             "DataFusion scaffold does not yet compile `{}` nodes",
             declarative_node_kind(other)
@@ -102,6 +126,12 @@ fn node_output_schema(node: &DeclarativePlanNode) -> Result<SchemaRef, DeltaErro
         DeclarativePlanNode::Literal(n) => Ok(n.schema.clone()),
         DeclarativePlanNode::Relation(h) => Ok(h.schema.clone()),
         DeclarativePlanNode::Project { node, .. } => Ok(node.output_schema.clone()),
+        DeclarativePlanNode::Union { children, .. } => {
+            let Some(first) = children.first() else {
+                return Err(crate::error::unsupported("Union has no children"));
+            };
+            node_output_schema(first)
+        }
         DeclarativePlanNode::Filter { child, .. } => node_output_schema(child),
         DeclarativePlanNode::FileListing(_) => Err(crate::error::unsupported(
             "FileListing schema inference for Filter/Project is not wired yet",
