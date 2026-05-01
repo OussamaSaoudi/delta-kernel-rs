@@ -13,7 +13,7 @@ use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use delta_kernel::arrow::array::{ArrayRef, RecordBatch, StructArray};
+use delta_kernel::arrow::array::{Array, ArrayRef, NullBufferBuilder, RecordBatch, StructArray};
 use delta_kernel::arrow::datatypes::Field as ArrowField;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
@@ -63,10 +63,32 @@ fn packed_struct_column(
 
     let fields: delta_kernel::arrow::datatypes::Fields = arrow_fields.into();
 
-    // SAFETY: Kernel expression evaluation can yield flattened struct children whose per-field null
-    // masks do not satisfy Arrow's nested NOT NULL constraints once outer struct validity is lost
-    // (same situation as `kernel::engine::arrow_expression::apply_schema`).
-    let struct_arr = unsafe { StructArray::new_unchecked(fields, columns, None) };
+    // Expression evaluators return flattened child columns, which can lose the original parent
+    // struct validity mask. If a NOT NULL child carries nulls, reconstruct a parent validity mask
+    // so those rows become NULL at the struct level instead of violating Arrow invariants.
+    let nulls = if fields
+        .iter()
+        .zip(columns.iter())
+        .any(|(f, c)| !f.is_nullable() && c.null_count() > 0)
+    {
+        let num_rows = columns.first().map(|c| c.len()).unwrap_or(0);
+        let mut nulls = NullBufferBuilder::new(num_rows);
+        for row in 0..num_rows {
+            let has_invalid_non_nullable_child = fields
+                .iter()
+                .zip(columns.iter())
+                .any(|(f, c)| !f.is_nullable() && c.is_null(row));
+            if has_invalid_non_nullable_child {
+                nulls.append_null();
+            } else {
+                nulls.append_non_null();
+            }
+        }
+        nulls.finish()
+    } else {
+        None
+    };
+    let struct_arr = StructArray::new(fields, columns, nulls);
 
     Ok(Arc::new(struct_arr) as ArrayRef)
 }

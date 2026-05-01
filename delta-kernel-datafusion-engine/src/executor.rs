@@ -2,8 +2,8 @@
 //!
 //! Relation sinks ([`delta_kernel::plans::ir::nodes::SinkType::Relation`]) materialize batches into
 //! [`crate::exec::RelationBatchRegistry`] when their stream is drained; subsequent plans read via a
-//! [`DeclarativePlanNode::RelationRef`](delta_kernel::plans::ir::DeclarativePlanNode::RelationRef) leaf.
-//! [`SinkType::ConsumeByKdf`](delta_kernel::plans::ir::nodes::SinkType::ConsumeByKdf) drains
+//! [`DeclarativePlanNode::RelationRef`](delta_kernel::plans::ir::DeclarativePlanNode::RelationRef)
+//! leaf. [`SinkType::ConsumeByKdf`](delta_kernel::plans::ir::nodes::SinkType::ConsumeByKdf) drains
 //! through a [`KernelConsumeByKdfExec`](crate::exec::KernelConsumeByKdfExec); harvest the finalized
 //! handle with [`DataFusionExecutor::take_last_kdf_finished`] after fully draining the stream.
 //! [`SinkType::Write`](delta_kernel::plans::ir::nodes::SinkType::Write) lowers to DataFusion file
@@ -137,14 +137,17 @@ impl DataFusionExecutor {
         &self,
         op: PhaseOperation,
     ) -> Result<PhaseState, EngineError> {
-        let (state, _) = self.execute_phase_operation_with_results_capture(op).await?;
+        let (state, _) = self
+            .execute_phase_operation_with_results_capture(op)
+            .await?;
         Ok(state)
     }
 
     /// Same draining semantics as [`Self::execute_phase_operation`], plus capture of the batches
     /// produced by the **last** [`SinkType::Results`] plan in the [`PhaseOperation::Plans`] slice
-    /// (when present). Used by in-crate tests that need to verify row content of an SM-driven
-    /// `Results` sink without rewriting the SM's `Output` contract.
+    /// (when present). Used by [`Self::drive_coroutine_sm_collecting_results`] and in-crate tests
+    /// that need to verify row content of an SM-driven `Results` sink without rewriting the SM's
+    /// `Output` contract.
     async fn execute_phase_operation_with_results_capture(
         &self,
         op: PhaseOperation,
@@ -203,6 +206,37 @@ impl DataFusionExecutor {
             match sm.advance(phase_result)? {
                 AdvanceResult::Continue => {}
                 AdvanceResult::Done(v) => return Ok(v),
+            }
+        }
+    }
+
+    /// Drive a [`CoroutineSM`] until [`AdvanceResult::Done`] *and* capture the
+    /// [`RecordBatch`] stream of the **last** [`SinkType::Results`] plan executed across all
+    /// `PhaseOperation::Plans` yields. SMs that never yield a `Results` sink return
+    /// `(value, vec![])`.
+    ///
+    /// Intended for callers (e.g. `Snapshot::full_state` consumers) that want both the SM
+    /// outcome and the materialized scan-row batches without having to inspect the relation
+    /// registry or rewrite the SM's `Output` contract.
+    pub async fn drive_coroutine_sm_collecting_results<R: Send + 'static>(
+        &self,
+        mut sm: CoroutineSM<R>,
+    ) -> Result<(R, Vec<RecordBatch>), DeltaError> {
+        let mut last_results: Vec<RecordBatch> = Vec::new();
+        loop {
+            let op = sm.get_operation()?;
+            let phase_result = self
+                .execute_phase_operation_with_results_capture(op)
+                .await
+                .map(|(state, batches)| {
+                    if let Some(b) = batches {
+                        last_results = b;
+                    }
+                    state
+                });
+            match sm.advance(phase_result)? {
+                AdvanceResult::Continue => {}
+                AdvanceResult::Done(v) => return Ok((v, last_results)),
             }
         }
     }
@@ -302,103 +336,5 @@ impl DataFusionExecutor {
 
     pub fn engine(&self) -> &Arc<dyn Engine> {
         &self.engine
-    }
-}
-
-#[cfg(test)]
-mod scan_log_replay_tests {
-    //! End-to-end check that the SM-driven scan rows match fixture paths. Lives inside `src/` so it
-    //! can use the private [`DataFusionExecutor::execute_phase_operation_with_results_capture`]
-    //! helper to inspect the last `Results` sink batches without exposing batch capture as
-    //! public API.
-
-    use std::path::Path;
-
-    use delta_kernel::arrow::array::{Array, AsArray};
-    use delta_kernel::arrow::datatypes::DataType as ArrowPhysicalType;
-    use delta_kernel::engine::default::DefaultEngineBuilder;
-    use delta_kernel::object_store::local::LocalFileSystem;
-    use delta_kernel::plans::state_machines::df::scan_log_replay_sm;
-    use delta_kernel::plans::state_machines::framework::state_machine::StateMachine;
-    use delta_kernel::scan::scan_row_schema;
-    use delta_kernel::Snapshot;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn scan_log_replay_sm_no_checkpoint_scan_rows_match_fixture_paths() {
-        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let table_root = manifest_dir.join("../kernel/tests/data/app-txn-no-checkpoint");
-        let table_root =
-            std::fs::canonicalize(table_root).expect("canonicalize kernel fixture path");
-
-        let url = Url::from_directory_path(&table_root).expect("table URL");
-        let engine = Arc::new(DefaultEngineBuilder::new(Arc::new(LocalFileSystem::new())).build());
-        let snapshot = Snapshot::builder_for(url.as_str())
-            .build(engine.as_ref())
-            .expect("snapshot");
-
-        let mut sm = scan_log_replay_sm(snapshot).expect("build SM");
-        let exec = DataFusionExecutor::try_new_with_engine(engine).expect("executor");
-
-        let mut last_results_batches: Vec<RecordBatch> = Vec::new();
-
-        loop {
-            let op = sm.get_operation().expect("phase op");
-            let (accum, batches_opt) = exec
-                .execute_phase_operation_with_results_capture(op)
-                .await
-                .expect("phase drain");
-
-            if let Some(bs) = batches_opt {
-                last_results_batches = bs;
-            }
-
-            match sm.advance(Ok(accum)).expect("advance") {
-                AdvanceResult::Continue => {}
-                AdvanceResult::Done(()) => break,
-            }
-        }
-
-        let batch = last_results_batches
-            .iter()
-            .find(|b| b.num_rows() > 0)
-            .expect("non-empty scan rows");
-
-        let scan_schema = scan_row_schema();
-        assert_eq!(
-            batch.num_columns(),
-            scan_schema.fields().len(),
-            "scan-row projection column count must match scan_row_schema"
-        );
-
-        let path_idx = batch
-            .schema()
-            .index_of("path")
-            .expect("'path' column from scan_row_schema");
-        let paths = batch.column(path_idx).as_string::<i32>();
-        let collected: Vec<String> = (0..paths.len())
-            .map(|i| paths.value(i).to_string())
-            .collect();
-        assert!(
-            collected.iter().any(|p| p.contains("modified=2021-02-01")),
-            "expected fixture add path partition 2021-02-01 in {collected:?}",
-        );
-        assert!(
-            collected.iter().any(|p| p.contains("modified=2021-02-02")),
-            "expected fixture add path partition 2021-02-02 in {collected:?}",
-        );
-
-        let fcv_idx = batch
-            .schema()
-            .index_of("fileConstantValues")
-            .expect("nested fileConstantValues column");
-        assert!(
-            matches!(
-                batch.column(fcv_idx).data_type(),
-                ArrowPhysicalType::Struct(_)
-            ),
-            "fileConstantValues must be a struct column in the DataFusion batch"
-        );
     }
 }

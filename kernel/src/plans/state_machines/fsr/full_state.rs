@@ -654,15 +654,17 @@ fn build_commit_dedup_plan(
         .filter(Arc::new(fsr_row_has_identity_predicate().into()))
         .project(project_with_key_and_version, with_key_and_version_schema);
 
-    let windowed = projected.window(
-        vec![WindowFunction {
-            function_name: "row_number".into(),
-            args: vec![],
-            output_col: "__kernel_rn".into(),
-        }],
-        vec![Arc::new(Expression::column([FSR_JOIN_KEY_COL]))],
-        vec![OrderingSpec::desc(ColumnName::new(["version"]))],
-    );
+    let windowed = projected
+        .window(
+            vec![WindowFunction {
+                function_name: "row_number".into(),
+                args: vec![],
+                output_col: "__kernel_rn".into(),
+            }],
+            vec![Arc::new(Expression::column([FSR_JOIN_KEY_COL]))],
+            vec![OrderingSpec::desc(ColumnName::new(["version"]))],
+        )
+        .map_err(|e| e.into_delta_default())?;
 
     let rn_one = Arc::new(
         Predicate::eq(

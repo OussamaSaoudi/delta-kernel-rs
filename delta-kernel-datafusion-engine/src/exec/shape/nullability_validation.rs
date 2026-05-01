@@ -13,7 +13,9 @@ use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use delta_kernel::arrow::array::{Array, ArrayRef, ListArray, MapArray, RecordBatch, StructArray};
+use delta_kernel::arrow::array::{
+    Array, ArrayRef, ListArray, MapArray, NullBufferBuilder, RecordBatch, StructArray,
+};
 use delta_kernel::arrow::datatypes::{DataType, Field, Fields};
 use futures::{Stream, StreamExt};
 
@@ -162,10 +164,33 @@ fn cast_struct_array(array: &ArrayRef, target_fields: &Fields) -> DfResult<Array
         .zip(struct_arr.columns())
         .map(|(f, c)| cast_array_to_field(c, f.as_ref()))
         .collect::<DfResult<Vec<_>>>()?;
+    let needs_parent_mask = target_fields
+        .iter()
+        .zip(new_columns.iter())
+        .any(|(f, c)| !f.is_nullable() && c.null_count() > 0);
+
+    let parent_nulls = if needs_parent_mask {
+        let mut nulls = NullBufferBuilder::new(struct_arr.len());
+        for row in 0..struct_arr.len() {
+            let invalid_non_nullable_child = target_fields
+                .iter()
+                .zip(new_columns.iter())
+                .any(|(f, c)| !f.is_nullable() && c.is_null(row));
+            if invalid_non_nullable_child {
+                nulls.append_null();
+            } else {
+                nulls.append_non_null();
+            }
+        }
+        nulls.finish()
+    } else {
+        struct_arr.nulls().cloned()
+    };
+
     Ok(Arc::new(StructArray::new(
         target_fields.clone(),
         new_columns,
-        struct_arr.nulls().cloned(),
+        parent_nulls,
     )))
 }
 

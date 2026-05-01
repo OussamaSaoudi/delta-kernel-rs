@@ -111,6 +111,92 @@ fn parquet_scan_arrow_schema_and_virtual_columns(
     Ok((Arc::new(Schema::new(fields)), vec![row_field]))
 }
 
+/// Schema used by [`NullabilityValidationExec`] on the scan output stream.
+///
+/// Parquet virtual row-index columns are not part of the kernel [`ScanNode::schema`], but the
+/// decoded batch includes them. The validation layer zips `target_schema` fields to batch columns;
+/// the target must therefore list the row-index field when native Parquet row numbers are enabled.
+fn nullability_target_arrow_schema(
+    node: &ScanNode,
+    target_arrow_schema: Arc<Schema>,
+) -> Arc<Schema> {
+    if node.file_type != FileType::Parquet {
+        return target_arrow_schema;
+    }
+    let Some(name) = node.row_index_column.as_ref() else {
+        return target_arrow_schema;
+    };
+    let row_field =
+        Arc::new(Field::new(name.as_str(), DataType::Int64, false).with_extension_type(RowNumber));
+    let mut fields: Vec<_> = target_arrow_schema.fields().iter().cloned().collect();
+    fields.push(row_field);
+    Arc::new(Schema::new(fields))
+}
+
+/// DataFusion file sources can fail planning when decoded nested field nullability is wider than
+/// the declared scan schema (for example nullable parquet/json children flowing into kernel
+/// protocol NOT NULL children). Scan with a relaxed nested schema, then re-apply target
+/// nullability in [`NullabilityValidationExec`].
+fn relax_nested_nullability_for_scan(schema: &Schema) -> Arc<Schema> {
+    fn relax_field(field: &Arc<Field>, force_nullable: bool) -> Arc<Field> {
+        let relaxed_dt = relax_data_type(field.data_type());
+        Arc::new(
+            Field::new(
+                field.name(),
+                relaxed_dt,
+                if force_nullable {
+                    true
+                } else {
+                    field.is_nullable()
+                },
+            )
+            .with_metadata(field.metadata().clone()),
+        )
+    }
+
+    fn relax_data_type(dt: &DataType) -> DataType {
+        match dt {
+            DataType::Struct(fields) => {
+                let relaxed: Vec<Arc<Field>> =
+                    fields.iter().map(|f| relax_field(f, true)).collect();
+                DataType::Struct(relaxed.into())
+            }
+            DataType::List(inner) => DataType::List(relax_field(inner, true)),
+            DataType::LargeList(inner) => DataType::LargeList(relax_field(inner, true)),
+            DataType::FixedSizeList(inner, n) => {
+                DataType::FixedSizeList(relax_field(inner, true), *n)
+            }
+            DataType::Map(entries, sorted) => {
+                // Keep map key nullability constraints intact; only relax values recursively.
+                let relaxed_entries = match entries.data_type() {
+                    DataType::Struct(entry_fields) if entry_fields.len() == 2 => {
+                        let key = relax_field(&entry_fields[0], false);
+                        let val = relax_field(&entry_fields[1], true);
+                        Arc::new(
+                            Field::new(
+                                entries.name(),
+                                DataType::Struct(vec![key, val].into()),
+                                entries.is_nullable(),
+                            )
+                            .with_metadata(entries.metadata().clone()),
+                        )
+                    }
+                    _ => relax_field(entries, true),
+                };
+                DataType::Map(relaxed_entries, *sorted)
+            }
+            other => other.clone(),
+        }
+    }
+
+    let fields: Vec<Arc<Field>> = schema
+        .fields()
+        .iter()
+        .map(|f| relax_field(f, false))
+        .collect();
+    Arc::new(Schema::new(fields))
+}
+
 fn build_raw_scan(
     node: &ScanNode,
     prepared: PreparedScanFiles,
@@ -199,13 +285,15 @@ fn wrap_scan_extensions(
 fn compile_scan_single_group(
     node: &ScanNode,
     files: &[FileMeta],
-    kernel_arrow_schema: Arc<Schema>,
+    source_arrow_schema: Arc<Schema>,
+    target_arrow_schema: Arc<Schema>,
 ) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
     let (scan_arrow_schema, virtual_cols) =
-        parquet_scan_arrow_schema_and_virtual_columns(node, kernel_arrow_schema)?;
+        parquet_scan_arrow_schema_and_virtual_columns(node, source_arrow_schema)?;
     let prepared = prepare_scan_files(files)?;
     let scan = build_raw_scan(node, prepared, scan_arrow_schema.clone(), virtual_cols)?;
-    wrap_scan_extensions(scan, node, scan_arrow_schema)
+    let validation_target = nullability_target_arrow_schema(node, target_arrow_schema);
+    wrap_scan_extensions(scan, node, validation_target)
 }
 
 /// Convert kernel [`ScanNode`] into DataFusion physical scan.
@@ -232,23 +320,33 @@ fn compile_scan_single_group(
 /// Parquet uses arrow-rs [`RowNumber`] virtual columns decoded with each batch. JSON uses
 /// [`RowIndexExec`].
 pub fn compile_scan(node: &ScanNode) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
-    let arrow_schema: Arc<Schema> = Arc::new(
+    let target_arrow_schema: Arc<Schema> = Arc::new(
         node.schema
             .as_ref()
             .try_into_arrow()
             .map_err(|e| crate::error::plan_compilation(format!("scan schema conversion: {e}")))?,
     );
+    let source_arrow_schema = relax_nested_nullability_for_scan(target_arrow_schema.as_ref());
 
     let sequential_files = node.ordered || node.row_index_column.is_some();
 
     if node.files.len() <= 1 || !sequential_files {
-        return compile_scan_single_group(node, &node.files, arrow_schema);
+        return compile_scan_single_group(
+            node,
+            &node.files,
+            source_arrow_schema,
+            target_arrow_schema,
+        );
     }
 
     let mut children: Vec<Arc<dyn ExecutionPlan>> = Vec::with_capacity(node.files.len());
     for file in &node.files {
-        let branch =
-            compile_scan_single_group(node, std::slice::from_ref(file), arrow_schema.clone())?;
+        let branch = compile_scan_single_group(
+            node,
+            std::slice::from_ref(file),
+            source_arrow_schema.clone(),
+            target_arrow_schema.clone(),
+        )?;
         children.push(Arc::new(CoalescePartitionsExec::new(branch)));
     }
 
