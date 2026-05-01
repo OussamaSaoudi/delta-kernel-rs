@@ -1,4 +1,5 @@
-//! Sink IR types — relation piping, [`ConsumeByKdf`] and file-reader [`LoadSink`].
+//! Sink IR types — relation piping, [`ConsumeByKdf`], file-reader [`LoadSink`], and
+//! file-writer sinks ([`WriteSink`], [`PartitionedWriteSink`]).
 
 use std::sync::Arc;
 
@@ -207,14 +208,64 @@ impl PartialEq for LoadSink {
 
 impl Eq for LoadSink {}
 
+/// On-disk encoding for [`WriteSink`] and [`PartitionedWriteSink`].
+///
+/// This is intentionally separate from read-side [`super::FileType`]: scans
+/// use `Json` for newline-delimited JSON, while writers name the format
+/// `JsonLines` to match the declarative-plan spec vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WriteFileFormat {
+    Parquet,
+    /// One JSON object per line (newline-delimited / NDJSON).
+    JsonLines,
+}
+
+/// Non-partitioned file write sink: the engine materializes the upstream row
+/// stream to a single destination (interpretation of `destination` — file vs
+/// directory prefix — is executor-specific).
+///
+/// This is **IR only** in Phase 0.8: no default in-process executor support.
+/// DataFusion-backed executors interpret `format` and `destination` when
+/// lowering the plan.
+///
+/// # Equality
+///
+/// [`PartialEq`] compares `destination` and `format` structurally. This differs from
+/// [`LoadSink`], which keys equality on the process-unique [`RelationHandle`]
+/// because Load materializes into a named relation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteSink {
+    /// Output location (e.g. `file://` / `s3://` URL). Exact file-naming
+    /// semantics are left to the engine.
+    pub destination: url::Url,
+    pub format: WriteFileFormat,
+}
+
+impl WriteSink {
+    /// Construct a write sink with the given destination and format.
+    pub fn new(destination: url::Url, format: WriteFileFormat) -> Self {
+        Self {
+            destination,
+            format,
+        }
+    }
+
+    /// Shorthand for [`WriteFileFormat::Parquet`].
+    pub fn parquet(destination: url::Url) -> Self {
+        Self::new(destination, WriteFileFormat::Parquet)
+    }
+
+    /// Shorthand for [`WriteFileFormat::JsonLines`].
+    pub fn json_lines(destination: url::Url) -> Self {
+        Self::new(destination, WriteFileFormat::JsonLines)
+    }
+}
+
 /// What the engine does with the terminal row stream.
 ///
-/// This branch ships four sink shapes: `Results` for terminal pipelines that
-/// stream batches back to the caller, `Relation` for piping a plan's output
-/// into another plan in the same `PhaseOperation::Plans(...)`,
-/// `ConsumeByKdf` for draining a stream into a [`ConsumerKdf`] state machine,
-/// and `Load` for the file-reader sink. `Write` / `PartitionedWrite` land
-/// with their stacks.
+/// Sink shapes include: `Results` (stream batches to the caller), `Relation`
+/// (pipe into another plan), `ConsumeByKdf` (drain into a [`ConsumerKdf`]),
+/// `Load` (per-row file read), and `Write` (single-target file write).
 #[derive(Debug, Clone)]
 pub enum SinkType {
     /// Stream every output batch to the caller.
@@ -232,6 +283,8 @@ pub enum SinkType {
     /// File-reader sink — for each upstream row, read a file and materialize
     /// the result under [`LoadSink::output_relation`]. See [`LoadSink`].
     Load(LoadSink),
+    /// Stream rows to files at a single [`WriteSink::destination`]. See [`WriteSink`].
+    Write(WriteSink),
 }
 
 impl PartialEq for SinkType {
@@ -241,6 +294,7 @@ impl PartialEq for SinkType {
             (SinkType::Relation(a), SinkType::Relation(b)) => a == b,
             (SinkType::ConsumeByKdf(a), SinkType::ConsumeByKdf(b)) => a.token == b.token,
             (SinkType::Load(a), SinkType::Load(b)) => a == b,
+            (SinkType::Write(a), SinkType::Write(b)) => a == b,
             _ => false,
         }
     }
@@ -280,6 +334,13 @@ impl SinkNode {
     pub fn load(node: LoadSink) -> Self {
         Self {
             sink_type: SinkType::Load(node),
+        }
+    }
+
+    /// `Write`-sink convenience constructor.
+    pub fn write(node: WriteSink) -> Self {
+        Self {
+            sink_type: SinkType::Write(node),
         }
     }
 }

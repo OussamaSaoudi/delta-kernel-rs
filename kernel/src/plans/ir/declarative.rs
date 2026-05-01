@@ -54,6 +54,8 @@
 //! - [`DeclarativePlanNode::into_load`] — file-reader sink: each upstream
 //!   row describes a file to open and read; optional DV masking via
 //!   [`LoadSink::dv_ref`]. Materializes under a named relation handle.
+//! - [`DeclarativePlanNode::into_write`] — single-destination file write
+//!   sink ([`WriteSink`]); IR-only until a DataFusion-backed executor handles it.
 //! - [`DeclarativePlanNode::consume`] — typed KDF consumer terminal; returns
 //!   a [`Prepared<O>`] whose plan terminates in
 //!   [`SinkType::ConsumeByKdf`](super::nodes::SinkType::ConsumeByKdf).
@@ -73,6 +75,7 @@
 //! [`with_row_index`]: DeclarativePlanNode::with_row_index
 //! [`with_ordered`]: DeclarativePlanNode::with_ordered
 //! [`window`]: DeclarativePlanNode::window
+//! [`WriteSink`]: super::nodes::WriteSink
 
 use std::sync::Arc;
 
@@ -90,7 +93,7 @@ use crate::{DeltaResult, Error, FileMeta};
 ///
 /// Trees are transforms-only: every complete pipeline terminates in a
 /// [`Plan`] via one of the terminal methods (`into_plan`, `results`,
-/// `into_relation`, `consume_by_kdf`) or in a [`Prepared<O>`] via
+/// `into_relation`, `into_load`, `into_write`, `consume_by_kdf`) or in a [`Prepared<O>`] via
 /// [`DeclarativePlanNode::consume`].
 #[derive(Debug, Clone)]
 pub enum DeclarativePlanNode {
@@ -511,6 +514,13 @@ impl DeclarativePlanNode {
     pub fn into_load(self, sink: LoadSink) -> Plan {
         self.into_plan(SinkType::Load(sink))
     }
+
+    /// Terminal: single-target file write ([`WriteSink`]). Engines like DataFusion
+    /// lower this to native write operators; the default in-process executor does
+    /// not execute write sinks yet.
+    pub fn into_write(self, sink: WriteSink) -> Plan {
+        self.into_plan(SinkType::Write(sink))
+    }
 }
 
 // ============================================================================
@@ -609,6 +619,37 @@ mod tests {
     fn union_zero_children_is_empty_struct() {
         let unioned = DeclarativePlanNode::union(Vec::<DeclarativePlanNode>::new()).unwrap();
         assert!(matches!(unioned, DeclarativePlanNode::Union { .. }));
+    }
+
+    #[test]
+    fn write_sink_terminal_emits_write_sink() {
+        let dest = Url::parse("file:///tmp/out").unwrap();
+        let sink = WriteSink::parquet(dest.clone());
+        let plan = DeclarativePlanNode::scan_json(vec![], simple_schema()).into_write(sink);
+        match plan.sink.sink_type {
+            SinkType::Write(w) => {
+                assert_eq!(w.destination, dest);
+                assert_eq!(w.format, WriteFileFormat::Parquet);
+            }
+            other => panic!("expected Write sink, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_sink_equality_is_structural() {
+        let u = Url::parse("s3://bucket/prefix/file.parquet").unwrap();
+        let a = WriteSink::parquet(u.clone());
+        let b = WriteSink::new(u, WriteFileFormat::Parquet);
+        assert_eq!(a, b);
+        assert_eq!(SinkType::Write(a.clone()), SinkType::Write(b.clone()));
+        assert_ne!(
+            SinkType::Write(WriteSink::parquet(Url::parse("file:///a").unwrap())),
+            SinkType::Write(WriteSink::parquet(Url::parse("file:///b").unwrap())),
+        );
+        assert_ne!(
+            SinkType::Write(WriteSink::parquet(Url::parse("file:///x").unwrap())),
+            SinkType::Write(WriteSink::json_lines(Url::parse("file:///x").unwrap())),
+        );
     }
 
     #[test]
