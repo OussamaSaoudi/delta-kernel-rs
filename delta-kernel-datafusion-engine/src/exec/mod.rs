@@ -5,5 +5,7 @@ mod shape;
 mod sources;
 
 pub use literal::LiteralExec;
-pub use shape::{ApplySchemaExec, NullabilityValidationExec, RowIndexExec};
+pub use shape::{
+    ApplySchemaExec, KernelFilterExec, KernelProjectExec, NullabilityValidationExec, RowIndexExec,
+};
 pub use sources::{FileListingExec, RelationBatchRegistry, RelationRefExec};
