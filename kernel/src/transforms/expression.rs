@@ -2,9 +2,10 @@ use std::borrow::{Cow, ToOwned};
 use std::sync::Arc;
 
 use crate::expressions::{
-    BinaryExpression, BinaryPredicate, ColumnName, Expression, ExpressionRef, JunctionPredicate,
-    MapToStructExpression, OpaqueExpression, OpaquePredicate, ParseJsonExpression, Predicate,
-    Scalar, Transform, UnaryExpression, UnaryPredicate, VariadicExpression,
+    BinaryExpression, BinaryPredicate, ColumnName, Expression, ExpressionRef, IfExpression,
+    JunctionPredicate, MapToStructExpression, OpaqueExpression, OpaquePredicate,
+    ParseJsonExpression, Predicate, Scalar, Transform, UnaryExpression, UnaryPredicate,
+    VariadicExpression,
 };
 use crate::transforms::{map_owned_children_or_else, map_owned_or_else, map_owned_pair_or_else};
 
@@ -160,6 +161,12 @@ pub trait ExpressionTransform<'a> {
         self.recurse_into_expr_variadic(expr)
     }
 
+    /// Called for each conditional `If` expression encountered during the traversal. The provided
+    /// implementation just forwards to [`Self::recurse_into_expr_if`].
+    fn transform_expr_if(&mut self, expr: &'a IfExpression) -> Option<Cow<'a, IfExpression>> {
+        self.recurse_into_expr_if(expr)
+    }
+
     /// Called for each junction predicate encountered during the traversal. The provided
     /// implementation just forwards to [`Self::recurse_into_pred_junction`].
     fn transform_pred_junction(
@@ -219,6 +226,10 @@ pub trait ExpressionTransform<'a> {
             Expression::Variadic(v) => {
                 let child = self.transform_expr_variadic(v);
                 map_owned_or_else(expr, child, Expression::Variadic)
+            }
+            Expression::If(i) => {
+                let child = self.transform_expr_if(i);
+                map_owned_or_else(expr, child, Expression::If)
             }
             Expression::Opaque(o) => {
                 let child = self.transform_expr_opaque(o);
@@ -374,6 +385,26 @@ pub trait ExpressionTransform<'a> {
     ) -> Option<Cow<'a, VariadicExpression>> {
         let children = v.exprs.iter().map(|e| self.transform_expr(e));
         map_owned_children_or_else(v, children, |exprs| VariadicExpression::new(v.op, exprs))
+    }
+
+    /// Recursively transforms an `If` expression's three children (ternary). If any child is
+    /// filtered out the whole expression is filtered out -- a partial `If` is not meaningful.
+    fn recurse_into_expr_if(&mut self, i: &'a IfExpression) -> Option<Cow<'a, IfExpression>> {
+        let condition = self.transform_pred(&i.condition)?;
+        let then_expr = self.transform_expr(&i.then_expr)?;
+        let else_expr = self.transform_expr(&i.else_expr)?;
+        if matches!(condition, Cow::Borrowed(_))
+            && matches!(then_expr, Cow::Borrowed(_))
+            && matches!(else_expr, Cow::Borrowed(_))
+        {
+            Some(Cow::Borrowed(i))
+        } else {
+            Some(Cow::Owned(IfExpression::new(
+                condition.into_owned(),
+                then_expr.into_owned(),
+                else_expr.into_owned(),
+            )))
+        }
     }
 
     /// Recursively transforms a junction predicate's children (variadic).

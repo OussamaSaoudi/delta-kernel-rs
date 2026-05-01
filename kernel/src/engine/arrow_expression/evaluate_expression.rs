@@ -16,6 +16,7 @@ use crate::arrow::buffer::{NullBuffer, OffsetBuffer};
 use crate::arrow::compute::kernels::cmp::{distinct, eq, gt, gt_eq, lt, lt_eq, neq, not_distinct};
 use crate::arrow::compute::kernels::comparison::in_list_utf8;
 use crate::arrow::compute::kernels::numeric::{add, div, mul, sub};
+use crate::arrow::compute::kernels::zip::zip;
 use crate::arrow::compute::{and_kleene, cast, is_not_null, is_null, not, or_kleene};
 use crate::arrow::datatypes::{
     DataType as ArrowDataType, Field as ArrowField, Fields as ArrowFields, IntervalUnit,
@@ -33,9 +34,9 @@ use crate::engine::ensure_data_types::{ensure_data_types, ValidationMode};
 use crate::error::{DeltaResult, Error};
 use crate::expressions::{
     BinaryExpression, BinaryExpressionOp, BinaryPredicate, BinaryPredicateOp, Expression,
-    ExpressionRef, JunctionPredicate, JunctionPredicateOp, OpaqueExpression, OpaquePredicate,
-    Predicate, Scalar, Transform, UnaryExpression, UnaryExpressionOp, UnaryPredicate,
-    UnaryPredicateOp, VariadicExpression, VariadicExpressionOp,
+    ExpressionRef, IfExpression, JunctionPredicate, JunctionPredicateOp, OpaqueExpression,
+    OpaquePredicate, Predicate, Scalar, Transform, UnaryExpression, UnaryExpressionOp,
+    UnaryPredicate, UnaryPredicateOp, VariadicExpression, VariadicExpressionOp,
 };
 use crate::schema::{DataType, PrimitiveType, StructField, StructType};
 
@@ -344,6 +345,22 @@ pub fn evaluate_expression(
             // Coalesce accumulated arrays
             Ok(coalesce_arrays(&arrays, result_type)?)
         }
+        (
+            If(IfExpression {
+                condition,
+                then_expr,
+                else_expr,
+            }),
+            result_type,
+        ) => {
+            let cond = evaluate_predicate(condition, batch, false)?;
+            let then_arr = evaluate_expression(then_expr, batch, result_type)?;
+            let else_arr = evaluate_expression(else_expr, batch, result_type)?;
+            // NULL conditions are treated as false (SQL standard CASE semantics): null_to_false
+            // ensures `zip` selects from `else_arr` for those rows.
+            let cond_non_null = null_to_false(&cond);
+            Ok(zip(&cond_non_null, &then_arr, &else_arr)?)
+        }
         (Opaque(OpaqueExpression { op, exprs }), _) => {
             match op
                 .any_ref()
@@ -392,6 +409,16 @@ pub fn evaluate_expression(
         ))),
         (Unknown(name), _) => Err(Error::unsupported(format!("Unknown expression: {name:?}"))),
     }
+}
+
+/// Coerces NULLs in a boolean array to `false`, matching SQL `CASE WHEN ... THEN ... ELSE ...`
+/// semantics for [`Expression::If`]. The Arrow `zip` kernel propagates NULL conditions to NULL
+/// outputs; SQL CASE evaluates a NULL condition as false (selecting the ELSE branch).
+fn null_to_false(arr: &BooleanArray) -> BooleanArray {
+    if arr.null_count() == 0 {
+        return arr.clone();
+    }
+    arr.iter().map(|v| Some(v.unwrap_or(false))).collect()
 }
 
 /// Direction for casting between Arrow view and non-view string/binary types.
@@ -1609,6 +1636,107 @@ mod tests {
         // Request STRING type but array is INT32 - should fail even with short-circuit
         let result = evaluate_expression(&expr, &batch, Some(&DataType::STRING));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_if_expression_basic() {
+        // IF(a < 0, 0, a) -- clamp negative values to zero.
+        let schema = ArrowSchema::new(vec![ArrowField::new("a", ArrowDataType::Int32, true)]);
+        let a_values = Int32Array::from(vec![Some(-5), Some(0), Some(7), Some(-1)]);
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(a_values)]).unwrap();
+
+        let expr = Expression::if_then_else(
+            Expression::column(["a"]).lt(Expression::literal(0i32)),
+            Expression::literal(0i32),
+            Expression::column(["a"]),
+        );
+
+        let result = evaluate_expression(&expr, &batch, Some(&DataType::INTEGER)).unwrap();
+        let result_array = result.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(result_array.values(), &[0, 0, 7, 0]);
+    }
+
+    #[test]
+    fn test_if_expression_null_condition_treated_as_false() {
+        // IF(a IS NULL, "missing", "present") -- straightforward null test.
+        // Then verify the SQL CASE semantic: IF(<predicate that is NULL>, ..., ...)
+        // takes the ELSE branch.
+        let schema = ArrowSchema::new(vec![
+            ArrowField::new("a", ArrowDataType::Int32, true),
+            ArrowField::new("b", ArrowDataType::Int32, true),
+        ]);
+        // a < b is NULL whenever either operand is NULL (SQL three-valued logic).
+        let a_values = Int32Array::from(vec![Some(1), None, Some(3)]);
+        let b_values = Int32Array::from(vec![Some(2), Some(2), Some(2)]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(a_values), Arc::new(b_values)],
+        )
+        .unwrap();
+
+        // IF(a < b, "yes", "no") -- row 1's condition is NULL (a is NULL), so should pick "no".
+        let expr = Expression::if_then_else(
+            Expression::column(["a"]).lt(Expression::column(["b"])),
+            Expression::literal("yes"),
+            Expression::literal("no"),
+        );
+
+        let result = evaluate_expression(&expr, &batch, Some(&DataType::STRING)).unwrap();
+        let result_array = result.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(result_array.value(0), "yes"); // 1 < 2 -> true
+        assert_eq!(result_array.value(1), "no"); // NULL < 2 -> NULL -> "no" (CASE semantics)
+        assert_eq!(result_array.value(2), "no"); // 3 < 2 -> false
+    }
+
+    #[test]
+    fn test_nested_if_expression() {
+        // IF(a < 0, "neg", IF(a > 100, "big", "ok")) -- range classifier.
+        let schema = ArrowSchema::new(vec![ArrowField::new("a", ArrowDataType::Int32, false)]);
+        let a_values = Int32Array::from(vec![-1, 50, 200, 0]);
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(a_values)]).unwrap();
+
+        let expr = Expression::if_then_else(
+            Expression::column(["a"]).lt(Expression::literal(0i32)),
+            Expression::literal("neg"),
+            Expression::if_then_else(
+                Expression::column(["a"]).gt(Expression::literal(100i32)),
+                Expression::literal("big"),
+                Expression::literal("ok"),
+            ),
+        );
+
+        let result = evaluate_expression(&expr, &batch, Some(&DataType::STRING)).unwrap();
+        let result_array = result.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(result_array.value(0), "neg");
+        assert_eq!(result_array.value(1), "ok");
+        assert_eq!(result_array.value(2), "big");
+        assert_eq!(result_array.value(3), "ok");
+    }
+
+    #[test]
+    fn test_case_when_evaluates_via_nested_if() {
+        // CASE WHEN a < 0 THEN -1 WHEN a = 0 THEN 0 ELSE 1 END (sign function).
+        let schema = ArrowSchema::new(vec![ArrowField::new("a", ArrowDataType::Int32, false)]);
+        let a_values = Int32Array::from(vec![-5, 0, 7]);
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(a_values)]).unwrap();
+
+        let expr = Expression::case_when(
+            vec![
+                (
+                    Expression::column(["a"]).lt(Expression::literal(0i32)),
+                    Expression::literal(-1i32),
+                ),
+                (
+                    Expression::column(["a"]).eq(Expression::literal(0i32)),
+                    Expression::literal(0i32),
+                ),
+            ],
+            Expression::literal(1i32),
+        );
+
+        let result = evaluate_expression(&expr, &batch, Some(&DataType::INTEGER)).unwrap();
+        let result_array = result.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(result_array.values(), &[-1, 0, 1]);
     }
 
     #[test]
