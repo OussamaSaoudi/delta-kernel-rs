@@ -84,10 +84,13 @@ fn parquet_scan_arrow_schema_and_virtual_columns(
         return Ok((kernel_arrow_schema, Vec::new()));
     };
 
-    let row_field = Arc::new(
-        Field::new(name.as_str(), DataType::Int64, false).with_extension_type(RowNumber),
-    );
-    let mut fields = kernel_arrow_schema.fields().iter().cloned().collect::<Vec<_>>();
+    let row_field =
+        Arc::new(Field::new(name.as_str(), DataType::Int64, false).with_extension_type(RowNumber));
+    let mut fields = kernel_arrow_schema
+        .fields()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
     fields.push(Arc::clone(&row_field));
     Ok((Arc::new(Schema::new(fields)), vec![row_field]))
 }
@@ -131,8 +134,8 @@ fn build_raw_scan(
 /// index.
 ///
 /// Parquet scans with [`ScanNode::row_index_column`] feed arrow-rs virtual [`RowNumber`] values
-/// through the decoder. Residual [`KernelFilterExec`] keeps the row-index array aligned with filtered
-/// rows. JSON scans still append indices with [`RowIndexExec`].
+/// through the decoder. Residual [`KernelFilterExec`] keeps the row-index array aligned with
+/// filtered rows. JSON scans still append indices with [`RowIndexExec`].
 ///
 /// Note: virtual row numbers follow the parquet reader's batching (offsets are file-absolute in
 /// arrow-rs, but combine with multi-batch emission when reasoning about tests).
@@ -189,8 +192,9 @@ fn compile_scan_single_group(
 /// Scan predicates are applied via [`KernelFilterExec`] on decoded batches so semantics match the
 /// kernel evaluator (no parquet/json pushdown yet — avoids over-filtering).
 ///
-/// Parquet row-index columns use [`RowIndexExec`] after residual filtering so indices match the
-/// emitted row stream (sequential starting at zero within each batch).
+/// Parquet row-index columns requested via [`ScanNode::row_index_column`] use arrow-rs native
+/// [`RowNumber`] virtual columns before residual filtering so surviving rows retain physical file
+/// offsets. JSON scans still use [`RowIndexExec`] after decoding.
 pub fn compile_scan(node: &ScanNode) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
     let arrow_schema: Arc<Schema> = Arc::new(
         node.schema
@@ -393,7 +397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parquet_row_index_is_sequential_after_residual_filter() {
+    async fn parquet_row_index_physical_offsets_survive_residual_filter() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("rows.parquet");
         write_i64_parquet(&p, &[8, 25, 30]);
@@ -424,7 +428,7 @@ mod tests {
                 .unwrap();
             rids.extend(ra.values().iter().copied());
         }
-        assert_eq!(rids, vec![0, 1]);
+        assert_eq!(rids, vec![1, 2]);
     }
 
     fn plan_has_ordered_union(plan: &dyn datafusion_physical_plan::ExecutionPlan) -> bool {
