@@ -1,0 +1,25 @@
+[package]
+name = "delta-kernel-datafusion-engine"
+description = "DataFusion-backed executor scaffold for Delta Kernel declarative plans (Phase 1.1)."
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+# Match default-executor: declarative IR + Arrow/Tokio engine so `delta_kernel::engine` and
+# `delta_kernel::arrow` resolve consistently.
+delta_kernel = { path = "../kernel", default-features = false, features = [
+    "declarative-plans",
+    "default-engine-rustls",
+    "arrow",
+] }
+
+datafusion-common = { version = "53", default-features = false }
+datafusion-execution = { version = "53", default-features = false }
+datafusion-physical-expr = { version = "53", default-features = false }
+datafusion-physical-plan = { version = "53", default-features = false }
+
+futures = "0.3"
