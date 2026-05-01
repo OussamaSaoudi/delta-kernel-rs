@@ -24,19 +24,18 @@
 //!
 //! ## Leaves
 //!
-//! - [`DeclarativePlanNode::scan`] / [`scan_json`] / [`scan_parquet`] —
-//!   explicit-schema scans.
-//! - [`DeclarativePlanNode::scan_as`] / [`scan_json_as`] / [`scan_parquet_as`]
-//!   — schemas inferred from a struct via [`crate::schema::ToSchema`].
+//! - [`DeclarativePlanNode::scan`] / [`scan_json`] / [`scan_parquet`] — explicit-schema scans.
+//! - [`DeclarativePlanNode::scan_as`] / [`scan_json_as`] / [`scan_parquet_as`] — schemas inferred
+//!   from a struct via [`crate::schema::ToSchema`].
 //! - [`DeclarativePlanNode::listing`] — storage prefix listing.
-//! - [`DeclarativePlanNode::literal`] / [`literal_row`] — kernel-provided
-//!   constant rows. Aligned with [`crate::EvaluationHandler::create_many`].
+//! - [`DeclarativePlanNode::literal`] / [`literal_row`] — kernel-provided constant rows. Aligned
+//!   with [`crate::EvaluationHandler::create_many`].
 //! - [`DeclarativePlanNode::union`] / [`union_unordered`] — concatenate N children.
 //!
 //! ## Transforms
 //!
-//! - [`DeclarativePlanNode::with_predicate`] / [`with_row_index`] /
-//!   [`with_ordered`] — scan modifiers.
+//! - [`DeclarativePlanNode::with_predicate`] / [`with_row_index`] / [`with_ordered`] — scan
+//!   modifiers.
 //! - [`DeclarativePlanNode::filter`] — predicate filter.
 //! - [`DeclarativePlanNode::project`] — projection.
 //! - [`DeclarativePlanNode::window`] — window functions (`row_number`).
@@ -46,8 +45,7 @@
 //! ## Terminals
 //!
 //! - [`DeclarativePlanNode::into_plan`] — explicit sink.
-//! - [`DeclarativePlanNode::results`] — sugar for
-//!   `into_plan(SinkType::Results)`.
+//! - [`DeclarativePlanNode::results`] — sugar for `into_plan(SinkType::Results)`.
 //! - [`DeclarativePlanNode::into_relation`] — pipe output into a named
 //!   [`RelationHandle`](super::nodes::RelationHandle) for another plan in
 //!   the same `PhaseOperation::Plans(...)` to consume.
@@ -56,15 +54,17 @@
 //!   [`LoadSink::dv_ref`]. Materializes under a named relation handle.
 //! - [`DeclarativePlanNode::into_write`] — single-destination file write
 //!   sink ([`WriteSink`]); IR-only until a DataFusion-backed executor handles it.
+//! - [`DeclarativePlanNode::into_partitioned_write`] — Hive-partitioned file write
+//!   ([`PartitionedWriteSink`]); IR-only for the same reason.
 //! - [`DeclarativePlanNode::consume`] — typed KDF consumer terminal; returns
 //!   a [`Prepared<O>`] whose plan terminates in
 //!   [`SinkType::ConsumeByKdf`](super::nodes::SinkType::ConsumeByKdf).
 //!
 //! ## Escape hatches
 //!
-//! - [`DeclarativePlanNode::consume_by_kdf`] — terminate `self` into a
-//!   [`SinkType::ConsumeByKdf`] sink from a pre-built
-//!   [`ConsumeByKdfSink`](super::nodes::ConsumeByKdfSink) without a typed extractor.
+//! - [`DeclarativePlanNode::consume_by_kdf`] — terminate `self` into a [`SinkType::ConsumeByKdf`]
+//!   sink from a pre-built [`ConsumeByKdfSink`](super::nodes::ConsumeByKdfSink) without a typed
+//!   extractor.
 //!
 //! [`scan_json`]: DeclarativePlanNode::scan_json
 //! [`scan_parquet`]: DeclarativePlanNode::scan_parquet
@@ -76,6 +76,7 @@
 //! [`with_ordered`]: DeclarativePlanNode::with_ordered
 //! [`window`]: DeclarativePlanNode::window
 //! [`WriteSink`]: super::nodes::WriteSink
+//! [`PartitionedWriteSink`]: super::nodes::PartitionedWriteSink
 
 use std::sync::Arc;
 
@@ -93,8 +94,8 @@ use crate::{DeltaResult, Error, FileMeta};
 ///
 /// Trees are transforms-only: every complete pipeline terminates in a
 /// [`Plan`] via one of the terminal methods (`into_plan`, `results`,
-/// `into_relation`, `into_load`, `into_write`, `consume_by_kdf`) or in a [`Prepared<O>`] via
-/// [`DeclarativePlanNode::consume`].
+/// `into_relation`, `into_load`, `into_write`, `into_partitioned_write`, `consume_by_kdf`) or in a
+/// [`Prepared<O>`] via [`DeclarativePlanNode::consume`].
 #[derive(Debug, Clone)]
 pub enum DeclarativePlanNode {
     // Leaves
@@ -521,6 +522,12 @@ impl DeclarativePlanNode {
     pub fn into_write(self, sink: WriteSink) -> Plan {
         self.into_plan(SinkType::Write(sink))
     }
+
+    /// Terminal: partitioned file write ([`PartitionedWriteSink`]). Same executor contract as
+    /// [`Self::into_write`].
+    pub fn into_partitioned_write(self, sink: PartitionedWriteSink) -> Plan {
+        self.into_plan(SinkType::PartitionedWrite(sink))
+    }
 }
 
 // ============================================================================
@@ -653,6 +660,58 @@ mod tests {
     }
 
     #[test]
+    fn partitioned_write_sink_terminal_emits_partitioned_sink() {
+        let dest = Url::parse("file:///tmp/table").unwrap();
+        let sink = PartitionedWriteSink::parquet(dest.clone(), vec!["dt".into(), "region".into()]);
+        let plan =
+            DeclarativePlanNode::scan_json(vec![], simple_schema()).into_partitioned_write(sink);
+        match plan.sink.sink_type {
+            SinkType::PartitionedWrite(p) => {
+                assert_eq!(p.destination, dest);
+                assert_eq!(p.format, WriteFileFormat::Parquet);
+                assert_eq!(
+                    p.partition_columns,
+                    vec!["dt".to_string(), "region".to_string()]
+                );
+            }
+            other => panic!("expected PartitionedWrite sink, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partitioned_write_sink_equality_is_structural() {
+        let dest = Url::parse("s3://bucket/root").unwrap();
+        let cols = vec!["a".into(), "b".into()];
+        let a = PartitionedWriteSink::parquet(dest.clone(), cols.clone());
+        let b = PartitionedWriteSink::new(dest, WriteFileFormat::Parquet, cols);
+        assert_eq!(a, b);
+        assert_eq!(
+            SinkType::PartitionedWrite(a.clone()),
+            SinkType::PartitionedWrite(b.clone())
+        );
+        assert_ne!(
+            SinkType::PartitionedWrite(PartitionedWriteSink::parquet(
+                Url::parse("file:///x").unwrap(),
+                vec!["p".into()],
+            )),
+            SinkType::PartitionedWrite(PartitionedWriteSink::parquet(
+                Url::parse("file:///x").unwrap(),
+                vec!["q".into()],
+            )),
+        );
+        assert_ne!(
+            SinkType::PartitionedWrite(PartitionedWriteSink::parquet(
+                Url::parse("file:///z").unwrap(),
+                vec![],
+            )),
+            SinkType::PartitionedWrite(PartitionedWriteSink::json_lines(
+                Url::parse("file:///z").unwrap(),
+                vec![],
+            )),
+        );
+    }
+
+    #[test]
     fn load_sink_terminal_emits_load_sink() {
         let out_handle = RelationHandle::fresh("manifest_files", simple_schema());
         let load = LoadSink {
@@ -709,13 +768,12 @@ mod tests {
 
     #[test]
     fn assert_wraps_child_with_checks() {
-        let plan = DeclarativePlanNode::scan_json(vec![], simple_schema()).assert(vec![
-            AssertCheck {
+        let plan =
+            DeclarativePlanNode::scan_json(vec![], simple_schema()).assert(vec![AssertCheck {
                 predicate: Arc::new(Expression::literal(true)),
                 error_code: "STATS_CLUSTERING_NOT_NULL".into(),
                 error_message: "missing stats for cluster col".into(),
-            },
-        ]);
+            }]);
 
         assert!(!plan.is_leaf());
         assert_eq!(plan.children().len(), 1);

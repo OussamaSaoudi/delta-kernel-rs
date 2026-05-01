@@ -3,11 +3,10 @@
 
 use std::sync::Arc;
 
+use super::{FileType, OrderingSpec};
 use crate::expressions::{ColumnName, Expression};
 use crate::plans::kdf::{ConsumerKdf, Handle, KdfStateToken, TraceContext};
 use crate::schema::SchemaRef;
-
-use super::{FileType, OrderingSpec};
 
 /// Template for draining a row stream into a [`ConsumerKdf`] via
 /// [`SinkType::ConsumeByKdf`].
@@ -15,8 +14,8 @@ use super::{FileType, OrderingSpec};
 /// Fields mirror the former plan-tree `KdfNode<dyn ConsumerKdf>` payload; KDF
 /// lives exclusively under sinks in the IR.
 ///
-/// - `initial_state`: cloned per partition via [`DynClone`](dyn_clone::DynClone)
-///   into a [`Handle`](crate::plans::kdf::Handle).
+/// - `initial_state`: cloned per partition via [`DynClone`](dyn_clone::DynClone) into a
+///   [`Handle`](crate::plans::kdf::Handle).
 /// - `partitionable_by`: optional hash-partition expression (unused by consumers today).
 /// - `requires_ordering`: stamped from [`ConsumerKdf::required_ordering`] at construction.
 /// - `token`: joins finalized state back to phase `PhaseKdfState`.
@@ -232,7 +231,8 @@ pub enum WriteFileFormat {
 ///
 /// [`PartialEq`] compares `destination` and `format` structurally. This differs from
 /// [`LoadSink`], which keys equality on the process-unique [`RelationHandle`]
-/// because Load materializes into a named relation.
+/// because Load materializes into a named relation. [`PartitionedWriteSink`]
+/// applies the same structural rule including its partition-key order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteSink {
     /// Output location (e.g. `file://` / `s3://` URL). Exact file-naming
@@ -261,11 +261,56 @@ impl WriteSink {
     }
 }
 
+/// Partitioned file write sink (Hive-style `col=value/` layout under a base URL).
+///
+/// The engine groups upstream rows by [`Self::partition_columns`] and emits files
+/// beneath nested directories rooted at [`Self::destination`]. Exact naming,
+/// commit semantics, and overwrite behavior are executor-defined.
+///
+/// **IR only** in Phase 0.9: intended for DataFusion (or similar) lowering, not
+/// the default in-process executor.
+///
+/// # Equality
+///
+/// [`PartialEq`] compares `destination`, `format`, and `partition_columns`
+/// structurally (including column order). Same rationale as [`WriteSink`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionedWriteSink {
+    /// Base directory / table prefix for partition subdirectories.
+    pub destination: url::Url,
+    pub format: WriteFileFormat,
+    /// Ordered Hive partition key names; must match columns on the upstream row.
+    pub partition_columns: Vec<String>,
+}
+
+impl PartitionedWriteSink {
+    pub fn new(
+        destination: url::Url,
+        format: WriteFileFormat,
+        partition_columns: Vec<String>,
+    ) -> Self {
+        Self {
+            destination,
+            format,
+            partition_columns,
+        }
+    }
+
+    pub fn parquet(destination: url::Url, partition_columns: Vec<String>) -> Self {
+        Self::new(destination, WriteFileFormat::Parquet, partition_columns)
+    }
+
+    pub fn json_lines(destination: url::Url, partition_columns: Vec<String>) -> Self {
+        Self::new(destination, WriteFileFormat::JsonLines, partition_columns)
+    }
+}
+
 /// What the engine does with the terminal row stream.
 ///
 /// Sink shapes include: `Results` (stream batches to the caller), `Relation`
 /// (pipe into another plan), `ConsumeByKdf` (drain into a [`ConsumerKdf`]),
-/// `Load` (per-row file read), and `Write` (single-target file write).
+/// `Load` (per-row file read), `Write` (single-target file write), and
+/// `PartitionedWrite` (Hive-style partitions under a base URL).
 #[derive(Debug, Clone)]
 pub enum SinkType {
     /// Stream every output batch to the caller.
@@ -285,6 +330,8 @@ pub enum SinkType {
     Load(LoadSink),
     /// Stream rows to files at a single [`WriteSink::destination`]. See [`WriteSink`].
     Write(WriteSink),
+    /// Partitioned writer — nested directories under [`PartitionedWriteSink::destination`].
+    PartitionedWrite(PartitionedWriteSink),
 }
 
 impl PartialEq for SinkType {
@@ -295,6 +342,7 @@ impl PartialEq for SinkType {
             (SinkType::ConsumeByKdf(a), SinkType::ConsumeByKdf(b)) => a.token == b.token,
             (SinkType::Load(a), SinkType::Load(b)) => a == b,
             (SinkType::Write(a), SinkType::Write(b)) => a == b,
+            (SinkType::PartitionedWrite(a), SinkType::PartitionedWrite(b)) => a == b,
             _ => false,
         }
     }
@@ -341,6 +389,13 @@ impl SinkNode {
     pub fn write(node: WriteSink) -> Self {
         Self {
             sink_type: SinkType::Write(node),
+        }
+    }
+
+    /// `PartitionedWrite`-sink convenience constructor.
+    pub fn partitioned_write(node: PartitionedWriteSink) -> Self {
+        Self {
+            sink_type: SinkType::PartitionedWrite(node),
         }
     }
 }

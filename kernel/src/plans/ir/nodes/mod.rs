@@ -4,7 +4,8 @@
 //! recursive tree is assembled in [`super::declarative::DeclarativePlanNode`].
 //!
 //! This module ships nodes the prototype's read path exercises plus sink IR in the
-//! [`sinks`] submodule; [`WriteSink`] (Phase 0.8+) is IR-only until an engine lowers it.
+//! [`sinks`] submodule; [`WriteSink`] / [`PartitionedWriteSink`] are IR-only until an engine lowers
+//! them.
 
 use std::sync::Arc;
 
@@ -404,10 +405,9 @@ pub struct AssertNode {
     pub checks: Vec<AssertCheck>,
 }
 
-
 mod sinks;
 
 pub use sinks::{
-    ConsumeByKdfSink, LoadSink, RelationHandle, ScanFileColumns, SinkNode, SinkType,
-    WriteFileFormat, WriteSink,
+    ConsumeByKdfSink, LoadSink, PartitionedWriteSink, RelationHandle, ScanFileColumns, SinkNode,
+    SinkType, WriteFileFormat, WriteSink,
 };
