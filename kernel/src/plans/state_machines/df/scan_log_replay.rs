@@ -1,14 +1,5 @@
 //! Scan log replay via declarative plans — Phase 4.x (`CoroutineSM` path).
 //!
-//! # DataFusion scaffold caveat
-//!
-//! The terminal projection builds nested structs via [`Expression::struct_from`] (matching
-//! [`crate::scan::scan_row_schema`]). Today `delta-kernel-datafusion-engine`'s physical project
-//! operator assumes **one Arrow column per projected expression**; struct literals surface as a
-//! multi-column evaluator payload and fail at runtime until struct-valued projections are wired.
-//! Drive [`scan_log_replay_sm`] end-to-end only through executors that implement full kernel
-//! expression evaluation for `Results` sinks.
-//!
 //! The canonical entrypoint is [`scan_log_replay_sm`], which returns a
 //! [`CoroutineSM`](crate::plans::state_machines::framework::coroutine::engine::CoroutineSM)
 //! driven like insert/checkpoint SMs (`dispatch` feeders + await results plan).

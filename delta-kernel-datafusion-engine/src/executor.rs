@@ -192,6 +192,32 @@ impl DataFusionExecutor {
         op: PhaseOperation,
         opts: &DriveOpts,
     ) -> Result<PhaseKdfState, EngineError> {
+        let (accum, _) = self
+            .execute_phase_operation_with_results_capture(op, opts)
+            .await?;
+        Ok(accum)
+    }
+
+    /// Same draining semantics as [`Self::execute_phase_operation_with_drive_opts`], plus optional
+    /// capture of batches produced by the **last** [`SinkType::Results`] plan in the
+    /// [`PhaseOperation::Plans`] slice (when present).
+    ///
+    /// Intended for integration tests and diagnostics that need row-level verification without
+    /// changing [`CoroutineSM`] harness contracts.
+    pub async fn execute_phase_operation_with_results_batches(
+        &self,
+        op: PhaseOperation,
+        opts: &DriveOpts,
+    ) -> Result<(PhaseKdfState, Option<Vec<RecordBatch>>), EngineError> {
+        self.execute_phase_operation_with_results_capture(op, opts)
+            .await
+    }
+
+    async fn execute_phase_operation_with_results_capture(
+        &self,
+        op: PhaseOperation,
+        opts: &DriveOpts,
+    ) -> Result<(PhaseKdfState, Option<Vec<RecordBatch>>), EngineError> {
         self.clear_kdf_harvest_slot();
 
         match op {
@@ -203,6 +229,7 @@ impl DataFusionExecutor {
                     phase_kdf_accumulator: Some(accum.clone()),
                     engine: Arc::clone(&self.engine),
                 };
+                let mut last_results_batches: Option<Vec<RecordBatch>> = None;
                 for plan in plans {
                     let physical = compile_plan(&plan, &ctx).map_err(EngineError::internal)?;
                     let stream = physical
@@ -227,10 +254,16 @@ impl DataFusionExecutor {
                             });
                         }
                     }
+                    if matches!(plan.sink.sink_type, SinkType::Results) {
+                        last_results_batches = Some(batches);
+                    }
                 }
-                Ok(accum)
+                Ok((accum, last_results_batches))
             }
-            PhaseOperation::SchemaQuery(node) => execute_schema_query_phase(&self.engine, node),
+            PhaseOperation::SchemaQuery(node) => {
+                let accum = execute_schema_query_phase(&self.engine, node)?;
+                Ok((accum, None))
+            }
         }
     }
 

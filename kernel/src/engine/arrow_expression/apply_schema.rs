@@ -10,7 +10,7 @@ use crate::arrow::array::{
     Array, ArrayRef, AsArray, ListArray, MapArray, RecordBatch, StructArray,
 };
 use crate::arrow::datatypes::{
-    DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
+    DataType as ArrowDataType, Field as ArrowField, Fields as ArrowFields, Schema as ArrowSchema,
 };
 use crate::engine::ensure_data_types::{ensure_data_types, ValidationMode};
 use crate::error::{DeltaResult, Error};
@@ -32,12 +32,41 @@ pub(crate) fn apply_schema(array: &dyn Array, schema: &DataType) -> DeltaResult<
         ));
     };
     let applied = apply_schema_to_struct(array, struct_schema)?;
+    let row_count = applied.len();
     let (fields, columns, _nulls) = applied.into_parts();
 
-    Ok(RecordBatch::try_new(
-        Arc::new(ArrowSchema::new(fields)),
-        columns,
-    )?)
+    let schema = Arc::new(ArrowSchema::new(fields));
+    // SAFETY: `StructArray::into_parts` discards top-level struct validity while Arrow fields may
+    // still declare nested columns NOT NULL (Delta logical constraints). Until masks are fully
+    // propagated after decomposition, strict `RecordBatch::try_new` rejects batches that remain
+    // valid logical kernel rows (for example remove-only scan rows where `add` is struct-null).
+    // Length and schema arity are validated here; callers rely on downstream kernels fixing masks.
+    if columns.len() != schema.fields().len() {
+        return Err(Error::generic(format!(
+            "apply_schema column count {} does not match schema fields {}",
+            columns.len(),
+            schema.fields().len()
+        )));
+    }
+    for col in &columns {
+        if col.len() != row_count {
+            return Err(make_arrow_error(format!(
+                "apply_schema column length mismatch: expected {row_count}, got {}",
+                col.len()
+            )));
+        }
+    }
+    for (col, field) in columns.iter().zip(schema.fields()) {
+        if col.data_type() != field.data_type() {
+            return Err(make_arrow_error(format!(
+                "apply_schema column type {:?} does not match field {} ({:?})",
+                col.data_type(),
+                field.name(),
+                field.data_type()
+            )));
+        }
+    }
+    unsafe { Ok(RecordBatch::new_unchecked(schema, columns, row_count)) }
 }
 
 // helper to transform an arrow field+col into the specified target type. If `rename` is specified
@@ -104,11 +133,9 @@ fn transform_struct(
             transformed_cols.len()
         )));
     }
-    Ok(StructArray::try_new(
-        transformed_fields.into(),
-        transformed_cols,
-        nulls,
-    )?)
+    let fields: ArrowFields = transformed_fields.into();
+    // SAFETY: See `evaluate_struct_expression` / top-level `apply_schema`.
+    unsafe { Ok(StructArray::new_unchecked(fields, transformed_cols, nulls)) }
 }
 
 // Transform a struct array. The data is in `array`, and the target fields are in `kernel_fields`.

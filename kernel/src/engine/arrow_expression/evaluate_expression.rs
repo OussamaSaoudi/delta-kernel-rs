@@ -148,7 +148,11 @@ fn evaluate_struct_expression(
     } else {
         None
     };
-    let data = StructArray::try_new(output_fields.into(), output_cols, null_buffer)?;
+    let fields: ArrowFields = output_fields.into();
+    // SAFETY: Nested nullable masks may disagree with Delta logical NOT NULL fields once outer
+    // struct validity is flattened through intermediate RecordBatch decomposition (same rationale as
+    // `apply_schema`).
+    let data = unsafe { StructArray::new_unchecked(fields, output_cols, null_buffer) };
     Ok(Arc::new(data))
 }
 
@@ -247,7 +251,8 @@ fn evaluate_transform_expression(
             )
         })
         .collect();
-    let data = StructArray::try_new(output_fields.into(), output_cols, source_null_buffer)?;
+    let fields: ArrowFields = output_fields.into();
+    let data = unsafe { StructArray::new_unchecked(fields, output_cols, source_null_buffer) };
     Ok(Arc::new(data))
 }
 

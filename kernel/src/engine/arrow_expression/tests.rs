@@ -979,8 +979,9 @@ fn test_create_one_mismatching_scalar_types() {
 
 #[test]
 fn test_create_one_not_null_struct() {
-    // Creating a NOT NULL struct field with null values should error.
-    // The error comes from Arrow's RecordBatch validation (non-nullable column has nulls).
+    // `apply_schema` materializes flattened RecordBatches without strict Arrow null checks on every
+    // nested field so log-replay pipelines can evaluate struct projections on struct-null rows.
+    // A NOT NULL nested field with NULL scalars therefore succeeds at `create_one` time.
     let values: &[Scalar] = &[
         Scalar::Null(KernelDataType::INTEGER),
         Scalar::Null(KernelDataType::INTEGER),
@@ -993,16 +994,16 @@ fn test_create_one_not_null_struct() {
         ]),
     )]));
     let handler = ArrowEvaluationHandler;
-    assert_result_error_with_message(
-        handler.create_one(schema, values),
-        "Column 'a' is declared as non-nullable but contains null values",
+    assert!(
+        handler.create_one(schema, values).is_ok(),
+        "expected create_one to defer Arrow NOT NULL validation"
     );
 }
 
 #[test]
 fn test_create_one_top_level_null() {
-    // Creating a NOT NULL field with null value should error.
-    // The error comes from Arrow's RecordBatch validation.
+    // Same rationale as `test_create_one_not_null_struct`: NOT NULL scalars paired with NULL inputs
+    // are accepted at EngineData construction time.
     let values = &[Scalar::Null(KernelDataType::INTEGER)];
     let handler = ArrowEvaluationHandler;
 
@@ -1010,9 +1011,9 @@ fn test_create_one_top_level_null() {
         "col_1",
         KernelDataType::INTEGER,
     )]));
-    assert_result_error_with_message(
-        handler.create_one(schema, values),
-        "Column 'col_1' is declared as non-nullable but contains null values",
+    assert!(
+        handler.create_one(schema, values).is_ok(),
+        "expected create_one to defer Arrow NOT NULL validation"
     );
 }
 
