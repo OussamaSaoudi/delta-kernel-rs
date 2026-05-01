@@ -10,6 +10,9 @@
 //! Phase 2.2 adds [`SinkType::PartitionedWrite`] ([`KernelPartitionedWriteExec`]): Hive-style
 //! directories under a `file://` destination with Parquet or newline-delimited JSON.
 //!
+//! Phase 2.3 adds [`SinkType::Load`] ([`crate::exec::KernelLoadSinkExec`]): per-row parquet/json
+//! reads via kernel handlers into [`crate::exec::RelationBatchRegistry`].
+//!
 //! Phase 1.2 extends the scaffold with leaf support:
 //! - `Literal`
 //! - `Scan`
@@ -26,6 +29,7 @@ use delta_kernel::plans::ir::nodes::{JoinType, RelationHandle, SinkType, WriteSi
 use delta_kernel::plans::ir::{DeclarativePlanNode, Plan};
 use delta_kernel::plans::kdf::FinishedHandle;
 use delta_kernel::schema::SchemaRef;
+use delta_kernel::Engine;
 
 use crate::exec::{
     FileListingExec, KernelAssertExec, KernelConsumeByKdfExec, KernelFilterExec,
@@ -34,6 +38,7 @@ use crate::exec::{
 };
 
 mod join;
+mod load_sink;
 mod scan;
 mod window;
 mod write_sink;
@@ -45,16 +50,20 @@ pub struct CompileContext {
     /// Latest finalized [`FinishedHandle`] from a [`SinkType::ConsumeByKdf`] plan run on this
     /// executor.
     pub kdf_harvest_slot: Arc<Mutex<Option<FinishedHandle>>>,
+    /// Kernel [`Engine`] for sinks that delegate IO to parquet/json handlers ([`SinkType::Load`]).
+    pub engine: Arc<dyn Engine>,
 }
 
 impl CompileContext {
     pub fn new(
         relation_registry: Arc<RelationBatchRegistry>,
         kdf_harvest_slot: Arc<Mutex<Option<FinishedHandle>>>,
+        engine: Arc<dyn Engine>,
     ) -> Self {
         Self {
             relation_registry,
             kdf_harvest_slot,
+            engine,
         }
     }
 }
@@ -82,9 +91,7 @@ pub fn compile_plan(
                 Arc::clone(&ctx.kdf_harvest_slot),
             )?))
         }
-        SinkType::Load(_) => Err(crate::error::unsupported(
-            "Load sink is not implemented for the DataFusion engine scaffold",
-        )),
+        SinkType::Load(_) => load_sink::compile_load_terminal(plan, ctx),
         SinkType::Write(write) => compile_write_terminal(&plan.root, ctx, write),
         SinkType::PartitionedWrite(sink) => {
             let inner = compile_declarative_node(&plan.root, ctx)?;

@@ -1,4 +1,5 @@
-//! Integration tests for [`delta_kernel::plans::ir::nodes::SinkType::Write`] lowering and artifacts.
+//! Integration tests for [`delta_kernel::plans::ir::nodes::SinkType::Write`] lowering and
+//! artifacts.
 
 use std::sync::Arc;
 
@@ -7,11 +8,10 @@ use delta_kernel::expressions::Scalar;
 use delta_kernel::plans::ir::nodes::WriteSink;
 use delta_kernel::plans::ir::DeclarativePlanNode;
 use delta_kernel::schema::{DataType, StructField, StructType};
+use delta_kernel_datafusion_engine::{DataFusionExecutor, LiftDeltaErr};
 use futures::TryStreamExt;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use url::Url;
-
-use delta_kernel_datafusion_engine::{DataFusionExecutor, LiftDeltaErr};
 
 fn number_schema() -> delta_kernel::schema::SchemaRef {
     Arc::new(StructType::new_unchecked([StructField::not_null(

@@ -9,8 +9,9 @@
 //! newline-delimited JSON via DataFusion file sinks when the runtime provides object-store access
 //! for the destination URL),
 //! and [`SinkType::PartitionedWrite`](delta_kernel::plans::ir::nodes::SinkType::PartitionedWrite)
-//! (Hive-style directories under a destination prefix).
-//! [`SinkType::Load`](delta_kernel::plans::ir::nodes::SinkType::Load) remains unsupported here.
+//! (Hive-style directories under a destination prefix),
+//! and [`SinkType::Load`](delta_kernel::plans::ir::nodes::SinkType::Load) (per-row parquet or JSON reads
+//! via kernel parquet/json handlers into the relation registry).
 //! Unsupported constructs still return
 //! [`delta_kernel::plans::errors::DeltaError`] via [`error::unsupported`].
 

@@ -9,8 +9,8 @@
 //! # Limitations (Phase 2.1)
 //!
 //! - **Post-write metadata**: Parquet footer metadata gathered inside [`ParquetSink::written`] is
-//!   not surfaced to callers (no Delta [`DataFileMetadata`] bridge). Harvesting structured stats for
-//!   commits remains future work.
+//!   not surfaced to callers (no Delta [`DataFileMetadata`] bridge). Harvesting structured stats
+//!   for commits remains future work.
 //! - **URLs**: Anything [`ListingTableUrl`] can parse is accepted at compile time; execution needs a
 //!   matching [`object_store`] registration on the executor [`TaskContext`] (local `file://` works
 //!   with the default runtime).
@@ -23,8 +23,7 @@ use datafusion_datasource::file_groups::FileGroup;
 use datafusion_datasource::file_sink_config::{FileOutputMode, FileSinkConfig};
 use datafusion_datasource::sink::{DataSink, DataSinkExec};
 use datafusion_datasource::ListingTableUrl;
-use datafusion_datasource_json::JsonFormat;
-use datafusion_datasource_json::JsonSink;
+use datafusion_datasource_json::{JsonFormat, JsonSink};
 use datafusion_datasource_parquet::ParquetSink;
 use datafusion_expr::dml::InsertOp;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;

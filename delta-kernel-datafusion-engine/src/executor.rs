@@ -13,10 +13,11 @@
 //! [`SinkType::PartitionedWrite`](delta_kernel::plans::ir::nodes::SinkType::PartitionedWrite)
 //! (`KernelPartitionedWriteExec`) writes Hive-style partitions under a `file://` URL and yields no
 //! output batches once drained.
-//! [`SinkType::Load`](delta_kernel::plans::ir::nodes::SinkType::Load) is not lowered yet (compile
-//! returns [`crate::error::unsupported`]). Metadata-only parquet footer reads align with
-//! [`PhaseOperation::SchemaQuery`](delta_kernel::plans::state_machines::framework::phase_operation::PhaseOperation::SchemaQuery)
-//! via [`DataFusionExecutor::read_parquet_footer_schema`] on this executor's [`Engine`].
+//! [`SinkType::Load`](delta_kernel::plans::ir::nodes::SinkType::Load) materializes per-row parquet
+//! or JSON reads via [`KernelLoadSinkExec`](crate::exec::KernelLoadSinkExec) and the kernel's
+//! parquet/json handlers.
+//! Metadata-only parquet footer reads (SchemaQuery-shaped) use
+//! [`DataFusionExecutor::read_parquet_footer_schema`].
 
 use std::sync::{Arc, Mutex};
 
@@ -77,6 +78,7 @@ impl DataFusionExecutor {
             &CompileContext::new(
                 Arc::clone(&self.relation_registry),
                 Arc::clone(&self.kdf_harvest_slot),
+                Arc::clone(&self.engine),
             ),
         )
     }
@@ -106,10 +108,16 @@ impl DataFusionExecutor {
             .take()
     }
 
-    /// Read a parquet footer using [`ParquetHandler::read_parquet_footer`](delta_kernel::ParquetHandler::read_parquet_footer).
+    /// Read a parquet footer using
+    /// [`ParquetHandler::read_parquet_footer`](delta_kernel::ParquetHandler::read_parquet_footer).
     ///
-    /// Matches the intent of [`PhaseOperation::SchemaQuery`](delta_kernel::plans::state_machines::framework::phase_operation::PhaseOperation::SchemaQuery): metadata-only schema extraction without scanning rows.
-    pub fn read_parquet_footer_schema(&self, file: &FileMeta) -> Result<KernelSchemaRef, DeltaError> {
+    /// Matches the intent of
+    /// [`PhaseOperation::SchemaQuery`](delta_kernel::plans::state_machines::framework::phase_operation::PhaseOperation::SchemaQuery):
+    /// metadata-only schema extraction without scanning rows.
+    pub fn read_parquet_footer_schema(
+        &self,
+        file: &FileMeta,
+    ) -> Result<KernelSchemaRef, DeltaError> {
         self.engine
             .parquet_handler()
             .read_parquet_footer(file)

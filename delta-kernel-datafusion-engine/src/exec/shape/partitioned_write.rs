@@ -22,8 +22,7 @@ use datafusion_physical_plan::{
     SendableRecordBatchStream,
 };
 use delta_kernel::arrow::array::{ArrayRef, AsArray, RecordBatch, UInt32Array};
-use delta_kernel::arrow::compute::cast;
-use delta_kernel::arrow::compute::take;
+use delta_kernel::arrow::compute::{cast, take};
 use delta_kernel::arrow::datatypes::{DataType, SchemaRef};
 use delta_kernel::plans::errors::DeltaError;
 use delta_kernel::plans::ir::nodes::{PartitionedWriteSink, WriteFileFormat};
