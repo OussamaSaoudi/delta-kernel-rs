@@ -50,7 +50,11 @@ impl NullabilityValidationExec {
 
 impl DisplayAs for NullabilityValidationExec {
     fn fmt_as(&self, _: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "NullabilityValidationExec(validations={})", self.validations.len())
+        write!(
+            f,
+            "NullabilityValidationExec(validations={})",
+            self.validations.len()
+        )
     }
 }
 
@@ -200,7 +204,9 @@ fn cast_map_array(array: &ArrayRef, target_entries_field: &Field) -> DfResult<Ar
         .downcast_ref::<MapArray>()
         .ok_or_else(|| DataFusionError::Internal("expected MapArray".into()))?;
     let DataType::Struct(target_entry_fields) = target_entries_field.data_type() else {
-        return Err(DataFusionError::Internal("map entries target must be struct".into()));
+        return Err(DataFusionError::Internal(
+            "map entries target must be struct".into(),
+        ));
     };
     let entries_ref: ArrayRef = Arc::new(map_arr.entries().clone());
     let new_entries = cast_struct_array(&entries_ref, target_entry_fields)?;
@@ -218,7 +224,10 @@ fn cast_map_array(array: &ArrayRef, target_entries_field: &Field) -> DfResult<Ar
 }
 
 fn validate_batch(batch: &RecordBatch, validations: &[ValidationRule]) -> DfResult<()> {
-    fn resolve_parent_struct<'a>(batch: &'a RecordBatch, parent_path: &str) -> DfResult<&'a StructArray> {
+    fn resolve_parent_struct<'a>(
+        batch: &'a RecordBatch,
+        parent_path: &str,
+    ) -> DfResult<&'a StructArray> {
         let mut parts = parent_path.split('.');
         let root = parts
             .next()
@@ -245,9 +254,7 @@ fn validate_batch(batch: &RecordBatch, validations: &[ValidationRule]) -> DfResu
     for (parent_name, child_name) in validations {
         let struct_arr = resolve_parent_struct(batch, parent_name)?;
         let child_col = struct_arr.column_by_name(child_name).ok_or_else(|| {
-            DataFusionError::Internal(format!(
-                "child `{child_name}` not found in `{parent_name}`"
-            ))
+            DataFusionError::Internal(format!("child `{child_name}` not found in `{parent_name}`"))
         })?;
         let parent_nulls = struct_arr.nulls();
         let child_nulls = child_col.nulls();

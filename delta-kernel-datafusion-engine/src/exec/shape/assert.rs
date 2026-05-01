@@ -1,3 +1,5 @@
+//! Row-level [`AssertNode`] enforcement: predicates must be true per row; NULL fails.
+
 use std::any::Any;
 use std::fmt;
 use std::pin::Pin;
@@ -14,30 +16,49 @@ use datafusion_physical_plan::{
     SendableRecordBatchStream,
 };
 use delta_kernel::arrow::array::{Array, AsArray, BooleanArray, RecordBatch};
-use delta_kernel::arrow::compute::filter_record_batch;
 use delta_kernel::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
 use delta_kernel::engine::arrow_expression::ArrowEvaluationHandler;
-use delta_kernel::expressions::Expression;
+use delta_kernel::plans::ir::nodes::AssertCheck;
 use delta_kernel::schema::{DataType, SchemaRef};
 use delta_kernel::{EvaluationHandler, ExpressionEvaluator};
 use futures::{Stream, StreamExt};
 
-pub struct KernelFilterExec {
+#[derive(Clone)]
+struct CompiledAssertCheck {
+    evaluator: Arc<dyn ExpressionEvaluator>,
+    error_code: String,
+    error_message: String,
+}
+
+pub struct KernelAssertExec {
     child: Arc<dyn ExecutionPlan>,
     schema: delta_kernel::arrow::datatypes::SchemaRef,
-    evaluator: Arc<dyn ExpressionEvaluator>,
+    checks: Vec<CompiledAssertCheck>,
     properties: Arc<PlanProperties>,
 }
 
-impl KernelFilterExec {
+impl KernelAssertExec {
     pub fn try_new(
         child: Arc<dyn ExecutionPlan>,
         input_schema: SchemaRef,
-        predicate: Arc<Expression>,
+        checks: &[AssertCheck],
     ) -> Result<Self, delta_kernel::plans::errors::DeltaError> {
-        let evaluator = ArrowEvaluationHandler
-            .new_expression_evaluator(input_schema, predicate, DataType::BOOLEAN)
-            .map_err(|e| crate::error::internal_error(format!("filter evaluator init: {e}")))?;
+        let mut compiled = Vec::with_capacity(checks.len());
+        for c in checks {
+            let evaluator = ArrowEvaluationHandler
+                .new_expression_evaluator(
+                    input_schema.clone(),
+                    c.predicate.clone(),
+                    DataType::BOOLEAN,
+                )
+                .map_err(|e| crate::error::internal_error(format!("assert evaluator init: {e}")))?;
+            compiled.push(CompiledAssertCheck {
+                evaluator,
+                error_code: c.error_code.clone(),
+                error_message: c.error_message.clone(),
+            });
+        }
+
         let schema = child.schema();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -45,30 +66,33 @@ impl KernelFilterExec {
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
+
         Ok(Self {
             child,
             schema,
-            evaluator,
+            checks: compiled,
             properties,
         })
     }
 }
 
-impl fmt::Debug for KernelFilterExec {
+impl fmt::Debug for KernelAssertExec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KernelFilterExec").finish_non_exhaustive()
+        f.debug_struct("KernelAssertExec")
+            .field("checks", &self.checks.len())
+            .finish_non_exhaustive()
     }
 }
 
-impl DisplayAs for KernelFilterExec {
+impl DisplayAs for KernelAssertExec {
     fn fmt_as(&self, _: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "KernelFilterExec")
+        write!(f, "KernelAssertExec({} checks)", self.checks.len())
     }
 }
 
-impl ExecutionPlan for KernelFilterExec {
+impl ExecutionPlan for KernelAssertExec {
     fn name(&self) -> &str {
-        "KernelFilterExec"
+        "KernelAssertExec"
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -88,13 +112,13 @@ impl ExecutionPlan for KernelFilterExec {
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         if children.len() != 1 {
             return Err(DataFusionError::Plan(
-                "KernelFilterExec requires exactly one child".into(),
+                "KernelAssertExec requires exactly one child".into(),
             ));
         }
         Ok(Arc::new(Self {
             child: Arc::clone(&children[0]),
             schema: self.schema.clone(),
-            evaluator: Arc::clone(&self.evaluator),
+            checks: self.checks.clone(),
             properties: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(self.schema.clone()),
                 children[0].properties().output_partitioning().clone(),
@@ -109,51 +133,70 @@ impl ExecutionPlan for KernelFilterExec {
         context: Arc<TaskContext>,
     ) -> DfResult<SendableRecordBatchStream> {
         let input = self.child.execute(partition, context)?;
-        Ok(Box::pin(KernelFilterStream {
+        Ok(Box::pin(KernelAssertStream {
             input,
             schema: self.schema.clone(),
-            evaluator: Arc::clone(&self.evaluator),
+            checks: self.checks.clone(),
         }))
     }
 }
 
-struct KernelFilterStream {
+struct KernelAssertStream {
     input: SendableRecordBatchStream,
     schema: delta_kernel::arrow::datatypes::SchemaRef,
-    evaluator: Arc<dyn ExpressionEvaluator>,
+    checks: Vec<CompiledAssertCheck>,
 }
 
-impl Stream for KernelFilterStream {
+impl Stream for KernelAssertStream {
     type Item = DfResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.input.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(batch))) => {
+                if batch.num_rows() == 0 || self.checks.is_empty() {
+                    return Poll::Ready(Some(Ok(batch)));
+                }
+
                 let batch_for_eval = ArrowEngineData::new(batch.clone());
-                let pred_data = match self.evaluator.evaluate(&batch_for_eval) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e)))))
+
+                let mut predicate_cols: Vec<BooleanArray> = Vec::with_capacity(self.checks.len());
+                for check in &self.checks {
+                    let pred_data = match check.evaluator.evaluate(&batch_for_eval) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e)))));
+                        }
+                    };
+                    let pred_batch = match pred_data.try_into_record_batch() {
+                        Ok(rb) => rb,
+                        Err(e) => {
+                            return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e)))));
+                        }
+                    };
+                    predicate_cols.push(pred_batch.column(0).as_boolean().clone());
+                }
+
+                let num_rows = batch.num_rows();
+                for row in 0..num_rows {
+                    for (check_idx, predicate) in predicate_cols.iter().enumerate() {
+                        let failed_null = predicate.is_null(row);
+                        let failed_false = !failed_null && !predicate.value(row);
+                        if failed_null || failed_false {
+                            let check = &self.checks[check_idx];
+                            let delta_err = crate::error::assert_violation(
+                                &check.error_code,
+                                &check.error_message,
+                                row,
+                                failed_null,
+                            );
+                            return Poll::Ready(Some(Err(DataFusionError::External(Box::new(
+                                delta_err,
+                            )))));
+                        }
                     }
-                };
-                let pred_batch = match pred_data.try_into_record_batch() {
-                    Ok(rb) => rb,
-                    Err(e) => {
-                        return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e)))))
-                    }
-                };
-                let predicate = pred_batch.column(0).as_boolean();
-                // Keep nulls (NULL -> true), matching kernel filter semantics.
-                let mask = BooleanArray::from_iter((0..predicate.len()).map(|i| {
-                    Some(if predicate.is_null(i) {
-                        true
-                    } else {
-                        predicate.value(i)
-                    })
-                }));
-                let filtered = filter_record_batch(&batch, &mask)
-                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
-                Poll::Ready(Some(filtered))
+                }
+
+                Poll::Ready(Some(Ok(batch)))
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
             Poll::Ready(None) => Poll::Ready(None),
@@ -162,7 +205,7 @@ impl Stream for KernelFilterStream {
     }
 }
 
-impl RecordBatchStream for KernelFilterStream {
+impl RecordBatchStream for KernelAssertStream {
     fn schema(&self) -> delta_kernel::arrow::datatypes::SchemaRef {
         self.schema.clone()
     }

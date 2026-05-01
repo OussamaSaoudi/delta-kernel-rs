@@ -9,8 +9,8 @@ use delta_kernel::plans::ir::Plan;
 use futures::TryStreamExt;
 
 use crate::compile::{compile_plan, CompileContext};
-use crate::exec::RelationBatchRegistry;
 use crate::error::LiftDeltaErr;
+use crate::exec::RelationBatchRegistry;
 
 /// Minimal executor: holds a [`TaskContext`] for [`ExecutionPlan::execute`] calls.
 ///

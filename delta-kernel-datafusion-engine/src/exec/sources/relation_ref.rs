@@ -59,13 +59,10 @@ impl RelationRefExec {
         handle: RelationHandle,
         registry: Arc<RelationBatchRegistry>,
     ) -> Result<Self, DeltaError> {
-        let schema: delta_kernel::arrow::datatypes::SchemaRef = Arc::new(
-            handle
-                .schema
-                .as_ref()
-                .try_into_arrow()
-                .map_err(|e| crate::error::internal_error(format!("relation schema conversion: {e}")))?,
-        );
+        let schema: delta_kernel::arrow::datatypes::SchemaRef =
+            Arc::new(handle.schema.as_ref().try_into_arrow().map_err(|e| {
+                crate::error::internal_error(format!("relation schema conversion: {e}"))
+            })?);
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
@@ -92,7 +89,11 @@ impl Debug for RelationRefExec {
 
 impl DisplayAs for RelationRefExec {
     fn fmt_as(&self, _: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "RelationRefExec(name={}, id={})", self.handle.name, self.handle.id)
+        write!(
+            f,
+            "RelationRefExec(name={}, id={})",
+            self.handle.name, self.handle.id
+        )
     }
 }
 

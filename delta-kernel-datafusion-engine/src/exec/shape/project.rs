@@ -14,8 +14,8 @@ use datafusion_physical_plan::{
     SendableRecordBatchStream,
 };
 use delta_kernel::arrow::array::{ArrayRef, RecordBatch};
-use delta_kernel::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
+use delta_kernel::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
 use delta_kernel::engine::arrow_expression::ArrowEvaluationHandler;
 use delta_kernel::expressions::Expression;
 use delta_kernel::schema::SchemaRef;
@@ -47,20 +47,21 @@ impl KernelProjectExec {
         }
         let mut evaluators = Vec::with_capacity(columns.len());
         for (idx, expr) in columns.iter().enumerate() {
-            let eval = ArrowEvaluationHandler.new_expression_evaluator(
-                input_schema.clone(),
-                Arc::clone(expr),
-                output_fields[idx].data_type.clone(),
-            )
-            .map_err(|e| crate::error::internal_error(format!("project evaluator init: {e}")))?;
+            let eval = ArrowEvaluationHandler
+                .new_expression_evaluator(
+                    input_schema.clone(),
+                    Arc::clone(expr),
+                    output_fields[idx].data_type.clone(),
+                )
+                .map_err(|e| {
+                    crate::error::internal_error(format!("project evaluator init: {e}"))
+                })?;
             evaluators.push(eval);
         }
-        let arrow_schema: delta_kernel::arrow::datatypes::SchemaRef = Arc::new(
-            output_schema
-                .as_ref()
-                .try_into_arrow()
-                .map_err(|e| crate::error::internal_error(format!("project schema conversion: {e}")))?,
-        );
+        let arrow_schema: delta_kernel::arrow::datatypes::SchemaRef =
+            Arc::new(output_schema.as_ref().try_into_arrow().map_err(|e| {
+                crate::error::internal_error(format!("project schema conversion: {e}"))
+            })?);
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
             child.properties().output_partitioning().clone(),
@@ -160,11 +161,15 @@ impl Stream for KernelProjectStream {
                 for eval in &self.evaluators {
                     let evaluated = match eval.evaluate(&batch_for_eval) {
                         Ok(v) => v,
-                        Err(e) => return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
+                        Err(e) => {
+                            return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e)))))
+                        }
                     };
                     let rb = match evaluated.try_into_record_batch() {
                         Ok(v) => v,
-                        Err(e) => return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
+                        Err(e) => {
+                            return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e)))))
+                        }
                     };
                     if rb.num_columns() != 1 {
                         return Poll::Ready(Some(Err(DataFusionError::Execution(

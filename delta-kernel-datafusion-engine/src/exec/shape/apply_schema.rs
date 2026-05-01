@@ -28,7 +28,10 @@ pub struct ApplySchemaExec {
 }
 
 impl ApplySchemaExec {
-    pub fn try_new(child: Arc<dyn ExecutionPlan>, output_schema: Arc<StructType>) -> DfResult<Self> {
+    pub fn try_new(
+        child: Arc<dyn ExecutionPlan>,
+        output_schema: Arc<StructType>,
+    ) -> DfResult<Self> {
         let arrow_schema: delta_kernel::arrow::datatypes::Schema = output_schema
             .as_ref()
             .try_into_arrow()
@@ -51,7 +54,11 @@ impl ApplySchemaExec {
 
 impl DisplayAs for ApplySchemaExec {
     fn fmt_as(&self, _: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ApplySchemaExec(fields={})", self.output_schema.num_fields())
+        write!(
+            f,
+            "ApplySchemaExec(fields={})",
+            self.output_schema.num_fields()
+        )
     }
 }
 

@@ -9,19 +9,21 @@
 use std::sync::Arc;
 
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion_physical_plan::ExecutionPlan;
 use datafusion_physical_plan::union::UnionExec;
+use datafusion_physical_plan::ExecutionPlan;
 use delta_kernel::plans::errors::DeltaError;
-use delta_kernel::plans::ir::nodes::{RelationHandle, SinkType};
+use delta_kernel::plans::ir::nodes::{JoinType, RelationHandle, SinkType};
 use delta_kernel::plans::ir::{DeclarativePlanNode, Plan};
 use delta_kernel::schema::SchemaRef;
 
 use crate::exec::{
-    FileListingExec, KernelFilterExec, KernelProjectExec, LiteralExec, OrderedUnionExec,
-    RelationBatchRegistry, RelationRefExec,
+    FileListingExec, KernelAssertExec, KernelFilterExec, KernelProjectExec, LiteralExec,
+    OrderedUnionExec, RelationBatchRegistry, RelationRefExec,
 };
 
+mod join;
 mod scan;
+mod window;
 
 /// Context shared by the compiler for leaf nodes that need runtime side state.
 #[derive(Clone)]
@@ -60,7 +62,7 @@ pub fn compile_plan(
     }
 }
 
-fn compile_declarative_node(
+pub(super) fn compile_declarative_node(
     node: &DeclarativePlanNode,
     ctx: &CompileContext,
 ) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
@@ -70,7 +72,9 @@ fn compile_declarative_node(
             n.rows.clone(),
         )?)),
         DeclarativePlanNode::Scan(node) => scan::compile_scan(node),
-        DeclarativePlanNode::FileListing(node) => Ok(Arc::new(FileListingExec::new(node.path.clone()))),
+        DeclarativePlanNode::FileListing(node) => {
+            Ok(Arc::new(FileListingExec::new(node.path.clone())))
+        }
         DeclarativePlanNode::Relation(handle) => compile_relation(handle, ctx),
         DeclarativePlanNode::Filter { child, node } => {
             let child_plan = compile_declarative_node(child, ctx)?;
@@ -91,6 +95,20 @@ fn compile_declarative_node(
                 node.output_schema.clone(),
             )?))
         }
+        DeclarativePlanNode::Assert { child, node } => {
+            let child_plan = compile_declarative_node(child, ctx)?;
+            let input_schema = node_output_schema(child)?;
+            Ok(Arc::new(KernelAssertExec::try_new(
+                child_plan,
+                input_schema,
+                &node.checks,
+            )?))
+        }
+        DeclarativePlanNode::Window { child, node } => {
+            let child_plan = compile_declarative_node(child, ctx)?;
+            let input_schema = node_output_schema(child)?;
+            window::compile_window_node(child_plan, input_schema, node)
+        }
         DeclarativePlanNode::Union { children, node } => {
             if children.is_empty() {
                 return Err(crate::error::unsupported(
@@ -104,19 +122,23 @@ fn compile_declarative_node(
             if node.ordered {
                 let coalesced = child_plans
                     .into_iter()
-                    .map(|plan| Arc::new(CoalescePartitionsExec::new(plan)) as Arc<dyn ExecutionPlan>)
+                    .map(|plan| {
+                        Arc::new(CoalescePartitionsExec::new(plan)) as Arc<dyn ExecutionPlan>
+                    })
                     .collect::<Vec<_>>();
-                Ok(Arc::new(OrderedUnionExec::try_new(coalesced).map_err(crate::error::datafusion_err_to_delta)?))
+                Ok(Arc::new(
+                    OrderedUnionExec::try_new(coalesced)
+                        .map_err(crate::error::datafusion_err_to_delta)?,
+                ))
             } else {
-                let unioned =
-                    UnionExec::try_new(child_plans).map_err(crate::error::datafusion_err_to_delta)?;
+                let unioned = UnionExec::try_new(child_plans)
+                    .map_err(crate::error::datafusion_err_to_delta)?;
                 Ok(Arc::new(CoalescePartitionsExec::new(unioned)))
             }
         }
-        other => Err(crate::error::unsupported(format!(
-            "DataFusion scaffold does not yet compile `{}` nodes",
-            declarative_node_kind(other)
-        ))),
+        DeclarativePlanNode::Join { build, probe, node } => {
+            join::compile_join(build.as_ref(), probe.as_ref(), node, ctx)
+        }
     }
 }
 
@@ -133,13 +155,33 @@ fn node_output_schema(node: &DeclarativePlanNode) -> Result<SchemaRef, DeltaErro
             node_output_schema(first)
         }
         DeclarativePlanNode::Filter { child, .. } => node_output_schema(child),
+        DeclarativePlanNode::Assert { child, .. } => node_output_schema(child),
+        DeclarativePlanNode::Window { child, node } => {
+            let child_schema = node_output_schema(child)?;
+            window::window_output_kernel_schema(&child_schema, node)
+        }
+        DeclarativePlanNode::Join { build, probe, node } => match node.join_type {
+            JoinType::LeftAnti => node_output_schema(probe),
+            JoinType::Inner => {
+                let build_schema = node_output_schema(build)?;
+                let probe_schema = node_output_schema(probe)?;
+                build_schema
+                    .as_ref()
+                    .add(probe_schema.fields().cloned())
+                    .map(Arc::new)
+                    .map_err(|e| {
+                        crate::error::plan_compilation(format!(
+                            "inner join combined output schema is invalid: {e}"
+                        ))
+                    })
+            }
+            other_join => Err(crate::error::unsupported(format!(
+                "Schema inference for join type {other_join:?} is not implemented yet",
+            ))),
+        },
         DeclarativePlanNode::FileListing(_) => Err(crate::error::unsupported(
             "FileListing schema inference for Filter/Project is not wired yet",
         )),
-        other => Err(crate::error::unsupported(format!(
-            "Schema inference for {} is not implemented yet",
-            declarative_node_kind(other)
-        ))),
     }
 }
 
@@ -151,19 +193,4 @@ fn compile_relation(
         handle.clone(),
         Arc::clone(&ctx.relation_registry),
     )?))
-}
-
-fn declarative_node_kind(node: &DeclarativePlanNode) -> &'static str {
-    match node {
-        DeclarativePlanNode::Scan(_) => "Scan",
-        DeclarativePlanNode::FileListing(_) => "FileListing",
-        DeclarativePlanNode::Literal(_) => "Literal",
-        DeclarativePlanNode::Relation(_) => "Relation",
-        DeclarativePlanNode::Filter { .. } => "Filter",
-        DeclarativePlanNode::Project { .. } => "Project",
-        DeclarativePlanNode::Window { .. } => "Window",
-        DeclarativePlanNode::Assert { .. } => "Assert",
-        DeclarativePlanNode::Union { .. } => "Union",
-        DeclarativePlanNode::Join { .. } => "Join",
-    }
 }

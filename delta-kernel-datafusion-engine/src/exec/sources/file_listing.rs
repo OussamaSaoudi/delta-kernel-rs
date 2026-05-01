@@ -16,8 +16,8 @@ use datafusion_physical_plan::{
 };
 use delta_kernel::arrow::array::{Int64Array, RecordBatch, StringArray};
 use delta_kernel::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-use futures::{ready, stream, Stream, StreamExt};
 use delta_kernel::object_store::{self, ObjectMeta};
+use futures::{ready, stream, Stream, StreamExt};
 
 const BATCH_SIZE: usize = 1024;
 
@@ -133,23 +133,34 @@ impl ExecutionPlan for FileListingExec {
         let base_url = self.path.clone();
         if self.path.scheme() == "file" {
             Ok(Box::pin(SortedFileListingStream::new(
-                list_stream, schema, base_url,
+                list_stream,
+                schema,
+                base_url,
             )))
         } else {
-            Ok(Box::pin(FileListingStream::new(list_stream, schema, base_url)))
+            Ok(Box::pin(FileListingStream::new(
+                list_stream,
+                schema,
+                base_url,
+            )))
         }
     }
 }
 
 struct FileListingStream {
-    inner: Pin<Box<dyn Stream<Item = Vec<Result<ObjectMeta, delta_kernel::object_store::Error>>> + Send>>,
+    inner: Pin<
+        Box<dyn Stream<Item = Vec<Result<ObjectMeta, delta_kernel::object_store::Error>>> + Send>,
+    >,
     schema: delta_kernel::arrow::datatypes::SchemaRef,
     base_url: url::Url,
 }
 
 impl FileListingStream {
     fn new(
-        list_stream: futures::stream::BoxStream<'static, Result<ObjectMeta, delta_kernel::object_store::Error>>,
+        list_stream: futures::stream::BoxStream<
+            'static,
+            Result<ObjectMeta, delta_kernel::object_store::Error>,
+        >,
         schema: delta_kernel::arrow::datatypes::SchemaRef,
         base_url: url::Url,
     ) -> Self {
@@ -203,7 +214,10 @@ enum SortedStreamState {
 
 impl SortedFileListingStream {
     fn new(
-        list_stream: futures::stream::BoxStream<'static, Result<ObjectMeta, delta_kernel::object_store::Error>>,
+        list_stream: futures::stream::BoxStream<
+            'static,
+            Result<ObjectMeta, delta_kernel::object_store::Error>,
+        >,
         schema: delta_kernel::arrow::datatypes::SchemaRef,
         base_url: url::Url,
     ) -> Self {
@@ -224,25 +238,32 @@ impl Stream for SortedFileListingStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             match &mut self.state {
-                SortedStreamState::Collecting { inner, collected } => match ready!(inner.as_mut().poll_next(cx)) {
-                    Some(Ok(meta)) => collected.push(meta),
-                    Some(Err(e)) => {
-                        self.state = SortedStreamState::Done;
-                        return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e)))));
+                SortedStreamState::Collecting { inner, collected } => {
+                    match ready!(inner.as_mut().poll_next(cx)) {
+                        Some(Ok(meta)) => collected.push(meta),
+                        Some(Err(e)) => {
+                            self.state = SortedStreamState::Done;
+                            return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e)))));
+                        }
+                        None => {
+                            let mut sorted = std::mem::take(collected);
+                            sorted.sort_by(|a, b| a.location.cmp(&b.location));
+                            let chunks: Vec<Vec<ObjectMeta>> =
+                                sorted.chunks(BATCH_SIZE).map(|c| c.to_vec()).collect();
+                            self.state = SortedStreamState::Emitting {
+                                inner: Box::pin(stream::iter(chunks)),
+                            };
+                        }
                     }
-                    None => {
-                        let mut sorted = std::mem::take(collected);
-                        sorted.sort_by(|a, b| a.location.cmp(&b.location));
-                        let chunks: Vec<Vec<ObjectMeta>> =
-                            sorted.chunks(BATCH_SIZE).map(|c| c.to_vec()).collect();
-                        self.state = SortedStreamState::Emitting {
-                            inner: Box::pin(stream::iter(chunks)),
-                        };
-                    }
-                },
-                SortedStreamState::Emitting { inner } => match ready!(inner.as_mut().poll_next(cx)) {
+                }
+                SortedStreamState::Emitting { inner } => match ready!(inner.as_mut().poll_next(cx))
+                {
                     Some(chunk) => {
-                        return Poll::Ready(Some(metas_to_batch(&chunk, &self.schema, &self.base_url)));
+                        return Poll::Ready(Some(metas_to_batch(
+                            &chunk,
+                            &self.schema,
+                            &self.base_url,
+                        )));
                     }
                     None => {
                         self.state = SortedStreamState::Done;

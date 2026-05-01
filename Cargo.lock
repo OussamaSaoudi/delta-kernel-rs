@@ -1639,6 +1639,9 @@ dependencies = [
  "datafusion-physical-plan",
  "delta_kernel",
  "futures",
+ "parquet 58.1.0",
+ "tempfile",
+ "tokio",
  "url",
 ]
 

@@ -118,10 +118,9 @@ impl Stream for OrderedUnionStream {
                 if self.current_child_idx >= self.children.len() {
                     return Poll::Ready(None);
                 }
-                let next_stream = match self.children[self.current_child_idx].execute(
-                    0,
-                    Arc::clone(&self.context),
-                ) {
+                let next_stream = match self.children[self.current_child_idx]
+                    .execute(0, Arc::clone(&self.context))
+                {
                     Ok(stream) => stream,
                     Err(e) => return Poll::Ready(Some(Err(e))),
                 };
