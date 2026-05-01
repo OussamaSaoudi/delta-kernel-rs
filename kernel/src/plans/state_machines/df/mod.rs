@@ -7,10 +7,17 @@
 //! - **Phase 3.3 — checkpoint classic parquet write**: [`checkpoint_write`] materializes checkpoint
 //!   rows into the DF relation registry and streams them through
 //!   [`crate::plans::ir::nodes::SinkType::Write`].
+//!
+//! - **Phase 4.x — scan log replay**: [`scan_log_replay_sm`] builds a
+//!   [`CoroutineSM`](crate::plans::state_machines::framework::coroutine::engine::CoroutineSM) for
+//!   JSON-commit dedup plus optional checkpoint anti-join (implementation in `scan_log_replay.rs`).
+//!   [`ScanLogReplayAntiJoinSM`] remains as a deprecated
+//!   [`StateMachine`](crate::plans::state_machines::framework::state_machine::StateMachine) shim.
 
 mod checkpoint_write;
 mod commit_emit;
 mod insert;
+mod scan_log_replay;
 
 pub use checkpoint_write::{
     checkpoint_classic_parquet_write_plan, checkpoint_classic_parquet_write_sm,
@@ -21,3 +28,6 @@ pub use commit_emit::{
     CommitEnvelopeCollector,
 };
 pub use insert::{insert_write_rows_prepared, insert_write_sm, WriteRowCount};
+pub use scan_log_replay::scan_log_replay_sm;
+#[allow(deprecated)]
+pub use scan_log_replay::ScanLogReplayAntiJoinSM;
