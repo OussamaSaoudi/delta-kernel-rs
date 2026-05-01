@@ -1,18 +1,41 @@
-//! Declarative [`Plan`] → DataFusion [`ExecutionPlan`] compilation (Phase 1.1 subset).
+//! Declarative [`Plan`] -> DataFusion [`ExecutionPlan`] compilation.
+//!
+//! Phase 1.2 extends the scaffold with leaf support:
+//! - `Literal`
+//! - `Scan`
+//! - `FileListing`
+//! - `Relation`
 
 use std::sync::Arc;
 
 use datafusion_physical_plan::ExecutionPlan;
 use delta_kernel::plans::errors::DeltaError;
-use delta_kernel::plans::ir::nodes::SinkType;
+use delta_kernel::plans::ir::nodes::{RelationHandle, SinkType};
 use delta_kernel::plans::ir::{DeclarativePlanNode, Plan};
 
-use crate::exec::LiteralExec;
+use crate::exec::{FileListingExec, LiteralExec, RelationBatchRegistry, RelationRefExec};
 
-/// Compile a complete [`Plan`] when the envelope is supported by this scaffold.
-pub fn compile_plan(plan: &Plan) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
+mod scan;
+
+/// Context shared by the compiler for leaf nodes that need runtime side state.
+#[derive(Clone)]
+pub struct CompileContext {
+    pub relation_registry: Arc<RelationBatchRegistry>,
+}
+
+impl CompileContext {
+    pub fn new(relation_registry: Arc<RelationBatchRegistry>) -> Self {
+        Self { relation_registry }
+    }
+}
+
+/// Compile a complete [`Plan`] when the sink envelope is supported.
+pub fn compile_plan(
+    plan: &Plan,
+    ctx: &CompileContext,
+) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
     match &plan.sink.sink_type {
-        SinkType::Results => compile_declarative_node(&plan.root),
+        SinkType::Results => compile_declarative_node(&plan.root, ctx),
         SinkType::Relation(_) => Err(crate::error::unsupported(
             "Relation sink is not implemented for the DataFusion engine scaffold",
         )),
@@ -33,17 +56,31 @@ pub fn compile_plan(plan: &Plan) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
 
 fn compile_declarative_node(
     node: &DeclarativePlanNode,
+    ctx: &CompileContext,
 ) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
     match node {
         DeclarativePlanNode::Literal(n) => Ok(Arc::new(LiteralExec::try_new(
             n.schema.clone(),
             n.rows.clone(),
         )?)),
+        DeclarativePlanNode::Scan(node) => scan::compile_scan(node),
+        DeclarativePlanNode::FileListing(node) => Ok(Arc::new(FileListingExec::new(node.path.clone()))),
+        DeclarativePlanNode::Relation(handle) => compile_relation(handle, ctx),
         other => Err(crate::error::unsupported(format!(
-            "DataFusion engine scaffold only supports Literal roots inside Results plans; got {}",
+            "DataFusion scaffold does not yet compile `{}` nodes",
             declarative_node_kind(other)
         ))),
     }
+}
+
+fn compile_relation(
+    handle: &RelationHandle,
+    ctx: &CompileContext,
+) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
+    Ok(Arc::new(RelationRefExec::new(
+        handle.clone(),
+        Arc::clone(&ctx.relation_registry),
+    )?))
 }
 
 fn declarative_node_kind(node: &DeclarativePlanNode) -> &'static str {

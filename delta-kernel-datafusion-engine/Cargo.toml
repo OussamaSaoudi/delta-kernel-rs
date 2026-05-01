@@ -21,5 +21,10 @@ datafusion-common = { version = "53", default-features = false }
 datafusion-execution = { version = "53", default-features = false }
 datafusion-physical-expr = { version = "53", default-features = false }
 datafusion-physical-plan = { version = "53", default-features = false }
+datafusion-datasource = { version = "53", default-features = false }
+datafusion-datasource-json = { version = "53", default-features = false }
+datafusion-datasource-parquet = { version = "53", default-features = false }
 
 futures = "0.3"
+chrono = "0.4"
+url = "2"

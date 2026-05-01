@@ -8,7 +8,8 @@ use delta_kernel::plans::errors::DeltaError;
 use delta_kernel::plans::ir::Plan;
 use futures::TryStreamExt;
 
-use crate::compile::compile_plan;
+use crate::compile::{compile_plan, CompileContext};
+use crate::exec::RelationBatchRegistry;
 use crate::error::LiftDeltaErr;
 
 /// Minimal executor: holds a [`TaskContext`] for [`ExecutionPlan::execute`] calls.
@@ -17,19 +18,25 @@ use crate::error::LiftDeltaErr;
 /// literal execution only needs the default task context.
 pub struct DataFusionExecutor {
     task_ctx: Arc<TaskContext>,
+    relation_registry: Arc<RelationBatchRegistry>,
 }
 
 impl DataFusionExecutor {
     /// Builds an executor backed by [`TaskContext::default()`].
     pub fn try_new() -> Result<Self, DeltaError> {
+        let relation_registry = Arc::new(RelationBatchRegistry::new());
         Ok(Self {
             task_ctx: Arc::new(TaskContext::default()),
+            relation_registry,
         })
     }
 
     /// Compile a [`Plan`] into a physical node when Phase 1.1 dispatch accepts it.
     pub fn compile_plan(&self, plan: &Plan) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
-        compile_plan(plan)
+        compile_plan(
+            plan,
+            &CompileContext::new(Arc::clone(&self.relation_registry)),
+        )
     }
 
     /// Compile and execute partition `0`.
@@ -52,5 +59,9 @@ impl DataFusionExecutor {
 
     pub fn task_context(&self) -> &Arc<TaskContext> {
         &self.task_ctx
+    }
+
+    pub fn relation_batch_registry(&self) -> &Arc<RelationBatchRegistry> {
+        &self.relation_registry
     }
 }
