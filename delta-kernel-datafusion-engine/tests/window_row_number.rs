@@ -129,10 +129,80 @@ fn multiple_row_number_functions_duplicate_rank_column() {
     assert_eq!(rn_column(&batches[0], "b"), vec![1, 2]);
 }
 
+/// Native DataFusion Window lowering: explicit ORDER BY (DESC on `v`) sorts within each
+/// PARTITION BY `part` group and assigns `row_number()` per the resulting ordering. Verifies the
+/// FSR commit-4 contract — non-empty `order_by` no longer errors and yields the expected sequence
+/// regardless of upstream stream order.
 #[test]
-fn window_with_order_by_is_rejected_at_compile_time() {
+fn row_number_with_order_by_desc_assigns_rank_within_partition() {
     let schema = sample_schema();
-    let rows = vec![vec![Scalar::Long(1), Scalar::Long(10)]];
+    // Intentionally interleave partitions so stream order would give wrong answers without sort.
+    let rows = vec![
+        vec![Scalar::Long(1), Scalar::Long(10)],
+        vec![Scalar::Long(2), Scalar::Long(50)],
+        vec![Scalar::Long(1), Scalar::Long(30)],
+        vec![Scalar::Long(2), Scalar::Long(40)],
+        vec![Scalar::Long(1), Scalar::Long(20)],
+    ];
+    let plan = DeclarativePlanNode::literal(schema, rows)
+        .expect("literal")
+        .window(
+            vec![WindowFunction {
+                function_name: "row_number".into(),
+                args: vec![],
+                output_col: "_rn".into(),
+            }],
+            vec![Arc::new(Expression::column(["part"]))],
+            vec![OrderingSpec::desc(
+                delta_kernel::expressions::ColumnName::new(["v"]),
+            )],
+        )
+        .results();
+
+    let exec = DataFusionExecutor::try_new().expect("executor");
+    let batches =
+        futures::executor::block_on(async { exec.execute_plan_collect(plan).await }).expect("run");
+
+    // Aggregate (part, v, rn) tuples across however many batches the engine emits, then verify
+    // the per-partition rank assignment on the canonicalized rows.
+    let mut tuples: Vec<(i64, i64, i64)> = Vec::new();
+    for batch in &batches {
+        let part_idx = batch
+            .schema()
+            .index_of("part")
+            .expect("part column present");
+        let v_idx = batch.schema().index_of("v").expect("v column present");
+        let rn_idx = batch.schema().index_of("_rn").expect("_rn column present");
+        let part = batch.column(part_idx).as_primitive::<Int64Type>().values();
+        let v = batch.column(v_idx).as_primitive::<Int64Type>().values();
+        let rn = batch.column(rn_idx).as_primitive::<Int64Type>().values();
+        for i in 0..batch.num_rows() {
+            tuples.push((part[i], v[i], rn[i]));
+        }
+    }
+    tuples.sort();
+
+    // For partition=1, sorted DESC by v: (30, 1), (20, 2), (10, 3).
+    // For partition=2, sorted DESC by v: (50, 1), (40, 2).
+    let expected = vec![
+        (1, 10, 3),
+        (1, 20, 2),
+        (1, 30, 1),
+        (2, 40, 2),
+        (2, 50, 1),
+    ];
+    assert_eq!(tuples, expected);
+}
+
+/// Smoke test: ORDER BY ASC works and matches the DESC test inverted.
+#[test]
+fn row_number_with_order_by_asc_matches_inverted_desc() {
+    let schema = sample_schema();
+    let rows = vec![
+        vec![Scalar::Long(1), Scalar::Long(30)],
+        vec![Scalar::Long(1), Scalar::Long(10)],
+        vec![Scalar::Long(1), Scalar::Long(20)],
+    ];
     let plan = DeclarativePlanNode::literal(schema, rows)
         .expect("literal")
         .window(
@@ -149,10 +219,20 @@ fn window_with_order_by_is_rejected_at_compile_time() {
         .results();
 
     let exec = DataFusionExecutor::try_new().expect("executor");
-    let err = exec.compile_plan(&plan).expect_err("order_by unsupported");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("ORDER BY") || msg.contains("order_by"),
-        "unexpected error: {msg}"
-    );
+    let batches =
+        futures::executor::block_on(async { exec.execute_plan_collect(plan).await }).expect("run");
+
+    let mut tuples: Vec<(i64, i64)> = Vec::new();
+    for batch in &batches {
+        let v_idx = batch.schema().index_of("v").expect("v column present");
+        let rn_idx = batch.schema().index_of("_rn").expect("_rn column present");
+        let v = batch.column(v_idx).as_primitive::<Int64Type>().values();
+        let rn = batch.column(rn_idx).as_primitive::<Int64Type>().values();
+        for i in 0..batch.num_rows() {
+            tuples.push((v[i], rn[i]));
+        }
+    }
+    tuples.sort();
+    // ASC by v inside the single partition: (10, 1), (20, 2), (30, 3).
+    assert_eq!(tuples, vec![(10, 1), (20, 2), (30, 3)]);
 }
