@@ -163,10 +163,34 @@ impl DataFusionExecutor {
         &self,
         op: PhaseOperation,
     ) -> Result<PhaseState, EngineError> {
-        let (state, _) = self
-            .execute_phase_operation_with_results_capture(op)
-            .await?;
-        Ok(state)
+        self.clear_kdf_harvest_slot();
+        match op {
+            PhaseOperation::Plans(plans) => {
+                let state = PhaseState::empty();
+                let ctx = CompileContext {
+                    relation_registry: Arc::clone(&self.relation_registry),
+                    kdf_harvest_slot: Arc::clone(&self.kdf_harvest_slot),
+                    phase_state: Some(state.clone()),
+                    engine: Arc::clone(&self.engine),
+                };
+                for plan in plans {
+                    let physical = compile_plan(&plan, &ctx)
+                        .and_then(|p| self.optimize_physical_plan(p))
+                        .map_err(EngineError::internal)?;
+                    if matches!(plan.sink.sink_type, SinkType::Results) {
+                        self.drain_results_stream(physical)
+                            .await
+                            .map_err(EngineError::internal)?;
+                    } else {
+                        self.drain_plan_stream(physical)
+                            .await
+                            .map_err(EngineError::internal)?;
+                    }
+                }
+                Ok(state)
+            }
+            PhaseOperation::SchemaQuery(node) => execute_schema_query_phase(&self.engine, node),
+        }
     }
 
     /// Same draining semantics as [`Self::execute_phase_operation`], plus capture of the batches
@@ -194,13 +218,17 @@ impl DataFusionExecutor {
                     let physical = compile_plan(&plan, &ctx)
                         .and_then(|p| self.optimize_physical_plan(p))
                         .map_err(EngineError::internal)?;
-                    let batches = self
-                        .collect_all_partitions(physical)
-                        .await
-                        .map_err(EngineError::internal)?;
-
                     if matches!(plan.sink.sink_type, SinkType::Results) {
+                        let mut stream = self.single_results_stream(physical).map_err(EngineError::internal)?;
+                        let mut batches = Vec::new();
+                        while let Some(batch) = stream.try_next().await.map_err(datafusion_err_to_delta).map_err(EngineError::internal)? {
+                            batches.push(batch);
+                        }
                         last_results_batches = Some(batches);
+                    } else {
+                        self.drain_plan_stream(physical)
+                            .await
+                            .map_err(EngineError::internal)?;
                     }
                 }
                 Ok((state, last_results_batches))
@@ -262,6 +290,29 @@ impl DataFusionExecutor {
             match sm.advance(phase_result)? {
                 AdvanceResult::Continue => {}
                 AdvanceResult::Done(v) => return Ok((v, last_results)),
+            }
+        }
+    }
+
+    /// Drive a [`CoroutineSM`] to completion while streaming `Results` sink output batches to a
+    /// caller callback as they are produced. Unlike
+    /// [`Self::drive_coroutine_sm_collecting_results`], this does not materialize all result
+    /// batches in memory first.
+    pub async fn drive_coroutine_sm_streaming_results<R, F>(
+        &self,
+        mut sm: CoroutineSM<R>,
+        mut on_batch: F,
+    ) -> Result<R, DeltaError>
+    where
+        R: Send + 'static,
+        F: FnMut(RecordBatch) -> Result<(), DeltaError> + Send,
+    {
+        loop {
+            let op = sm.get_operation()?;
+            let phase_result = self.execute_phase_operation_streaming_results(op, &mut on_batch).await;
+            match sm.advance(phase_result)? {
+                AdvanceResult::Continue => {}
+                AdvanceResult::Done(v) => return Ok(v),
             }
         }
     }
@@ -371,24 +422,97 @@ impl DataFusionExecutor {
         &self,
         physical: Arc<dyn ExecutionPlan>,
     ) -> Result<Vec<RecordBatch>, DeltaError> {
+        let mut stream = self.single_results_stream(physical)?;
         let mut out = Vec::new();
-        let partitions = physical.output_partitioning().partition_count();
-        for partition in 0..partitions {
-            let stream = match physical.execute(partition, Arc::clone(&self.task_ctx)) {
-                Ok(stream) => stream,
-                Err(err)
-                    if partition > 0
-                        && err
-                            .to_string()
-                            .contains("supports partition 0 only") =>
-                {
-                    break;
-                }
-                Err(err) => return Err(datafusion_err_to_delta(err)),
-            };
-            let mut batches: Vec<RecordBatch> = stream.try_collect().await.lift()?;
-            out.append(&mut batches);
+        while let Some(batch) = stream.try_next().await.map_err(datafusion_err_to_delta)? {
+            out.push(batch);
         }
         Ok(out)
+    }
+
+    fn single_results_stream(
+        &self,
+        mut physical: Arc<dyn ExecutionPlan>,
+    ) -> Result<SendableRecordBatchStream, DeltaError> {
+        if physical.output_partitioning().partition_count() > 1 {
+            physical = Arc::new(CoalescePartitionsExec::new(physical));
+        }
+        physical.execute(0, Arc::clone(&self.task_ctx)).lift()
+    }
+
+    async fn drain_plan_stream(&self, physical: Arc<dyn ExecutionPlan>) -> Result<(), DeltaError> {
+        let mut stream = self.root_partition0_stream(physical)?;
+        while stream
+            .try_next()
+            .await
+            .map_err(datafusion_err_to_delta)?
+            .is_some()
+        {}
+        Ok(())
+    }
+
+    fn root_partition0_stream(
+        &self,
+        physical: Arc<dyn ExecutionPlan>,
+    ) -> Result<SendableRecordBatchStream, DeltaError> {
+        physical.execute(0, Arc::clone(&self.task_ctx)).lift()
+    }
+
+    async fn drain_results_stream(
+        &self,
+        physical: Arc<dyn ExecutionPlan>,
+    ) -> Result<(), DeltaError> {
+        let mut stream = self.single_results_stream(physical)?;
+        while stream
+            .try_next()
+            .await
+            .map_err(datafusion_err_to_delta)?
+            .is_some()
+        {}
+        Ok(())
+    }
+
+    async fn execute_phase_operation_streaming_results<F>(
+        &self,
+        op: PhaseOperation,
+        on_batch: &mut F,
+    ) -> Result<PhaseState, EngineError>
+    where
+        F: FnMut(RecordBatch) -> Result<(), DeltaError> + Send,
+    {
+        self.clear_kdf_harvest_slot();
+        match op {
+            PhaseOperation::Plans(plans) => {
+                let state = PhaseState::empty();
+                let ctx = CompileContext {
+                    relation_registry: Arc::clone(&self.relation_registry),
+                    kdf_harvest_slot: Arc::clone(&self.kdf_harvest_slot),
+                    phase_state: Some(state.clone()),
+                    engine: Arc::clone(&self.engine),
+                };
+                for plan in plans {
+                    let physical = compile_plan(&plan, &ctx)
+                        .and_then(|p| self.optimize_physical_plan(p))
+                        .map_err(EngineError::internal)?;
+                    if matches!(plan.sink.sink_type, SinkType::Results) {
+                        let mut stream = self.single_results_stream(physical).map_err(EngineError::internal)?;
+                        while let Some(batch) = stream
+                            .try_next()
+                            .await
+                            .map_err(datafusion_err_to_delta)
+                            .map_err(EngineError::internal)?
+                        {
+                            on_batch(batch).map_err(EngineError::internal)?;
+                        }
+                    } else {
+                        self.drain_plan_stream(physical)
+                            .await
+                            .map_err(EngineError::internal)?;
+                    }
+                }
+                Ok(state)
+            }
+            PhaseOperation::SchemaQuery(node) => execute_schema_query_phase(&self.engine, node),
+        }
     }
 }
