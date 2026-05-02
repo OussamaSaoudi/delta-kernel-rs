@@ -47,7 +47,6 @@ impl TraceContext {
             phase: phase.to_string(),
         }
     }
-
 }
 
 impl std::fmt::Display for TraceContext {

@@ -345,13 +345,9 @@ pub fn evaluate_expression(
             // Coalesce accumulated arrays
             Ok(coalesce_arrays(&arrays, result_type)?)
         }
-        (
-            Variadic(VariadicExpression {
-                op: Array,
-                exprs,
-            }),
-            result_type,
-        ) => evaluate_array_expression(exprs, batch, result_type),
+        (Variadic(VariadicExpression { op: Array, exprs }), result_type) => {
+            evaluate_array_expression(exprs, batch, result_type)
+        }
         (
             If(IfExpression {
                 condition,
@@ -504,8 +500,7 @@ fn evaluate_array_expression(
     }
     let values = interleave(&array_refs, &indices)?;
 
-    let offsets =
-        OffsetBuffer::<i32>::from_lengths(std::iter::repeat_n(element_count, row_count));
+    let offsets = OffsetBuffer::<i32>::from_lengths(std::iter::repeat_n(element_count, row_count));
 
     // The output ListArray's element field nullability follows the requested type when given;
     // otherwise we conservatively mark elements nullable.
@@ -835,9 +830,9 @@ fn list_utf8_like_to_json_strings(array_ref: &ArrayRef) -> Result<ArrayRef, Arro
             }
         }
         ArrowDataType::LargeList(_) => {
-            let la = array_ref
-                .as_list_opt::<i64>()
-                .ok_or_else(|| ArrowError::InvalidArgumentError("expected LargeListArray".into()))?;
+            let la = array_ref.as_list_opt::<i64>().ok_or_else(|| {
+                ArrowError::InvalidArgumentError("expected LargeListArray".into())
+            })?;
             for i in 0..len {
                 if la.is_null(i) {
                     rows.push(None);
@@ -861,17 +856,15 @@ pub fn to_json(input: &dyn Datum) -> Result<ArrayRef, ArrowError> {
     let (array_ref, _is_scalar) = input.get();
     let array_ref: ArrayRef = make_array(array_ref.to_data());
     match array_ref.data_type() {
-        ArrowDataType::List(inner) | ArrowDataType::LargeList(inner) => {
-            match inner.data_type() {
-                ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
-                    list_utf8_like_to_json_strings(&array_ref)
-                }
-                _ => Err(ArrowError::InvalidArgumentError(format!(
-                    "TO_JSON supports only struct columns and UTF-8 element lists; got list of {:?}",
-                    inner.data_type()
-                ))),
+        ArrowDataType::List(inner) | ArrowDataType::LargeList(inner) => match inner.data_type() {
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+                list_utf8_like_to_json_strings(&array_ref)
             }
-        }
+            _ => Err(ArrowError::InvalidArgumentError(format!(
+                "TO_JSON supports only struct columns and UTF-8 element lists; got list of {:?}",
+                inner.data_type()
+            ))),
+        },
         ArrowDataType::Struct(_) => {
             let struct_array = array_ref.as_struct_opt().ok_or_else(|| {
                 ArrowError::InvalidArgumentError(format!(
@@ -1984,10 +1977,7 @@ mod tests {
         let a_values = Int32Array::from(vec![1, 2]);
         let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(a_values)]).unwrap();
 
-        let expr = Expression::array([
-            Expression::column(["a"]),
-            Expression::literal("oops"),
-        ]);
+        let expr = Expression::array([Expression::column(["a"]), Expression::literal("oops")]);
 
         let result = evaluate_expression(&expr, &batch, None);
         assert!(result.is_err(), "mixed-type ARRAY should error");

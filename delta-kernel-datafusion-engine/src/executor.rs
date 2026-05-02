@@ -26,8 +26,11 @@
 
 use std::sync::{Arc, Mutex};
 
+use datafusion_execution::config::SessionConfig;
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
-use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_optimizer::optimizer::PhysicalOptimizer;
+use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use delta_kernel::arrow::record_batch::RecordBatch;
 use delta_kernel::engine::default::DefaultEngineBuilder;
 use delta_kernel::object_store::local::LocalFileSystem;
@@ -95,6 +98,8 @@ fn execute_schema_query_phase(
 /// literal execution only needs the default task context.
 pub struct DataFusionExecutor {
     task_ctx: Arc<TaskContext>,
+    session_config: SessionConfig,
+    physical_optimizer: PhysicalOptimizer,
     relation_registry: Arc<RelationBatchRegistry>,
     kdf_harvest_slot: Arc<Mutex<Option<FinishedHandle>>>,
     engine: Arc<dyn Engine>,
@@ -110,10 +115,13 @@ impl DataFusionExecutor {
     /// Builds an executor that uses the provided kernel [`Engine`] for IO helpers (object-store,
     /// parquet handler, etc).
     pub fn try_new_with_engine(engine: Arc<dyn Engine>) -> Result<Self, DeltaError> {
+        let session_config = SessionConfig::new();
         let relation_registry = Arc::new(RelationBatchRegistry::new());
         let kdf_harvest_slot = Arc::new(Mutex::new(None));
         Ok(Self {
             task_ctx: Arc::new(TaskContext::default()),
+            session_config,
+            physical_optimizer: PhysicalOptimizer::new(),
             relation_registry,
             kdf_harvest_slot,
             engine,
@@ -122,14 +130,32 @@ impl DataFusionExecutor {
 
     /// Compile a [`Plan`] into a physical node when Phase 1.1 dispatch accepts it.
     pub fn compile_plan(&self, plan: &Plan) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
-        compile_plan(
+        let physical = compile_plan(
             plan,
             &CompileContext::new(
                 Arc::clone(&self.relation_registry),
                 Arc::clone(&self.kdf_harvest_slot),
                 Arc::clone(&self.engine),
             ),
-        )
+        )?;
+        self.optimize_physical_plan(physical)
+    }
+
+    fn optimize_physical_plan(
+        &self,
+        mut plan: Arc<dyn ExecutionPlan>,
+    ) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
+        for rule in &self.physical_optimizer.rules {
+            plan = rule
+                .optimize(plan, self.session_config.options())
+                .map_err(|e| {
+                    crate::error::internal_error(format!(
+                        "DataFusion physical optimizer `{}` failed: {e}",
+                        rule.name()
+                    ))
+                })?;
+        }
+        Ok(plan)
     }
 
     /// Drain a [`PhaseOperation`] against the executor and return the resulting [`PhaseState`].
@@ -165,14 +191,13 @@ impl DataFusionExecutor {
                 };
                 let mut last_results_batches: Option<Vec<RecordBatch>> = None;
                 for plan in plans {
-                    let physical = compile_plan(&plan, &ctx).map_err(EngineError::internal)?;
-                    let stream = physical
-                        .execute(0, Arc::clone(&self.task_ctx))
+                    let physical = compile_plan(&plan, &ctx)
+                        .and_then(|p| self.optimize_physical_plan(p))
                         .map_err(EngineError::internal)?;
-                    let batches: Vec<RecordBatch> = stream
-                        .try_collect()
+                    let batches = self
+                        .collect_all_partitions(physical)
                         .await
-                        .map_err(|e| EngineError::internal(datafusion_err_to_delta(e)))?;
+                        .map_err(EngineError::internal)?;
 
                     if matches!(plan.sink.sink_type, SinkType::Results) {
                         last_results_batches = Some(batches);
@@ -308,7 +333,10 @@ impl DataFusionExecutor {
         plan: Plan,
     ) -> Result<SendableRecordBatchStream, DeltaError> {
         self.clear_kdf_harvest_slot();
-        let physical = self.compile_plan(&plan)?;
+        let mut physical = self.compile_plan(&plan)?;
+        if physical.output_partitioning().partition_count() > 1 {
+            physical = Arc::new(CoalescePartitionsExec::new(physical));
+        }
         physical.execute(0, Arc::clone(&self.task_ctx)).lift()
     }
 
@@ -326,8 +354,9 @@ impl DataFusionExecutor {
         &self,
         plan: Plan,
     ) -> Result<Vec<delta_kernel::arrow::array::RecordBatch>, DeltaError> {
-        let stream = self.execute_plan_to_stream(plan).await?;
-        stream.try_collect().await.lift()
+        self.clear_kdf_harvest_slot();
+        let physical = self.compile_plan(&plan)?;
+        self.collect_all_partitions(physical).await
     }
 
     pub fn relation_batch_registry(&self) -> &Arc<RelationBatchRegistry> {
@@ -336,5 +365,30 @@ impl DataFusionExecutor {
 
     pub fn engine(&self) -> &Arc<dyn Engine> {
         &self.engine
+    }
+
+    async fn collect_all_partitions(
+        &self,
+        physical: Arc<dyn ExecutionPlan>,
+    ) -> Result<Vec<RecordBatch>, DeltaError> {
+        let mut out = Vec::new();
+        let partitions = physical.output_partitioning().partition_count();
+        for partition in 0..partitions {
+            let stream = match physical.execute(partition, Arc::clone(&self.task_ctx)) {
+                Ok(stream) => stream,
+                Err(err)
+                    if partition > 0
+                        && err
+                            .to_string()
+                            .contains("supports partition 0 only") =>
+                {
+                    break;
+                }
+                Err(err) => return Err(datafusion_err_to_delta(err)),
+            };
+            let mut batches: Vec<RecordBatch> = stream.try_collect().await.lift()?;
+            out.append(&mut batches);
+        }
+        Ok(out)
     }
 }

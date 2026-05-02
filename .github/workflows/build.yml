@@ -160,6 +160,8 @@ jobs:
         run: cargo clippy --locked --workspace --no-default-features --exclude delta_kernel --exclude delta_kernel_ffi --exclude delta_kernel_derive --exclude delta_kernel_ffi_macros -- -D warnings
       - name: lint without default features - packages which don't depend on kernel with features enabled
         run: cargo clippy --locked --no-default-features --package delta_kernel --package delta_kernel_ffi --package delta_kernel_derive --package delta_kernel_ffi_macros -- -D warnings
+      - name: check kernel declarative-plans feature-only build
+        run: cargo check --locked -p delta_kernel --no-default-features --features declarative-plans
       - name: check kernel builds with default-engine-native-tls
         run: cargo build --locked -p feature_tests --features default-engine-native-tls
       - name: test native-tls backend has no crypto provider conflict
@@ -195,6 +197,16 @@ jobs:
       - uses: taiki-e/install-action@98ec31d284eb962f41c14065e9391a955aa810cf # nextest
       - name: test
         run: cargo nextest run --locked --workspace --all-features -E 'not test(read_table_version_hdfs) and not test(invalid_handle_code)'
+      - name: dat-reader-datafusion compile gate (phase A)
+        run: cargo test --locked -p acceptance --test dat_reader_datafusion --no-run
+      - name: dat-reader-datafusion curated fsr_add_only subset (phase B)
+        if: runner.os == 'Linux'
+        env:
+          DAT_DF_ONLY_CASES: with_schema_change
+          DAT_DF_FSR_CASES: with_schema_change
+        run: cargo test --locked -p acceptance --test dat_reader_datafusion
+      # Phase C rollout intentionally deferred: broaden DAT_DF_ONLY_CASES gradually once
+      # phase-B subset is stable.
       - name: trybuild tests
         if: steps.filter.outputs.ffi == 'true'
         run: cargo test --locked --package delta_kernel_ffi --features internal-api -- invalid_handle_code

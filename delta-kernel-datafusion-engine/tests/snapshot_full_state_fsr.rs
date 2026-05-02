@@ -1,11 +1,11 @@
 //! End-to-end driver integration: [`Snapshot::full_state`] yields a real, multi-plan FSR
 //! [`CoroutineSM`] (window-on-commits + anti-join-on-checkpoint); the DataFusion executor
-//! drives it and the returned scan-row batches must agree with classic
+//! drives it and the returned action-row batches must agree with classic
 //! [`Snapshot::scan`] over the same fixtures.
 //!
 //! These tests exist mainly to lock in the *Snapshot wiring* — that
 //! `Snapshot::full_state` actually runs the canonical FSR algorithm and surfaces a
-//! non-empty, [`scan_row_schema`]-shaped row stream through the executor's `Results`
+//! non-empty, action-schema row stream through the executor's `Results`
 //! consumer. Rich content / parity assertions live in `fsr_real.rs`.
 
 use std::path::PathBuf;
@@ -14,7 +14,6 @@ use std::sync::Arc;
 use delta_kernel::arrow::array::{Array, AsArray, RecordBatch};
 use delta_kernel::engine::default::DefaultEngineBuilder;
 use delta_kernel::object_store::local::LocalFileSystem;
-use delta_kernel::scan::scan_row_schema;
 use delta_kernel::{Engine as KernelEngine, Snapshot};
 use delta_kernel_datafusion_engine::DataFusionExecutor;
 use url::Url;
@@ -29,10 +28,12 @@ fn fixture_table(name: &str) -> Url {
 fn collect_add_paths(batches: &[RecordBatch]) -> Vec<String> {
     let mut out = Vec::new();
     for b in batches {
-        let path_col = b.column(0).as_string::<i32>();
+        let add_idx = b.schema().index_of("add").expect("add idx");
+        let add_col = b.column(add_idx).as_struct_opt().expect("add struct");
+        let path_col = add_col.column_by_name("path").expect("add.path");
         for i in 0..path_col.len() {
-            if path_col.is_valid(i) {
-                out.push(path_col.value(i).to_string());
+            if add_col.is_valid(i) && path_col.is_valid(i) {
+                out.push(path_col.as_string::<i32>().value(i).to_string());
             }
         }
     }
@@ -41,7 +42,7 @@ fn collect_add_paths(batches: &[RecordBatch]) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn snapshot_full_state_no_checkpoint_emits_scan_row_batches() {
+async fn snapshot_full_state_no_checkpoint_emits_action_row_batches() {
     let table_root = fixture_table("table-with-dv-small");
     let engine: Arc<dyn KernelEngine> =
         Arc::new(DefaultEngineBuilder::new(Arc::new(LocalFileSystem::new())).build());
@@ -60,19 +61,11 @@ async fn snapshot_full_state_no_checkpoint_emits_scan_row_batches() {
         !batches.is_empty(),
         "FSR `Results` sink must emit at least one batch (the table is non-empty)"
     );
-    let schema = batches[0].schema();
-    assert_eq!(
-        schema.fields().len(),
-        scan_row_schema().fields().len(),
-        "FSR Results schema must match scan_row_schema"
-    );
-
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     let unique_paths = collect_add_paths(&batches);
-    assert_eq!(
-        total_rows,
-        unique_paths.len(),
-        "every row must carry a non-null add.path (no protocol/metaData/txn rows leak through)"
+    assert!(
+        total_rows >= unique_paths.len(),
+        "full_state returns a mixed action stream; add rows are a subset"
     );
     assert!(
         !unique_paths.is_empty(),
@@ -81,7 +74,7 @@ async fn snapshot_full_state_no_checkpoint_emits_scan_row_batches() {
 }
 
 #[tokio::test]
-async fn snapshot_full_state_v1_checkpoint_emits_scan_row_batches() {
+async fn snapshot_full_state_v1_checkpoint_emits_action_row_batches() {
     let table_root = fixture_table("app-txn-checkpoint");
     let engine: Arc<dyn KernelEngine> =
         Arc::new(DefaultEngineBuilder::new(Arc::new(LocalFileSystem::new())).build());
@@ -98,10 +91,9 @@ async fn snapshot_full_state_v1_checkpoint_emits_scan_row_batches() {
 
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     let paths = collect_add_paths(&batches);
-    assert_eq!(
-        total_rows,
-        paths.len(),
-        "every row must carry a non-null add.path"
+    assert!(
+        total_rows >= paths.len(),
+        "add rows are a subset of action rows"
     );
     assert!(
         !paths.is_empty(),

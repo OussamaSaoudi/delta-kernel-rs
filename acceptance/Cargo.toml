@@ -23,6 +23,7 @@ arrow-57 = ["delta_kernel/arrow-57", "test_utils/arrow-57"]
 [dependencies]
 delta_kernel = { path = "../kernel", features = [
   "default-engine-rustls",
+  "declarative-plans",
   "internal-api",
   "prettyprint",
 ] }
@@ -42,6 +43,7 @@ tar = "0.4"
 
 [dev-dependencies]
 datatest-stable = "0.3"
+delta-kernel-datafusion-engine = { path = "../delta-kernel-datafusion-engine" }
 test-log = { version = "0.2", default-features = false, features = ["trace"] }
 test_utils = { path = "../test-utils", default-features = false }
 tempfile = "3"
@@ -57,5 +59,13 @@ name = "dat_reader"
 harness = false
 
 [[test]]
+name = "dat_reader_datafusion"
+harness = false
+
+[[test]]
 name = "acceptance_workloads_reader"
+harness = false
+
+[[test]]
+name = "acceptance_workloads_datafusion"
 harness = false

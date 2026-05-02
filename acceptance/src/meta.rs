@@ -26,12 +26,26 @@ pub type TestResult<T, E = AssertionError> = std::result::Result<T, E>;
 struct TestCaseInfoJson {
     name: String,
     description: String,
+    #[serde(default)]
+    read_mode: DatReadMode,
+}
+
+/// Read execution mode for DAT reader harnesses.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DatReadMode {
+    /// Standard scan path (`Snapshot::scan_builder().build().execute(...)`).
+    #[default]
+    Scan,
+    /// DataFusion full-state path; read only live add actions from `Snapshot::full_state`.
+    FsrAddOnly,
 }
 
 #[derive(PartialEq, Eq, Debug)]
 pub struct TestCaseInfo {
     name: String,
     description: String,
+    read_mode: DatReadMode,
     root_dir: PathBuf,
 }
 
@@ -44,6 +58,11 @@ impl TestCaseInfo {
 
     pub fn root_dir(&self) -> &PathBuf {
         &self.root_dir
+    }
+
+    /// Read execution mode for DAT reader harnesses.
+    pub fn read_mode(&self) -> DatReadMode {
+        self.read_mode
     }
 
     async fn versions(&self) -> TestResult<(TableVersionMetaData, Vec<TableVersionMetaData>)> {
@@ -133,12 +152,27 @@ pub fn read_dat_case(case_root: impl AsRef<Path>) -> TestResult<TestCaseInfo> {
         root_dir: case_root.as_ref().into(),
         name: info.name,
         description: info.description,
+        read_mode: info.read_mode,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dat_read_mode_defaults_to_scan() {
+        let raw = r#"{"name":"n","description":"d"}"#;
+        let info: TestCaseInfoJson = serde_json::from_str(raw).expect("parse");
+        assert_eq!(info.read_mode, DatReadMode::Scan);
+    }
+
+    #[test]
+    fn dat_read_mode_parses_fsr_add_only() {
+        let raw = r#"{"name":"n","description":"d","read_mode":"fsr_add_only"}"#;
+        let info: TestCaseInfoJson = serde_json::from_str(raw).expect("parse");
+        assert_eq!(info.read_mode, DatReadMode::FsrAddOnly);
+    }
 
     #[tokio::test]
     async fn test_read_test_case() {

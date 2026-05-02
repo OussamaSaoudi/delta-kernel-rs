@@ -14,15 +14,30 @@ use url::Url;
 #[derive(Clone, Debug)]
 pub struct ReadConfig {
     pub name: String,
+    pub read_engine: ReadEngine,
     pub parallel_scan: ParallelScan,
+}
+
+#[derive(Clone, Debug)]
+pub enum ReadEngine {
+    StateMachine,
+    PlansDatafusion,
 }
 
 /// Provides a default set of read configs for a given table, read spec, and operation
 pub fn default_read_configs() -> Vec<ReadConfig> {
-    vec![ReadConfig {
-        name: "serial".into(),
-        parallel_scan: ParallelScan::Disabled,
-    }]
+    vec![
+        ReadConfig {
+            name: "sm_serial".into(),
+            read_engine: ReadEngine::StateMachine,
+            parallel_scan: ParallelScan::Disabled,
+        },
+        ReadConfig {
+            name: "plans_df".into(),
+            read_engine: ReadEngine::PlansDatafusion,
+            parallel_scan: ParallelScan::Disabled,
+        },
+    ]
 }
 
 #[derive(Clone, Debug)]
@@ -205,7 +220,7 @@ impl TimeTravel {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Spec {
     Read(ReadSpec),
-    #[serde(alias = "snapshot_construction")]
+    #[serde(alias = "snapshot", alias = "snapshot_construction")]
     SnapshotConstruction(Box<SnapshotConstructionSpec>),
 }
 

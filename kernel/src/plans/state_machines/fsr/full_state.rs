@@ -24,9 +24,8 @@
 //!    identity) → Project(action_cols + key) → LeftAntiJoin(probe=this,
 //!    build=RelationRef(commit_dedup).project(key))` materializes the *checkpoint survivors* (rows
 //!    the commit tail didn't touch). The plan completes with `Union(RelationRef(commit_dedup),
-//!    survivors) → Filter(retention) → Filter(add.path IS NOT NULL) → Project(scan_row_schema) →
-//!    into_results()` so the engine's `Results` consumer sees exactly the live add-action rows that
-//!    classic kernel scan produces.
+//!    survivors) -> Filter(retention) -> Project(action_read_schema) -> into_results()` so the
+//!    engine's `Results` consumer sees the reconstructed action stream.
 //!
 //! The window applies only to the (typically-small) commit-tail stream; the (typically-large)
 //! checkpoint stream goes through a single hash anti-join keyed on the dedup column. Compared
@@ -46,9 +45,8 @@
 //!   is intentionally omitted (UUID DVs have no offset; inline DVs with the same `pathOrInlineDv`
 //!   and distinct offsets would imply two distinct in-line DV byte payloads, which is not
 //!   representable). A follow-up can include `offset` once kernel grows an int-to-string cast.
-//! - **`single_action_schema`**: Matches [`crate::scan::scan_row_schema`]
-//!   (`kernel/src/scan/log_replay.rs::SCAN_ROW_SCHEMA`), i.e. the canonical flattened rows
-//!   [`Snapshot::scan`] exposes (see `kernel/src/scan/mod.rs`).
+//! - **`action_read_schema`**: Full reconstructed action stream (add / remove / protocol /
+//!   metaData / domainMetadata / txn).
 //! - **Retention thresholds**: Derived like checkpoint reconciliation via
 //!   [`crate::action_reconciliation::deleted_file_retention_timestamp_with_time`] and
 //!   [`crate::action_reconciliation::calculate_transaction_expiration_timestamp`] against
@@ -69,7 +67,7 @@ use crate::actions::{
     DOMAIN_METADATA_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
     SIDECAR_NAME,
 };
-use crate::expressions::{ColumnName, Expression, Predicate, Scalar, UnaryExpressionOp};
+use crate::expressions::{ColumnName, Expression, Predicate, Scalar};
 use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::plans::errors::{DeltaError, DeltaErrorCode, KernelErrAsDelta};
 use crate::plans::ir::nodes::{
@@ -79,8 +77,8 @@ use crate::plans::ir::nodes::{
 use crate::plans::ir::{DeclarativePlanNode, Plan};
 use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
 use crate::plans::state_machines::framework::coroutine::phase::Phase;
-use crate::plans::state_machines::framework::phase_operation::{PhaseOperation, SchemaQueryNode};
-use crate::scan::scan_row_schema;
+use crate::plans::state_machines::framework::phase_operation::PhaseOperation;
+use crate::scan::data_skipping::stats_schema::schema_with_all_fields_nullable;
 use crate::schema::{ArrayType, DataType, SchemaRef, StructField, StructType, ToSchema};
 use crate::snapshot::Snapshot;
 use crate::utils::current_time_duration;
@@ -99,7 +97,7 @@ pub const FSR_COMMIT_DEDUP: &str = "fsr.commit_dedup";
 /// [`action_read_schema`].
 pub const FSR_SIDECAR_ACTIONS: &str = "fsr.sidecar_actions";
 
-/// Synthetic column carrying `ToJson(fsr_dedup_key)` so hash joins only need top-level
+/// Synthetic column carrying the materialized dedup key array so hash joins only need top-level
 /// column keys (`delta-kernel-datafusion-engine/src/compile/join.rs`).
 pub const FSR_JOIN_KEY_COL: &str = "__fsr_join_k";
 
@@ -121,47 +119,14 @@ pub struct CheckpointShape {
     pub actions_schema_subset: SchemaRef,
 }
 
-/// Public entry: SM body from the FSR migration plan (`PhaseOperation::SchemaQuery` prelude
-/// optional).
+/// Public entry for full-state reconstruction.
 pub fn full_state_sm(snapshot: Arc<Snapshot>) -> Result<CoroutineSM<()>, DeltaError> {
-    let needs_schema_query = snapshot
-        .log_segment()
-        .last_checkpoint_hint_summary()
-        .is_none()
-        && snapshot_has_checkpoint_files(&snapshot);
-    let maybe_checkpoint_url = needs_schema_query
-        .then(|| first_checkpoint_url(snapshot.as_ref()))
-        .transpose()?;
-
     CoroutineSM::new(move |mut co| async move {
         let mut phase = Phase(&mut co);
 
-        let checkpoint_shape = if let Some(url) = maybe_checkpoint_url {
-            let state = phase
-                .execute(
-                    PhaseOperation::SchemaQuery(SchemaQueryNode::new(url)),
-                    "fsr.schema_query",
-                )
-                .await
-                .map_err(|e| {
-                    delta_error!(
-                        DeltaErrorCode::DeltaCommandInvariantViolation,
-                        operation = "fsr::schema_query::execute",
-                        detail = e.display_with_source_chain(),
-                        source = e,
-                    )
-                })?;
-            let schema = state.take_schema().ok_or_else(|| {
-                delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    operation = "fsr::schema_query::take_schema",
-                    detail = "executor reported PhaseOperation::SchemaQuery success but did not submit a schema",
-                )
-            })?;
-            checkpoint_shape_from_schema(&schema)?
-        } else {
-            checkpoint_shape_from_last_checkpoint(snapshot.as_ref())?
-        };
+        // Derive shape from log-segment metadata (including checkpoint file format) so
+        // JSON-v2 checkpoints are lowered correctly.
+        let checkpoint_shape = checkpoint_shape_from_last_checkpoint(snapshot.as_ref())?;
 
         let plans = build_fsr_plans(snapshot.as_ref(), checkpoint_shape)?;
         let _state = phase
@@ -214,6 +179,7 @@ pub fn checkpoint_shape_from_last_checkpoint(
     snapshot: &Snapshot,
 ) -> Result<CheckpointShape, DeltaError> {
     let seg = snapshot.log_segment();
+    let has_checkpoint_parts = !seg.listed.checkpoint_parts.is_empty();
     let fmt = seg
         .listed
         .checkpoint_parts
@@ -225,7 +191,8 @@ pub fn checkpoint_shape_from_last_checkpoint(
     let subset = checkpoint_actions_schema_projection(&full_schema)?;
     Ok(CheckpointShape {
         file_format: fmt,
-        has_sidecars: full_schema.contains(SIDECAR_NAME),
+        has_sidecars: full_schema.contains(SIDECAR_NAME)
+            || (has_checkpoint_parts && matches!(fmt, FileFormat::Json)),
         actions_schema_subset: subset,
     })
 }
@@ -409,17 +376,17 @@ fn path_under_log_root(log_root: &Url, file: &Url) -> Result<String, DeltaError>
     Ok(suffix.trim_start_matches('/').to_string())
 }
 
-/// Per-action read schema used by every FSR plan.
-///
-/// This keeps Delta action schemas exactly as modeled by the protocol types (`Add::to_schema`,
-/// `Remove::to_schema`, ...). Only the top-level action columns are nullable since each log row
-/// carries exactly one action.
 fn action_read_schema() -> SchemaRef {
+    // Keep add/remove/domainMetadata/txn in their strict action shapes so file-action rows
+    // continue to materialize consistently. Relax only protocol/metadata nested fields to
+    // tolerate malformed rows that should be validated at snapshot/TableConfiguration layers.
+    let relax_nested =
+        |schema: StructType| schema_with_all_fields_nullable(&schema).unwrap_or(schema);
     Arc::new(StructType::new_unchecked([
         StructField::nullable(ADD_NAME, Add::to_schema()),
         StructField::nullable(REMOVE_NAME, Remove::to_schema()),
-        StructField::nullable(PROTOCOL_NAME, Protocol::to_schema()),
-        StructField::nullable(METADATA_NAME, Metadata::to_schema()),
+        StructField::nullable(PROTOCOL_NAME, relax_nested(Protocol::to_schema())),
+        StructField::nullable(METADATA_NAME, relax_nested(Metadata::to_schema())),
         StructField::nullable(DOMAIN_METADATA_NAME, DomainMetadata::to_schema()),
         StructField::nullable(SET_TRANSACTION_NAME, SetTransaction::to_schema()),
     ]))
@@ -445,10 +412,6 @@ fn sidecar_only_schema() -> SchemaRef {
         SIDECAR_NAME,
         Sidecar::to_schema(),
     )]))
-}
-
-fn single_action_schema() -> SchemaRef {
-    scan_row_schema()
 }
 
 /// Tombstone / txn expiration predicate aligned with
@@ -495,24 +458,8 @@ fn action_identity_projection() -> Vec<Arc<Expression>> {
         .collect()
 }
 
-fn single_action_projection() -> Vec<Arc<Expression>> {
-    vec![
-        Arc::new(Expression::column(["add", "path"])),
-        Arc::new(Expression::column(["add", "size"])),
-        Arc::new(Expression::column(["add", "modificationTime"])),
-        Arc::new(Expression::column(["add", "stats"])),
-        Arc::new(Expression::column(["add", "deletionVector"])),
-        Arc::new(Expression::struct_from([
-            Arc::new(Expression::column(["add", "partitionValues"])),
-            Arc::new(Expression::column(["add", "baseRowId"])),
-            Arc::new(Expression::column(["add", "defaultRowCommitVersion"])),
-            Arc::new(Expression::column(["add", "tags"])),
-            Arc::new(Expression::column(["add", "clusteringProvider"])),
-        ])),
-    ]
-}
-
 fn fsr_dedup_key() -> Expression {
+    let null_str = Expression::literal(Scalar::Null(DataType::STRING));
     let file_arm_cond = Predicate::or(
         Predicate::is_not_null(Expression::column(["add", "path"])),
         Predicate::is_not_null(Expression::column(["remove", "path"])),
@@ -522,32 +469,49 @@ fn fsr_dedup_key() -> Expression {
         Expression::column(["add", "path"]),
         Expression::column(["remove", "path"]),
     ]);
-    let dv_coalesce = Expression::coalesce([
-        dv_unique_id_for_prefix("add"),
-        dv_unique_id_for_prefix("remove"),
+    let dv_storage_coalesce = Expression::coalesce([
+        Expression::column(["add", "deletionVector", "storageType"]),
+        Expression::column(["remove", "deletionVector", "storageType"]),
+    ]);
+    let dv_path_coalesce = Expression::coalesce([
+        Expression::column(["add", "deletionVector", "pathOrInlineDv"]),
+        Expression::column(["remove", "deletionVector", "pathOrInlineDv"]),
     ]);
 
     let file_arm = Expression::array(vec![
         Expression::literal(Scalar::String("file".into())),
         path_coalesce,
-        dv_coalesce,
+        dv_storage_coalesce,
+        dv_path_coalesce,
     ]);
 
-    let proto_arm = Expression::array(vec![Expression::literal(Scalar::String(
-        PROTOCOL_NAME.into(),
-    ))]);
+    let proto_arm = Expression::array(vec![
+        Expression::literal(Scalar::String(PROTOCOL_NAME.into())),
+        null_str.clone(),
+        null_str.clone(),
+        null_str.clone(),
+    ]);
 
     let meta_arm = Expression::array(vec![
         Expression::literal(Scalar::String(METADATA_NAME.into())),
         Expression::column(["metaData", "id"]),
+        null_str.clone(),
+        null_str.clone(),
     ]);
 
     let domain_arm = Expression::array(vec![
+        Expression::literal(Scalar::String(DOMAIN_METADATA_NAME.into())),
         Expression::column(["domainMetadata", "domain"]),
         Expression::column(["domainMetadata", "configuration"]),
+        null_str.clone(),
     ]);
 
-    let txn_arm = Expression::array(vec![Expression::column(["txn", "appId"])]);
+    let txn_arm = Expression::array(vec![
+        Expression::literal(Scalar::String(SET_TRANSACTION_NAME.into())),
+        Expression::column(["txn", "appId"]),
+        null_str.clone(),
+        null_str.clone(),
+    ]);
 
     let null_list = Expression::literal(Scalar::Null(DataType::Array(Box::new(ArrayType::new(
         DataType::STRING,
@@ -572,46 +536,6 @@ fn fsr_dedup_key() -> Expression {
             (Predicate::is_not_null(Expression::column(["txn"])), txn_arm),
         ],
         null_list,
-    )
-}
-
-/// Per-row deletion-vector identity for an action with the given top-level prefix
-/// (`"add"` or `"remove"`).
-///
-/// Returns `NULL` when the action carries no deletion vector (signalled by a `NULL`
-/// `storageType`); otherwise returns the JSON-encoded form of the array
-/// `[storageType, pathOrInlineDv]` produced by `ToJson(Array(...))`. Two rows whose deletion
-/// vectors share both fields produce the same JSON string and therefore the same dedup-key
-/// contribution; rows that differ in either field produce distinct strings. The exact byte
-/// form is not protocol-stable — it is only used to drive Window's `partition_by` hashing and
-/// the upstream LeftAnti-join key in Plan B; both consumers care only about per-row equality,
-/// not about matching `DeletionVectorDescriptor::unique_id_from_parts` byte-for-byte.
-///
-/// `offset` is intentionally omitted (see module-level decision note); folding it in is a
-/// follow-up once kernel grows an int-to-string cast. This also avoids string concatenation
-/// (which would require overloading [`crate::expressions::BinaryExpressionOp::Plus`] semantics),
-/// keeping `Plus` numeric-only.
-fn dv_unique_id_for_prefix(prefix: &'static str) -> Expression {
-    let storage_ty = Expression::column([prefix, "deletionVector", "storageType"]);
-    let path_inline = Expression::column([prefix, "deletionVector", "pathOrInlineDv"]);
-
-    // ToJson over a homogeneous array of UTF-8 columns (the inner expression evaluates to
-    // List<Utf8>, which `evaluate_expression::to_json` encodes as a JSON array). Two DVs are
-    // considered equal iff their (storageType, pathOrInlineDv) pair matches, which agrees with
-    // [`crate::actions::deletion_vector::DeletionVectorDescriptor::unique_id_from_parts`] for the
-    // overwhelmingly-common UUID storage type (offset is always None there). Inline DVs with the
-    // same `pathOrInlineDv` but distinct `offset` are conceptually possible but unrepresentable
-    // in real commit logs, since the inline bytes themselves carry the DV identity. A future
-    // refinement can fold `offset` in once kernel grows an int-to-string cast (see follow-up).
-    let dv_json = Expression::unary(
-        UnaryExpressionOp::ToJson,
-        Expression::array(vec![storage_ty.clone(), path_inline]),
-    );
-
-    Expression::if_then_else(
-        Predicate::is_null(storage_ty),
-        Expression::literal(Scalar::Null(DataType::STRING)),
-        dv_json,
     )
 }
 
@@ -673,10 +597,7 @@ fn build_commit_dedup_plan(
     commit_raw_handle: &RelationHandle,
     commit_dedup_handle: &RelationHandle,
 ) -> Result<Plan, DeltaError> {
-    let dedup_expr = Arc::new(Expression::unary(
-        UnaryExpressionOp::ToJson,
-        fsr_dedup_key(),
-    ));
+    let dedup_expr = Arc::new(fsr_dedup_key());
 
     // Schema after the first project (action_cols + __fsr_join_k + version).
     let with_key_and_version_schema = augmented_action_schema_with_version()?;
@@ -731,8 +652,8 @@ fn build_commit_dedup_plan(
 ///
 /// Top-level scan uses `sidecar_only_schema()` to read just the `sidecar` column; rows
 /// without a sidecar pointer are dropped. The LoadSink reads each referenced parquet under
-/// `<log_root>/<sidecar.path>` with the full action read schema; sidecars only carry
-/// `add` / `remove` rows in practice, so the other columns will be NULL.
+/// `<log_root>/_sidecars/<sidecar.path>` with the full action read schema. Sidecar payloads
+/// are parquet-encoded.
 fn build_sidecar_load_plan(
     checkpoint_top_files: Vec<FileMeta>,
     sidecar_handle: &RelationHandle,
@@ -751,10 +672,17 @@ fn build_sidecar_load_plan(
             path_size_schema(),
         );
 
+    let sidecar_base = log_root.join("_sidecars/").map_err(|e| {
+        delta_error!(
+            DeltaErrorCode::DeltaCommandInvariantViolation,
+            operation = "fsr::build_sidecar_load_plan::join_sidecar_base",
+            detail = format!("join _sidecars base URL: {e}"),
+        )
+    })?;
     let sink = LoadSink {
         output_relation: sidecar_handle.clone(),
         file_schema: action_read_schema(),
-        base_url: Some(log_root.clone()),
+        base_url: Some(sidecar_base),
         file_meta: ScanFileColumns {
             path: ColumnName::new(["path"]),
             size: Some(ColumnName::new(["size"])),
@@ -787,8 +715,7 @@ fn build_sidecar_load_plan(
 ///
 /// Union(relation_ref(commit_dedup), survivors)
 ///     | Filter(retention)
-///     | Filter(add.path IS NOT NULL)
-///     | Project(single_action_projection, single_action_schema)
+///     | Project(action_read_schema)
 ///     | into_results()
 /// ```
 ///
@@ -811,16 +738,12 @@ fn build_results_plan(
                 .filter(Arc::new(
                     retention_filter(min_file_retention_timestamp, txn_expiration_cutoff).into(),
                 ))
-                .filter(add_path_is_not_null())
-                .project(single_action_projection(), single_action_schema())
+                .project(action_identity_projection(), action_read_schema())
                 .into_results(),
         );
     }
 
-    let dedup_expr = Arc::new(Expression::unary(
-        UnaryExpressionOp::ToJson,
-        fsr_dedup_key(),
-    ));
+    let dedup_expr = Arc::new(fsr_dedup_key());
     let augmented_schema = augmented_action_schema()?;
 
     // Read top-level checkpoint with the full action schema so the union schema-check below
@@ -879,8 +802,7 @@ fn build_results_plan(
         .filter(Arc::new(
             retention_filter(min_file_retention_timestamp, txn_expiration_cutoff).into(),
         ))
-        .filter(add_path_is_not_null())
-        .project(single_action_projection(), single_action_schema())
+        .project(action_identity_projection(), action_read_schema())
         .into_results())
 }
 
@@ -889,7 +811,10 @@ fn build_results_plan(
 /// the dedup key on the checkpoint side of the LeftAnti.
 fn augmented_action_schema() -> Result<SchemaRef, DeltaError> {
     let mut fields: Vec<_> = action_read_schema().fields().cloned().collect();
-    fields.push(StructField::nullable(FSR_JOIN_KEY_COL, DataType::STRING));
+    fields.push(StructField::nullable(
+        FSR_JOIN_KEY_COL,
+        DataType::Array(Box::new(ArrayType::new(DataType::STRING, true))),
+    ));
     StructType::try_new(fields)
         .map(Arc::new)
         .map_err(|e| e.into_delta_default())
@@ -900,37 +825,35 @@ fn augmented_action_schema() -> Result<SchemaRef, DeltaError> {
 /// the version column is dropped by the plan's final project.
 fn augmented_action_schema_with_version() -> Result<SchemaRef, DeltaError> {
     let mut fields: Vec<_> = action_read_schema().fields().cloned().collect();
-    fields.push(StructField::nullable(FSR_JOIN_KEY_COL, DataType::STRING));
+    fields.push(StructField::nullable(
+        FSR_JOIN_KEY_COL,
+        DataType::Array(Box::new(ArrayType::new(DataType::STRING, true))),
+    ));
     fields.push(StructField::not_null("version", DataType::LONG));
     StructType::try_new(fields)
         .map(Arc::new)
         .map_err(|e| e.into_delta_default())
 }
 
-/// Schema = single column `__fsr_join_k: STRING`. Build-side schema for the LeftAnti hash
+/// Schema = single column `__fsr_join_k: ARRAY<STRING>`. Build-side schema for the LeftAnti hash
 /// join in [`build_results_plan`].
 fn join_key_only_schema() -> Result<SchemaRef, DeltaError> {
-    StructType::try_new([StructField::nullable(FSR_JOIN_KEY_COL, DataType::STRING)])
-        .map(Arc::new)
-        .map_err(|e| e.into_delta_default())
-}
-
-/// Predicate: `add.path IS NOT NULL`. The terminal scan-row filter retains only live add
-/// rows; protocol / metaData / domainMetadata / setTransaction rows pass through earlier
-/// stages so the dedup machinery sees them but are dropped here because
-/// [`scan_row_schema`](crate::scan::scan_row_schema) describes file actions only.
-fn add_path_is_not_null() -> Arc<Expression> {
-    Arc::new(Predicate::is_not_null(Expression::column(["add", "path"])).into())
+    StructType::try_new([StructField::nullable(
+        FSR_JOIN_KEY_COL,
+        DataType::Array(Box::new(ArrayType::new(DataType::STRING, true))),
+    )])
+    .map(Arc::new)
+    .map_err(|e| e.into_delta_default())
 }
 
 fn fsr_row_has_identity_predicate() -> Predicate {
     Predicate::or_from([
         Predicate::is_not_null(Expression::column(["add", "path"])),
         Predicate::is_not_null(Expression::column(["remove", "path"])),
-        Predicate::is_not_null(Expression::column(["protocol"])),
-        Predicate::is_not_null(Expression::column(["metaData"])),
-        Predicate::is_not_null(Expression::column(["domainMetadata"])),
-        Predicate::is_not_null(Expression::column(["txn"])),
+        Predicate::is_not_null(Expression::column(["protocol", "minReaderVersion"])),
+        Predicate::is_not_null(Expression::column(["metaData", "id"])),
+        Predicate::is_not_null(Expression::column(["domainMetadata", "domain"])),
+        Predicate::is_not_null(Expression::column(["txn", "appId"])),
     ])
 }
 

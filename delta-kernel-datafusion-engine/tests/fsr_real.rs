@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use delta_kernel::arrow::array::{Array, AsArray, RecordBatch, StringArray};
 use delta_kernel::arrow::compute::concat_batches;
+use delta_kernel::arrow::util::display::array_value_to_string;
 use delta_kernel::engine::arrow_expression::evaluate_expression::evaluate_expression;
 use delta_kernel::engine::default::DefaultEngineBuilder;
 use delta_kernel::expressions::{Expression, UnaryExpressionOp};
@@ -36,6 +37,11 @@ use delta_kernel_datafusion_engine::DataFusionExecutor;
 use serde_json::Value as JsonValue;
 use tempfile::TempDir;
 use url::Url;
+
+struct FixtureTable {
+    _tmp: Option<TempDir>,
+    url: Url,
+}
 
 fn commit_dedup_sink_handle(plans: &[Plan]) -> RelationHandle {
     plans
@@ -55,11 +61,30 @@ fn commit_dedup_sink_handle(plans: &[Plan]) -> RelationHandle {
         })
 }
 
-fn fixture_table(name: &str) -> Url {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../kernel/tests/data")
-        .join(name);
-    Url::from_directory_path(root.canonicalize().expect("fixture path")).expect("table url")
+fn fixture_table(name: &str) -> FixtureTable {
+    let data_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../kernel/tests/data");
+    let direct = data_root.join(name);
+    if direct.is_dir() {
+        return FixtureTable {
+            _tmp: None,
+            url: Url::from_directory_path(direct.canonicalize().expect("fixture path"))
+                .expect("table url"),
+        };
+    }
+
+    let tmp = test_utils::load_test_data("../kernel/tests/data", name)
+        .unwrap_or_else(|e| panic!("load archived fixture {name}: {e}"));
+    let extracted = tmp.path().join(name);
+    assert!(
+        extracted.is_dir(),
+        "archived fixture extraction missing directory: {}",
+        extracted.display()
+    );
+    FixtureTable {
+        _tmp: Some(tmp),
+        url: Url::from_directory_path(extracted.canonicalize().expect("extracted fixture path"))
+            .expect("table url"),
+    }
 }
 
 fn default_engine() -> Arc<dyn KernelEngine> {
@@ -72,18 +97,23 @@ fn extract_sorted_non_null_paths_from_results(batches: &[RecordBatch]) -> Vec<St
     } else {
         concat_batches(&batches[0].schema(), batches).expect("concat results batches")
     };
-    let path_col = merged.column(0).as_string::<i32>();
+    let add_idx = merged.schema().index_of("add").expect("add idx");
+    let add_col = merged.column(add_idx).as_struct_opt().expect("add struct");
+    let path_col = add_col.column_by_name("path").expect("add.path");
     let mut out: Vec<String> = (0..path_col.len())
-        .filter_map(|i| path_col.is_valid(i).then(|| path_col.value(i).to_string()))
+        .filter_map(|i| {
+            (add_col.is_valid(i) && path_col.is_valid(i))
+                .then(|| array_value_to_string(path_col.as_ref(), i).expect("stringify path"))
+        })
         .collect();
     out.sort();
     out
 }
 
 async fn run_full_state_results(table: &str) -> Vec<RecordBatch> {
-    let table_root = fixture_table(table);
+    let fixture = fixture_table(table);
     let engine = default_engine();
-    let snapshot = Snapshot::builder_for(table_root)
+    let snapshot = Snapshot::builder_for(fixture.url)
         .build(engine.as_ref())
         .expect("snapshot");
     let ex = DataFusionExecutor::try_new_with_engine(Arc::clone(&engine)).expect("executor");
@@ -93,6 +123,28 @@ async fn run_full_state_results(table: &str) -> Vec<RecordBatch> {
         .await
         .expect("drive full_state");
     fsr_batches
+}
+
+fn expected_live_file_count_from_scan_metadata(table: &str) -> usize {
+    let fixture = fixture_table(table);
+    let engine = default_engine();
+    let snapshot = Snapshot::builder_for(fixture.url)
+        .build(engine.as_ref())
+        .expect("snapshot");
+    let scan = snapshot.scan_builder().build().expect("build scan");
+    scan.scan_metadata(engine.as_ref())
+        .expect("scan metadata")
+        .map(|res| {
+            let sm = res.expect("scan metadata batch");
+            let sv = sm.scan_files.selection_vector();
+            let row_count = sm.scan_files.data().len();
+            if sv.len() < row_count {
+                sv.iter().filter(|selected| **selected).count() + (row_count - sv.len())
+            } else {
+                sv.iter().filter(|selected| **selected).count()
+            }
+        })
+        .sum()
 }
 
 fn write_json_commit(path: &Path) {
@@ -126,8 +178,7 @@ async fn commit_dedup_batches_for_snapshot(
     ex.execute_phase_operation(PhaseOperation::Plans(plans))
         .await
         .expect("run fsr plans");
-    ex
-        .relation_batch_registry()
+    ex.relation_batch_registry()
         .get_cloned(commit_dedup_handle.id)
         .expect("commit_dedup relation batches")
 }
@@ -194,9 +245,9 @@ async fn dedup_full_rows_for_synthetic_table() -> Vec<RecordBatch> {
 }
 
 async fn commit_dedup_merged_for_real_fixture(table_name: &str) -> RecordBatch {
-    let table_root = fixture_table(table_name);
+    let fixture = fixture_table(table_name);
     let engine = default_engine();
-    let snapshot = Snapshot::builder_for(table_root)
+    let snapshot = Snapshot::builder_for(fixture.url)
         .build(engine.as_ref())
         .expect("snapshot");
     let dedup_batches = commit_dedup_batches_for_snapshot(snapshot, engine).await;
@@ -205,6 +256,17 @@ async fn commit_dedup_merged_for_real_fixture(table_name: &str) -> RecordBatch {
     } else {
         concat_batches(&dedup_batches[0].schema(), &dedup_batches).expect("concat commit-dedup")
     }
+}
+
+async fn assert_fsr_matches_scan_paths(table_name: &str) {
+    let fsr_batches = run_full_state_results(table_name).await;
+    let fsr_paths = extract_sorted_non_null_paths_from_results(&fsr_batches);
+    let expected_live_files = expected_live_file_count_from_scan_metadata(table_name);
+    assert_eq!(
+        fsr_paths.len(),
+        expected_live_files,
+        "FSR live-file rows must match scan_metadata live-file count for fixture {table_name}"
+    );
 }
 
 fn payload_stable_sort_key(kind: &str, v: &JsonValue) -> (String, String) {
@@ -548,4 +610,37 @@ async fn fsr_commit_dedup_real_app_txn_no_checkpoint_full_to_json_payloads() {
     ];
 
     assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn fsr_matches_scan_for_all_v2_checkpoint_fixtures() {
+    // These fixtures are checked in as directories and cover each distinct v2 shape:
+    // - classic v2 parquet checkpoint
+    // - v2 parquet sidecars
+    // - v2 json sidecars
+    for table in [
+        "v2-classic-parquet-struct-stats-only",
+        "v2-json-sidecars-struct-stats-only",
+        "v2-parquet-sidecars-struct-stats-only",
+    ] {
+        assert_fsr_matches_scan_paths(table).await;
+    }
+}
+
+#[tokio::test]
+async fn fsr_matches_scan_for_dv_and_non_dv_fixtures() {
+    for table in [
+        "table-with-dv-small",
+        "table-without-dv-small",
+        "with-short-dv",
+    ] {
+        assert_fsr_matches_scan_paths(table).await;
+    }
+}
+
+#[tokio::test]
+async fn fsr_matches_scan_for_v1_and_checkpoint_discovery_shapes() {
+    for table in ["app-txn-checkpoint", "with_checkpoint_no_last_checkpoint"] {
+        assert_fsr_matches_scan_paths(table).await;
+    }
 }

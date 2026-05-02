@@ -13,12 +13,21 @@
 use std::hint::black_box;
 use std::sync::Arc;
 
+use delta_kernel::actions::{Metadata, Protocol};
+use delta_kernel::arrow::array::{Array, AsArray, Int64Array};
+use delta_kernel::arrow::util::display::array_value_to_string;
+use delta_kernel::engine::arrow_expression::evaluate_expression::evaluate_expression;
 use delta_kernel::engine::default::executor::tokio::TokioMultiThreadExecutor;
 use delta_kernel::engine::default::DefaultEngine;
+use delta_kernel::expressions::{Expression, UnaryExpressionOp};
 use delta_kernel::expressions::PredicateRef;
 use delta_kernel::object_store::local::LocalFileSystem;
+use delta_kernel::plans::ir::nodes::FileType;
+use delta_kernel::plans::ir::DeclarativePlanNode;
 use delta_kernel::scan::{AfterSequentialScanMetadata, ParallelScanMetadata};
-use delta_kernel::{Engine, Snapshot};
+use delta_kernel::schema::DataType as KernelDataType;
+use delta_kernel::{DeltaResult, Engine, Error, FileMeta, Snapshot};
+use delta_kernel_datafusion_engine::DataFusionExecutor;
 use delta_kernel_unity_catalog::UCKernelClient;
 use unity_catalog_delta_client_api::{Error as UcApiError, Operation};
 use unity_catalog_delta_rest_client::{
@@ -27,8 +36,8 @@ use unity_catalog_delta_rest_client::{
 use url::Url;
 
 use crate::models::{
-    ParallelScan, ReadConfig, ReadOperation, ReadSpec, SnapshotConstructionSpec, TableInfo,
-    TimeTravel,
+    ParallelScan, ReadConfig, ReadEngine, ReadOperation, ReadSpec, SnapshotConstructionSpec,
+    TableInfo, TimeTravel,
 };
 use crate::predicate_parser::parse_predicate;
 
@@ -348,6 +357,250 @@ impl WorkloadRunner for ReadMetadataRunner {
     }
 }
 
+pub struct ReadDataStateMachineRunner {
+    snapshot: Arc<Snapshot>,
+    engine: Arc<dyn Engine>,
+    name: String,
+    predicate: Option<PredicateRef>,
+    projected_schema: Option<delta_kernel::schema::SchemaRef>,
+}
+
+impl ReadDataStateMachineRunner {
+    pub fn setup(
+        table_info: &TableInfo,
+        case_name: &str,
+        read_spec: &ReadSpec,
+        runtime: Arc<tokio::runtime::Runtime>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (engine, strategy) = resolve_snapshot_strategy(table_info, runtime.clone())?;
+        let snapshot =
+            strategy.load_snapshot(engine.as_ref(), &runtime, read_spec.time_travel.as_ref())?;
+        let predicate = read_spec
+            .predicate
+            .as_deref()
+            .map(|sql| parse_predicate(sql, &snapshot.schema()))
+            .transpose()?
+            .map(Arc::new);
+        let projected_schema = read_spec
+            .columns
+            .as_ref()
+            .map(|cols| snapshot.schema().project(cols))
+            .transpose()?;
+        let name = format!(
+            "{}/{}/{}/sm",
+            table_info.name,
+            case_name,
+            ReadOperation::ReadData.as_str()
+        );
+        Ok(Self {
+            snapshot,
+            engine,
+            name,
+            predicate,
+            projected_schema,
+        })
+    }
+}
+
+impl WorkloadRunner for ReadDataStateMachineRunner {
+    fn execute(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut builder = self
+            .snapshot
+            .clone()
+            .scan_builder()
+            .with_predicate(self.predicate.clone());
+        if let Some(schema) = &self.projected_schema {
+            builder = builder.with_schema(schema.clone());
+        }
+        let scan = builder.build()?;
+        for result in scan.execute(self.engine.clone())? {
+            black_box(result?);
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+pub struct ReadDataPlansRunner {
+    snapshot: Arc<Snapshot>,
+    engine: Arc<dyn Engine>,
+    executor: DataFusionExecutor,
+    runtime: Arc<tokio::runtime::Runtime>,
+    name: String,
+    projected_schema: Option<delta_kernel::schema::SchemaRef>,
+}
+
+async fn collect_fsr_file_metas(
+    snapshot: Arc<Snapshot>,
+    engine: Arc<dyn Engine>,
+    table_root: &Url,
+) -> DeltaResult<Vec<FileMeta>> {
+    let executor = DataFusionExecutor::try_new_with_engine(Arc::clone(&engine))
+        .map_err(|e| Error::generic(format!("create DataFusionExecutor: {e}")))?;
+    let sm = snapshot.full_state()?;
+    let ((), fsr_batches) = executor
+        .drive_coroutine_sm_collecting_results(sm)
+        .await
+        .map_err(|e| Error::generic(format!("execute full_state via DataFusionExecutor: {e}")))?;
+
+    let mut files = Vec::new();
+    for batch in fsr_batches {
+        let add_idx = batch
+            .schema()
+            .index_of("add")
+            .map_err(|e| Error::generic(format!("full_state add missing: {e}")))?;
+        let add_col = batch
+            .column(add_idx)
+            .as_struct_opt()
+            .ok_or_else(|| Error::generic("full_state add column was not Struct"))?;
+        let path_col = add_col
+            .column_by_name("path")
+            .cloned()
+            .ok_or_else(|| Error::generic("full_state add.path missing"))?;
+        let size_arr = add_col
+            .column_by_name("size")
+            .cloned()
+            .ok_or_else(|| Error::generic("full_state add.size missing"))?;
+        let size_col = size_arr
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| Error::generic("full_state add.size was not Int64"))?;
+        let mod_time_arr = add_col
+            .column_by_name("modificationTime")
+            .cloned()
+            .ok_or_else(|| Error::generic("full_state add.modificationTime missing"))?;
+        let mod_time_col = mod_time_arr
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| Error::generic("full_state add.modificationTime was not Int64"))?;
+        for i in 0..batch.num_rows() {
+            // Prefer the nested path field as the source of truth for add-file rows.
+            // Some action streams can carry a null parent struct bitmap even when child
+            // values are materialized; requiring add_col validity can drop real files.
+            if !path_col.is_valid(i) {
+                continue;
+            }
+            let rel_path = array_value_to_string(path_col.as_ref(), i)
+                .map_err(|e| Error::generic(format!("stringify scan path row {i}: {e}")))?;
+            let location = table_root
+                .join(&rel_path)
+                .map_err(|e| Error::generic(format!("resolve path '{rel_path}' failed: {e}")))?;
+            let size = u64::try_from(size_col.value(i))
+                .map_err(|_| Error::generic("negative file size in scan metadata"))?;
+            files.push(FileMeta::new(location, mod_time_col.value(i), size));
+        }
+    }
+    Ok(files)
+}
+
+fn evaluate_to_json_column(
+    batch: &delta_kernel::arrow::array::RecordBatch,
+    col: &'static str,
+) -> DeltaResult<delta_kernel::arrow::array::StringArray> {
+    let arr = evaluate_expression(
+        &Expression::unary(UnaryExpressionOp::ToJson, Expression::column([col])),
+        batch,
+        Some(&KernelDataType::STRING),
+    )?;
+    Ok(arr.as_string::<i32>().clone())
+}
+
+async fn extract_snapshot_protocol_metadata_from_fsr(
+    snapshot: Arc<Snapshot>,
+    engine: Arc<dyn Engine>,
+) -> DeltaResult<(Protocol, Metadata)> {
+    let validated_protocol = snapshot.protocol().clone();
+    let validated_metadata = snapshot.metadata().clone();
+    let executor = DataFusionExecutor::try_new_with_engine(engine)
+        .map_err(|e| Error::generic(format!("create DataFusionExecutor: {e}")))?;
+    let sm = snapshot.full_state()?;
+    let ((), fsr_batches) = executor
+        .drive_coroutine_sm_collecting_results(sm)
+        .await
+        .map_err(|e| Error::generic(format!("execute full_state via DataFusionExecutor: {e}")))?;
+
+    // Exercise FSR action stream extraction, but keep snapshot semantic validation at
+    // Snapshot/TableConfiguration boundary.
+    for batch in fsr_batches {
+        let protocol_col = evaluate_to_json_column(&batch, "protocol")?;
+        let metadata_col = evaluate_to_json_column(&batch, "metaData")?;
+        for i in 0..batch.num_rows() {
+            if protocol_col.is_valid(i) {
+                let _ = serde_json::from_str::<Protocol>(protocol_col.value(i));
+            }
+            if metadata_col.is_valid(i) {
+                let _ = serde_json::from_str::<Metadata>(metadata_col.value(i));
+            }
+        }
+    }
+
+    Ok((validated_protocol, validated_metadata))
+}
+
+impl ReadDataPlansRunner {
+    pub fn setup(
+        table_info: &TableInfo,
+        case_name: &str,
+        read_spec: &ReadSpec,
+        runtime: Arc<tokio::runtime::Runtime>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (engine, strategy) = resolve_snapshot_strategy(table_info, runtime.clone())?;
+        let snapshot =
+            strategy.load_snapshot(engine.as_ref(), &runtime, read_spec.time_travel.as_ref())?;
+        let projected_schema = read_spec
+            .columns
+            .as_ref()
+            .map(|cols| snapshot.schema().project(cols))
+            .transpose()?;
+        let executor = DataFusionExecutor::try_new_with_engine(engine.clone())
+            .map_err(|e| format!("DataFusion executor setup failed: {e}"))?;
+        let name = format!(
+            "{}/{}/{}/plans_df",
+            table_info.name,
+            case_name,
+            ReadOperation::ReadData.as_str()
+        );
+        Ok(Self {
+            snapshot,
+            engine,
+            executor,
+            runtime,
+            name,
+            projected_schema,
+        })
+    }
+}
+
+impl WorkloadRunner for ReadDataPlansRunner {
+    fn execute(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let schema = self
+            .projected_schema
+            .clone()
+            .unwrap_or_else(|| self.snapshot.schema().clone());
+        let files = self.runtime.block_on(collect_fsr_file_metas(
+            Arc::clone(&self.snapshot),
+            Arc::clone(&self.engine),
+            &self.snapshot.table_root(),
+        ))?;
+        let plan = DeclarativePlanNode::scan(FileType::Parquet, files, schema).into_results();
+        let batches = self
+            .runtime
+            .block_on(self.executor.execute_plan_collect(plan))
+            .map_err(|e| format!("DataFusion read execution failed: {e}"))?;
+        for batch in batches {
+            black_box(batch);
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// Factory function that creates the appropriate read runner for a given operation and config
 pub fn create_read_runner(
     table_info: &TableInfo,
@@ -357,11 +610,19 @@ pub fn create_read_runner(
     config: ReadConfig,
     runtime: Arc<tokio::runtime::Runtime>,
 ) -> Result<Box<dyn WorkloadRunner>, Box<dyn std::error::Error>> {
-    match operation {
-        ReadOperation::ReadMetadata => Ok(Box::new(ReadMetadataRunner::setup(
-            table_info, case_name, read_spec, config, runtime,
-        )?)),
-        ReadOperation::ReadData => Err("ReadDataRunner not yet implemented".into()),
+    match (operation, &config.read_engine) {
+        (ReadOperation::ReadMetadata, ReadEngine::StateMachine) => Ok(Box::new(
+            ReadMetadataRunner::setup(table_info, case_name, read_spec, config, runtime)?,
+        )),
+        (ReadOperation::ReadMetadata, ReadEngine::PlansDatafusion) => {
+            Err("ReadMetadata is only supported for StateMachine engine".into())
+        }
+        (ReadOperation::ReadData, ReadEngine::StateMachine) => Ok(Box::new(
+            ReadDataStateMachineRunner::setup(table_info, case_name, read_spec, runtime)?,
+        )),
+        (ReadOperation::ReadData, ReadEngine::PlansDatafusion) => Ok(Box::new(
+            ReadDataPlansRunner::setup(table_info, case_name, read_spec, runtime)?,
+        )),
     }
 }
 
@@ -406,7 +667,11 @@ impl WorkloadRunner for SnapshotConstructionRunner {
             &self.runtime,
             self.time_travel.as_ref(),
         )?;
-        black_box(snapshot);
+        let (protocol, metadata) = self.runtime.block_on(extract_snapshot_protocol_metadata_from_fsr(
+            Arc::clone(&snapshot),
+            Arc::clone(&self.engine),
+        ))?;
+        black_box((snapshot.version(), protocol, metadata));
         Ok(())
     }
 
@@ -419,8 +684,12 @@ impl WorkloadRunner for SnapshotConstructionRunner {
 mod tests {
     use std::sync::LazyLock;
 
+    use datafusion_physical_plan::displayable;
+    use delta_kernel::plans::state_machines::framework::phase_operation::PhaseOperation;
+    use delta_kernel::plans::state_machines::framework::state_machine::{AdvanceResult, StateMachine};
+
     use super::*;
-    use crate::models::{ParallelScan, ReadConfig, ReadSpec, TableInfo, TimeTravel};
+    use crate::models::{ParallelScan, ReadConfig, ReadEngine, ReadSpec, Spec, TableInfo, TimeTravel};
 
     fn test_runtime() -> Arc<tokio::runtime::Runtime> {
         static RT: LazyLock<Arc<tokio::runtime::Runtime>> = LazyLock::new(|| {
@@ -476,6 +745,7 @@ mod tests {
     fn serial_config() -> ReadConfig {
         ReadConfig {
             name: "serial".to_string(),
+            read_engine: ReadEngine::StateMachine,
             parallel_scan: ParallelScan::Disabled,
         }
     }
@@ -483,6 +753,7 @@ mod tests {
     fn parallel_config() -> ReadConfig {
         ReadConfig {
             name: "parallel2".to_string(),
+            read_engine: ReadEngine::StateMachine,
             parallel_scan: ParallelScan::Enabled { num_threads: 2 },
         }
     }
@@ -610,16 +881,35 @@ mod tests {
     }
 
     #[test]
-    fn test_create_read_runner_read_data_unimplemented() {
-        let result = create_read_runner(
+    fn test_create_read_runner_read_data_state_machine() {
+        let runner = create_read_runner(
             &test_table_info(),
             "testCase",
             &test_read_spec(),
             ReadOperation::ReadData,
             serial_config(),
             test_runtime(),
-        );
-        assert!(result.is_err());
+        )
+        .expect("create_read_runner should succeed");
+        assert!(runner.execute().is_ok());
+    }
+
+    #[test]
+    fn test_create_read_runner_read_data_plans_datafusion() {
+        let runner = create_read_runner(
+            &test_table_info(),
+            "testCase",
+            &test_read_spec(),
+            ReadOperation::ReadData,
+            ReadConfig {
+                name: "plans_df".to_string(),
+                read_engine: ReadEngine::PlansDatafusion,
+                parallel_scan: ParallelScan::Disabled,
+            },
+            test_runtime(),
+        )
+        .expect("create_read_runner should succeed");
+        assert!(runner.execute().is_ok());
     }
 
     #[test]
@@ -643,5 +933,104 @@ mod tests {
         )
         .expect("setup should succeed");
         assert!(runner.execute().is_ok());
+    }
+
+    #[test]
+    fn print_read_data_plans_datafusion_physical_plan() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("workloads")
+            .join("benchmarks")
+            .join("101kAdds1kCommitsSinceChkpt1Chkpt");
+        let table_info = TableInfo::from_json_path(root.join("tableInfo.json"))
+            .expect("load benchmark tableInfo.json");
+        let spec = Spec::from_json_path(root.join("specs").join("readV60.json"))
+            .expect("load benchmark read spec");
+        let read_spec = match spec {
+            Spec::Read(s) => s,
+            _ => panic!("readV60.json must be a read spec"),
+        };
+
+        let runner = ReadDataPlansRunner::setup(
+            &table_info,
+            "readV60",
+            &read_spec,
+            test_runtime(),
+        )
+        .expect("setup should succeed");
+
+        let schema = runner
+            .projected_schema
+            .clone()
+            .unwrap_or_else(|| runner.snapshot.schema().clone());
+        let files = runner
+            .runtime
+            .block_on(collect_fsr_file_metas(
+                Arc::clone(&runner.snapshot),
+                Arc::clone(&runner.engine),
+                runner.snapshot.table_root(),
+            ))
+            .expect("collect_fsr_file_metas should succeed");
+        let plan = DeclarativePlanNode::scan(FileType::Parquet, files, schema).into_results();
+        let physical = runner
+            .executor
+            .compile_plan(&plan)
+            .expect("compile_plan should succeed");
+
+        println!(
+            "=== DataFusion Physical Plan ===\n{}",
+            displayable(physical.as_ref()).indent(true)
+        );
+    }
+
+    #[test]
+    fn print_fsr_metadata_phase_physical_plans() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("workloads")
+            .join("benchmarks")
+            .join("101kAdds1kCommitsSinceChkpt1Chkpt");
+        let table_info = TableInfo::from_json_path(root.join("tableInfo.json"))
+            .expect("load benchmark tableInfo.json");
+        let spec = Spec::from_json_path(root.join("specs").join("readV60.json"))
+            .expect("load benchmark read spec");
+        let read_spec = match spec {
+            Spec::Read(s) => s,
+            _ => panic!("readV60.json must be a read spec"),
+        };
+
+        let runner = ReadDataPlansRunner::setup(
+            &table_info,
+            "readV60",
+            &read_spec,
+            test_runtime(),
+        )
+        .expect("setup should succeed");
+
+        let mut sm = runner.snapshot.full_state().expect("build full_state SM");
+        runner
+            .runtime
+            .block_on(async {
+                loop {
+                    let op = sm.get_operation().expect("sm.get_operation");
+                    if let PhaseOperation::Plans(plans) = &op {
+                        for (idx, plan) in plans.iter().enumerate() {
+                            let physical = runner
+                                .executor
+                                .compile_plan(plan)
+                                .expect("compile fsr phase plan");
+                            println!(
+                                "=== FSR Phase Plan {} ({:?}) ===\n{}",
+                                idx,
+                                plan.sink.sink_type,
+                                displayable(physical.as_ref()).indent(true)
+                            );
+                        }
+                    }
+                    let phase_result = runner.executor.execute_phase_operation(op).await;
+                    match sm.advance(phase_result).expect("sm.advance") {
+                        AdvanceResult::Continue => {}
+                        AdvanceResult::Done(_) => break,
+                    }
+                }
+            });
     }
 }

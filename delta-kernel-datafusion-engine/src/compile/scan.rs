@@ -19,10 +19,12 @@
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
+use datafusion_common::ScalarValue;
 use datafusion_datasource::file_groups::FileGroup;
 use datafusion_datasource::file_scan_config::FileScanConfigBuilder;
 use datafusion_datasource::source::DataSourceExec;
 use datafusion_datasource::PartitionedFile;
+use datafusion_datasource::TableSchema;
 use datafusion_datasource_json::source::JsonSource;
 use datafusion_datasource_parquet::source::ParquetSource;
 use datafusion_execution::object_store::ObjectStoreUrl;
@@ -41,33 +43,66 @@ use crate::exec::{KernelFilterExec, NullabilityValidationExec, OrderedUnionExec,
 struct PreparedScanFiles {
     file_group: FileGroup,
     object_store_url: ObjectStoreUrl,
+    table_partition_cols: Vec<Field>,
 }
 
-fn prepare_scan_files(files: &[FileMeta]) -> Result<PreparedScanFiles, DeltaError> {
-    let first = files
-        .first()
-        .ok_or_else(|| crate::error::plan_compilation("Scan node has no files"))?;
+fn split_hive_segment(segment: &str) -> Option<(&str, &str)> {
+    let mut parts = segment.splitn(2, '=');
+    let key = parts.next()?;
+    let val = parts.next()?;
+    if key.is_empty() {
+        return None;
+    }
+    Some((key, val))
+}
 
-    let partitioned_files = files
+fn hive_partitions_from_url(url: &url::Url) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for seg in url.path_segments().into_iter().flatten() {
+        if let Some((k, v)) = split_hive_segment(seg) {
+            out.insert(k.to_string(), v.to_string());
+        }
+    }
+    out
+}
+
+fn scalar_from_partition_value(value: &str, dt: &DataType) -> ScalarValue {
+    match dt {
+        DataType::Utf8 | DataType::LargeUtf8 => ScalarValue::Utf8(Some(value.to_string())),
+        DataType::Int64 => ScalarValue::Int64(value.parse::<i64>().ok()),
+        DataType::Int32 => ScalarValue::Int32(value.parse::<i32>().ok()),
+        DataType::Int16 => ScalarValue::Int16(value.parse::<i16>().ok()),
+        DataType::Int8 => ScalarValue::Int8(value.parse::<i8>().ok()),
+        DataType::UInt64 => ScalarValue::UInt64(value.parse::<u64>().ok()),
+        DataType::UInt32 => ScalarValue::UInt32(value.parse::<u32>().ok()),
+        DataType::UInt16 => ScalarValue::UInt16(value.parse::<u16>().ok()),
+        DataType::UInt8 => ScalarValue::UInt8(value.parse::<u8>().ok()),
+        DataType::Boolean => ScalarValue::Boolean(value.parse::<bool>().ok()),
+        DataType::Float64 => ScalarValue::Float64(value.parse::<f64>().ok()),
+        DataType::Float32 => ScalarValue::Float32(value.parse::<f32>().ok()),
+        _ => ScalarValue::Utf8(Some(value.to_string())),
+    }
+}
+
+fn infer_partition_columns(schema: &Schema, files: &[FileMeta]) -> Vec<Field> {
+    let mut present_keys = std::collections::BTreeSet::new();
+    for f in files {
+        for k in hive_partitions_from_url(&f.location).keys() {
+            present_keys.insert(k.clone());
+        }
+    }
+    schema
+        .fields()
         .iter()
-        .map(|f| file_meta_to_partitioned(f))
-        .collect::<Result<Vec<_>, DeltaError>>()?;
-
-    let base_url = format!(
-        "{}://{}",
-        first.location.scheme(),
-        first.location.host_str().unwrap_or("")
-    );
-    let object_store_url =
-        ObjectStoreUrl::parse(&base_url).map_err(crate::error::datafusion_err_to_delta)?;
-
-    Ok(PreparedScanFiles {
-        file_group: FileGroup::new(partitioned_files),
-        object_store_url,
-    })
+        .filter(|fld| present_keys.contains(fld.name()))
+        .map(|f| f.as_ref().clone())
+        .collect()
 }
 
-fn file_meta_to_partitioned(file: &FileMeta) -> Result<PartitionedFile, DeltaError> {
+fn file_meta_to_partitioned(
+    file: &FileMeta,
+    table_partition_cols: &[Field],
+) -> Result<PartitionedFile, DeltaError> {
     let location = if file.location.scheme() == "file" {
         let fs_path = file.location.to_file_path().map_err(|()| {
             crate::error::plan_compilation(format!("file URL is not local path: {}", file.location))
@@ -86,7 +121,48 @@ fn file_meta_to_partitioned(file: &FileMeta) -> Result<PartitionedFile, DeltaErr
         .timestamp_millis_opt(file.last_modified)
         .single()
         .unwrap_or_else(|| Utc.timestamp_nanos(0));
+    if !table_partition_cols.is_empty() {
+        let by_key = hive_partitions_from_url(&file.location);
+        pf.partition_values = table_partition_cols
+            .iter()
+            .map(|col| {
+                by_key
+                    .get(col.name())
+                    .map(|raw| scalar_from_partition_value(raw, col.data_type()))
+                    .unwrap_or_else(|| ScalarValue::Null)
+            })
+            .collect();
+    }
     Ok(pf)
+}
+
+fn prepare_scan_files(
+    files: &[FileMeta],
+    arrow_schema: &Schema,
+) -> Result<PreparedScanFiles, DeltaError> {
+    let first = files
+        .first()
+        .ok_or_else(|| crate::error::plan_compilation("Scan node has no files"))?;
+
+    let table_partition_cols = infer_partition_columns(arrow_schema, files);
+    let partitioned_files = files
+        .iter()
+        .map(|f| file_meta_to_partitioned(f, &table_partition_cols))
+        .collect::<Result<Vec<_>, DeltaError>>()?;
+
+    let base_url = format!(
+        "{}://{}",
+        first.location.scheme(),
+        first.location.host_str().unwrap_or("")
+    );
+    let object_store_url =
+        ObjectStoreUrl::parse(&base_url).map_err(crate::error::datafusion_err_to_delta)?;
+
+    Ok(PreparedScanFiles {
+        file_group: FileGroup::new(partitioned_files),
+        object_store_url,
+        table_partition_cols,
+    })
 }
 
 fn parquet_scan_arrow_schema_and_virtual_columns(
@@ -203,9 +279,33 @@ fn build_raw_scan(
     arrow_schema: Arc<Schema>,
     parquet_virtual_columns: Vec<Arc<Field>>,
 ) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
+    let partition_names: std::collections::BTreeSet<String> = prepared
+        .table_partition_cols
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    let file_schema = if partition_names.is_empty() {
+        arrow_schema.clone()
+    } else {
+        let fields = arrow_schema
+            .fields()
+            .iter()
+            .filter(|f| !partition_names.contains(f.name().as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        Arc::new(Schema::new(fields))
+    };
+    let partition_cols = prepared
+        .table_partition_cols
+        .iter()
+        .cloned()
+        .map(Arc::new)
+        .collect::<Vec<_>>();
+    let table_schema = TableSchema::new(file_schema, partition_cols);
+
     let scan: Arc<dyn ExecutionPlan> = match node.file_type {
         FileType::Parquet => {
-            let mut source = ParquetSource::new(arrow_schema.clone());
+            let mut source = ParquetSource::new(table_schema.clone());
             if !parquet_virtual_columns.is_empty() {
                 source = source
                     .with_virtual_columns(parquet_virtual_columns)
@@ -220,7 +320,7 @@ fn build_raw_scan(
             DataSourceExec::from_data_source(cfg)
         }
         FileType::Json => {
-            let source = Arc::new(JsonSource::new(arrow_schema.clone()));
+            let source = Arc::new(JsonSource::new(table_schema));
             let cfg = FileScanConfigBuilder::new(prepared.object_store_url, source)
                 .with_file_group(prepared.file_group)
                 .with_projection_indices(None)
@@ -290,7 +390,7 @@ fn compile_scan_single_group(
 ) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
     let (scan_arrow_schema, virtual_cols) =
         parquet_scan_arrow_schema_and_virtual_columns(node, source_arrow_schema)?;
-    let prepared = prepare_scan_files(files)?;
+    let prepared = prepare_scan_files(files, target_arrow_schema.as_ref())?;
     let scan = build_raw_scan(node, prepared, scan_arrow_schema.clone(), virtual_cols)?;
     let validation_target = nullability_target_arrow_schema(node, target_arrow_schema);
     wrap_scan_extensions(scan, node, validation_target)

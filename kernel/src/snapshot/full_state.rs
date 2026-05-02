@@ -28,8 +28,8 @@ impl Snapshot {
     /// engine-driven step. See [`crate::plans::state_machines::fsr::full_state`] for the
     /// per-plan breakdown and the dedup-key contract.
     ///
-    /// The terminal plan is a `Results` sink; live add-action rows arrive as
-    /// [`crate::scan::scan_row_schema`]-shaped batches in the engine's `Results` consumer.
+    /// The terminal plan is a `Results` sink; reconstructed action rows (add / remove /
+    /// protocol / metaData / domainMetadata / txn) arrive in the engine's `Results` consumer.
     ///
     /// # Feature gate
     ///

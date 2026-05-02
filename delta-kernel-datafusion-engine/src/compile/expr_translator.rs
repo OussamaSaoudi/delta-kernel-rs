@@ -8,7 +8,7 @@
 //!
 //! Supported today:
 //! - `Literal` (all primitive scalar types + typed NULL)
-//! - `Column` (top-level only; nested paths return Unsupported)
+//! - `Column` (top-level + nested via DataFusion `get_field`)
 //! - `Predicate` wrappers (BooleanExpression, Not, Junction And/Or, Unary IsNull,
 //!   Binary Eq/Lt/Gt/Distinct/In)
 //! - `Binary` arithmetic (Plus, Minus, Multiply, Divide)
@@ -17,9 +17,8 @@
 //! - `If` (lowered to `Expr::Case`)
 //!
 //! Deferred (returns Unsupported with TODO):
-//! - Nested `Column` paths (require `get_field` UDF; added when FSR's `fsr_dedup_key` lands)
-//! - `Variadic(Array)` (requires `make_array` UDF)
-//! - `Struct`, `Transform`, `Unary(ToJson)`, `ParseJson`, `MapToStruct`
+//! - `Struct` with nullability predicates, `Transform`, `Unary(ToJson)`, `ParseJson`,
+//!   `MapToStruct`
 //! - `Opaque`, `Unknown`
 //! - `Predicate::Opaque`, `Predicate::Unknown`
 
@@ -28,6 +27,9 @@ use std::sync::Arc;
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::{BinaryExpr, Case, InList};
 use datafusion_expr::{Expr, Operator};
+use datafusion_functions::core::expr_fn::{get_field, r#struct as make_struct};
+use datafusion_functions_nested::expr_fn::make_array;
+use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::expressions::{
     BinaryExpression, BinaryExpressionOp, BinaryPredicate, BinaryPredicateOp, ColumnName,
     Expression, IfExpression, JunctionPredicate, JunctionPredicateOp, Predicate, Scalar,
@@ -44,13 +46,23 @@ pub fn kernel_expr_to_df(expr: &Expression) -> Result<Expr, DeltaError> {
         Expression::Literal(scalar) => scalar_to_df(scalar),
         Expression::Column(name) => column_to_df(name),
         Expression::Predicate(pred) => kernel_pred_to_df(pred),
-        Expression::Binary(BinaryExpression { op, left, right }) => binary_expr_to_df(*op, left, right),
+        Expression::Binary(BinaryExpression { op, left, right }) => {
+            binary_expr_to_df(*op, left, right)
+        }
         Expression::Variadic(VariadicExpression { op, exprs }) => variadic_to_df(*op, exprs),
         Expression::If(if_expr) => if_to_df(if_expr),
-        Expression::Struct(_, _) => Err(unsupported(
-            "expr_translator: Struct expressions are not yet supported \
-             (will lower to named_struct UDF in a follow-up commit)",
-        )),
+        Expression::Struct(children, nullability_predicate) => {
+            if nullability_predicate.is_some() {
+                return Err(unsupported(
+                    "expr_translator: Struct with nullability predicate is not yet supported",
+                ));
+            }
+            let args = children
+                .iter()
+                .map(|e| kernel_expr_to_df(e.as_ref()))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(make_struct(args))
+        }
         Expression::Transform(_) => Err(unsupported(
             "expr_translator: Transform expressions are not yet supported",
         )),
@@ -96,11 +108,16 @@ fn column_to_df(name: &ColumnName) -> Result<Expr, DeltaError> {
     let parts: Vec<&str> = name.iter().map(String::as_str).collect();
     match parts.as_slice() {
         [single] => Ok(Expr::Column(Column::new_unqualified(*single))),
-        _ => Err(unsupported(format!(
-            "expr_translator: nested column references are not yet supported \
-             (column path: {}); will lower to get_field UDF in a follow-up commit",
-            name,
-        ))),
+        [root, nested @ ..] => {
+            let mut expr = Expr::Column(Column::new_unqualified(*root));
+            for field in nested {
+                expr = get_field(expr, *field);
+            }
+            Ok(expr)
+        }
+        [] => Err(unsupported(
+            "expr_translator: empty column path cannot be translated",
+        )),
     }
 }
 
@@ -172,7 +189,11 @@ fn in_pred_to_df(value: &Expression, list: &Expression) -> Result<Expr, DeltaErr
             )))
         }
     };
-    Ok(Expr::InList(InList::new(Box::new(value_df), elements, false)))
+    Ok(Expr::InList(InList::new(
+        Box::new(value_df),
+        elements,
+        false,
+    )))
 }
 
 fn junction_to_df(op: JunctionPredicateOp, preds: &[Predicate]) -> Result<Expr, DeltaError> {
@@ -197,10 +218,13 @@ fn junction_to_df(op: JunctionPredicateOp, preds: &[Predicate]) -> Result<Expr, 
 fn variadic_to_df(op: VariadicExpressionOp, exprs: &[Expression]) -> Result<Expr, DeltaError> {
     match op {
         VariadicExpressionOp::Coalesce => coalesce_to_df(exprs),
-        VariadicExpressionOp::Array => Err(unsupported(
-            "expr_translator: ARRAY(...) is not yet supported (will lower to make_array UDF in a \
-             follow-up commit)",
-        )),
+        VariadicExpressionOp::Array => {
+            let args = exprs
+                .iter()
+                .map(kernel_expr_to_df)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(make_array(args))
+        }
     }
 }
 
@@ -243,7 +267,11 @@ fn if_to_df(if_expr: &IfExpression) -> Result<Expr, DeltaError> {
     let then = kernel_expr_to_df(&if_expr.then_expr)?;
     let r#else = kernel_expr_to_df(&if_expr.else_expr)?;
     let when_then = vec![(Box::new(cond), Box::new(then))];
-    Ok(Expr::Case(Case::new(None, when_then, Some(Box::new(r#else)))))
+    Ok(Expr::Case(Case::new(
+        None,
+        when_then,
+        Some(Box::new(r#else)),
+    )))
 }
 
 fn scalar_to_df(scalar: &Scalar) -> Result<Expr, DeltaError> {
@@ -262,9 +290,7 @@ fn scalar_value_to_df(scalar: &Scalar) -> Result<ScalarValue, DeltaError> {
         Scalar::String(v) => ScalarValue::Utf8(Some(v.clone())),
         Scalar::Boolean(v) => ScalarValue::Boolean(Some(*v)),
         Scalar::Date(v) => ScalarValue::Date32(Some(*v)),
-        Scalar::Timestamp(v) => {
-            ScalarValue::TimestampMicrosecond(Some(*v), Some(Arc::from("UTC")))
-        }
+        Scalar::Timestamp(v) => ScalarValue::TimestampMicrosecond(Some(*v), Some(Arc::from("UTC"))),
         Scalar::TimestampNtz(v) => ScalarValue::TimestampMicrosecond(Some(*v), None),
         Scalar::Binary(v) => ScalarValue::Binary(Some(v.clone())),
         Scalar::Decimal(d) => {
@@ -283,8 +309,8 @@ fn scalar_value_to_df(scalar: &Scalar) -> Result<ScalarValue, DeltaError> {
 }
 
 fn typed_null_to_df(data_type: &DataType) -> Result<ScalarValue, DeltaError> {
-    match data_type {
-        DataType::Primitive(p) => Ok(match p {
+    if let DataType::Primitive(p) = data_type {
+        return Ok(match p {
             PrimitiveType::Integer => ScalarValue::Int32(None),
             PrimitiveType::Long => ScalarValue::Int64(None),
             PrimitiveType::Short => ScalarValue::Int16(None),
@@ -302,11 +328,20 @@ fn typed_null_to_df(data_type: &DataType) -> Result<ScalarValue, DeltaError> {
             PrimitiveType::Decimal(d) => {
                 ScalarValue::Decimal128(None, d.precision(), d.scale() as i8)
             }
-        }),
-        other => Err(unsupported(format!(
-            "expr_translator: typed NULL with non-primitive type {other:?} is not yet supported"
-        ))),
+        });
     }
+
+    let arrow_dt: datafusion_common::arrow::datatypes::DataType =
+        data_type.try_into_arrow().map_err(|e| {
+            unsupported(format!(
+                "expr_translator: typed NULL conversion failed for {data_type:?}: {e}"
+            ))
+        })?;
+    ScalarValue::try_from(&arrow_dt).map_err(|e| {
+        unsupported(format!(
+            "expr_translator: typed NULL for {data_type:?} is not supported by DataFusion: {e}"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -350,17 +385,23 @@ mod tests {
     }
 
     #[test]
-    fn nested_column_returns_unsupported() {
+    fn nested_column_translates_to_get_field_chain() {
         let kernel = Expr_::column(["add", "path"]);
-        let err = kernel_expr_to_df(&kernel).unwrap_err();
-        assert!(format!("{err}").contains("nested column"));
+        let df = kernel_expr_to_df(&kernel).unwrap();
+        assert_eq!(format!("{df}"), "get_field(add, Utf8(\"path\"))");
     }
 
     #[test]
     fn translates_primitive_literals() {
         // i32, i64, string, bool
-        assert_eq!(kernel_expr_to_df(&Expr_::literal(7i32)).unwrap(), lit_i32(7));
-        assert_eq!(kernel_expr_to_df(&Expr_::literal(42i64)).unwrap(), lit_i64(42));
+        assert_eq!(
+            kernel_expr_to_df(&Expr_::literal(7i32)).unwrap(),
+            lit_i32(7)
+        );
+        assert_eq!(
+            kernel_expr_to_df(&Expr_::literal(42i64)).unwrap(),
+            lit_i64(42)
+        );
         assert_eq!(
             kernel_expr_to_df(&Expr_::literal("abc")).unwrap(),
             lit_str("abc")
@@ -577,17 +618,17 @@ mod tests {
     }
 
     #[test]
-    fn array_returns_unsupported() {
+    fn array_translates_to_make_array() {
         let kernel = Expr_::array([column_expr!("a"), column_expr!("b")]);
-        let err = kernel_expr_to_df(&kernel).unwrap_err();
-        assert!(format!("{err}").contains("ARRAY"));
+        let df = kernel_expr_to_df(&kernel).unwrap();
+        assert_eq!(format!("{df}"), "make_array(a, b)");
     }
 
     #[test]
-    fn struct_returns_unsupported() {
+    fn struct_translates_to_df_struct_function() {
         let kernel = Expr_::struct_from([Arc::new(column_expr!("a")), Arc::new(column_expr!("b"))]);
-        let err = kernel_expr_to_df(&kernel).unwrap_err();
-        assert!(format!("{err}").contains("Struct"));
+        let df = kernel_expr_to_df(&kernel).unwrap();
+        assert_eq!(format!("{df}"), "struct(a, b)");
     }
 
     #[test]
@@ -652,21 +693,18 @@ mod tests {
             Box::new(lit_i64(5)),
         ));
         let rhs = Expr::Not(Box::new(Expr::IsNull(Box::new(col("b")))));
-        let expected = Expr::BinaryExpr(BinaryExpr::new(
-            Box::new(lhs),
-            Operator::And,
-            Box::new(rhs),
-        ));
+        let expected =
+            Expr::BinaryExpr(BinaryExpr::new(Box::new(lhs), Operator::And, Box::new(rhs)));
         assert_eq!(df, expected);
     }
 
     #[test]
-    fn passes_column_path_through_unsupported_path() {
-        // Direct construction (not via column_expr!) verifies the multi-segment path errors.
+    fn translates_multisegment_column_path_to_nested_get_field() {
         let name = ColumnName::new(["a", "b", "c"]);
-        let err = kernel_expr_to_df(&Expr_::Column(name)).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("nested column"), "got: {msg}");
-        assert!(msg.contains("a.b.c"), "got: {msg}");
+        let df = kernel_expr_to_df(&Expr_::Column(name)).unwrap();
+        assert_eq!(
+            format!("{df}"),
+            "get_field(get_field(a, Utf8(\"b\")), Utf8(\"c\"))"
+        );
     }
 }

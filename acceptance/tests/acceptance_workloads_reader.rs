@@ -626,7 +626,6 @@ fn acceptance_workloads_test(spec_path: &Path) -> datatest_stable::Result<()> {
     if expected_failure.is_none() && should_skip_test(&spec_path_str).is_some() {
         return Ok(());
     }
-
     // Load and execute test case
     let test_case = TestCase::from_spec_path(&spec_path_abs);
     let table_root = test_case.table_root().expect("Failed to get table URL");

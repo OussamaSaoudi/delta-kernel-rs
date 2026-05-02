@@ -1580,7 +1580,10 @@ mod tests {
         #[test]
         fn test_case_when_with_zero_branches_returns_else() {
             // CASE ELSE e_else END (no WHEN branches) collapses to e_else directly.
-            let case = Expression::case_when(Vec::<(Predicate, Expression)>::new(), Expression::literal(42i64));
+            let case = Expression::case_when(
+                Vec::<(Predicate, Expression)>::new(),
+                Expression::literal(42i64),
+            );
             assert_eq!(case, Expression::literal(42i64));
         }
 

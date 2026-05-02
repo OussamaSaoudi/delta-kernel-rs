@@ -7,6 +7,7 @@ name = "acceptance"
 version = "0.21.0"
 dependencies = [
  "datatest-stable",
+ "delta-kernel-datafusion-engine",
  "delta_kernel",
  "delta_kernel_benchmarks",
  "flate2",
@@ -1460,6 +1461,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-functions-aggregate"
+version = "53.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00aa6217e56098ba84e0a338176fe52f0a84cca398021512c6c8c5eff806d0ad"
+dependencies = [
+ "ahash",
+ "arrow 58.1.0",
+ "datafusion-common",
+ "datafusion-doc",
+ "datafusion-execution",
+ "datafusion-expr",
+ "datafusion-functions-aggregate-common",
+ "datafusion-macros",
+ "datafusion-physical-expr",
+ "datafusion-physical-expr-common",
+ "half",
+ "log",
+ "num-traits",
+ "paste",
+]
+
+[[package]]
 name = "datafusion-functions-aggregate-common"
 version = "53.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1470,6 +1493,31 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr-common",
  "datafusion-physical-expr-common",
+]
+
+[[package]]
+name = "datafusion-functions-nested"
+version = "53.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef13a858e20d50f0a9bb5e96e7ac82b4e7597f247515bccca4fdd2992df0212a"
+dependencies = [
+ "arrow 58.1.0",
+ "arrow-ord 58.1.0",
+ "datafusion-common",
+ "datafusion-doc",
+ "datafusion-execution",
+ "datafusion-expr",
+ "datafusion-expr-common",
+ "datafusion-functions",
+ "datafusion-functions-aggregate",
+ "datafusion-functions-aggregate-common",
+ "datafusion-macros",
+ "datafusion-physical-expr-common",
+ "hashbrown 0.16.1",
+ "itertools 0.14.0",
+ "itoa",
+ "log",
+ "paste",
 ]
 
 [[package]]
@@ -1567,6 +1615,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-physical-optimizer"
+version = "53.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cb13397809a425918f608dfe8653f332015a3e330004ab191b4404187238b95"
+dependencies = [
+ "arrow 58.1.0",
+ "datafusion-common",
+ "datafusion-execution",
+ "datafusion-expr",
+ "datafusion-expr-common",
+ "datafusion-physical-expr",
+ "datafusion-physical-expr-common",
+ "datafusion-physical-plan",
+ "datafusion-pruning",
+ "itertools 0.14.0",
+]
+
+[[package]]
 name = "datafusion-physical-plan"
 version = "53.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1653,8 +1719,11 @@ dependencies = [
  "datafusion-datasource-parquet",
  "datafusion-execution",
  "datafusion-expr",
+ "datafusion-functions",
+ "datafusion-functions-nested",
  "datafusion-functions-window",
  "datafusion-physical-expr",
+ "datafusion-physical-optimizer",
  "datafusion-physical-plan",
  "delta_kernel",
  "futures",
@@ -1662,6 +1731,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "test_utils",
  "tokio",
  "url",
 ]
@@ -1734,6 +1804,8 @@ name = "delta_kernel_benchmarks"
 version = "0.21.0"
 dependencies = [
  "criterion",
+ "datafusion-physical-plan",
+ "delta-kernel-datafusion-engine",
  "delta-kernel-unity-catalog",
  "delta_kernel",
  "flate2",

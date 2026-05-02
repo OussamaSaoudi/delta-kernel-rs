@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use delta_kernel_benchmarks::models::{
-    default_read_configs, ParallelScan, ReadConfig, ReadOperation, Spec,
+    default_read_configs, ParallelScan, ReadConfig, ReadEngine, ReadOperation, Spec,
 };
 use delta_kernel_benchmarks::runners::{
     create_read_runner, SnapshotConstructionRunner, WorkloadRunner,
@@ -28,8 +28,14 @@ fn workload_benchmarks(c: &mut Criterion) {
     for workload in &workloads {
         match &workload.spec {
             Spec::Read(read_spec) => {
-                for operation in [ReadOperation::ReadMetadata] {
+                for operation in [ReadOperation::ReadMetadata, ReadOperation::ReadData] {
                     for config in build_read_configs(&workload.table_info.name) {
+                        if matches!(
+                            (&operation, &config.read_engine),
+                            (ReadOperation::ReadMetadata, ReadEngine::PlansDatafusion)
+                        ) {
+                            continue;
+                        }
                         let runner = create_read_runner(
                             &workload.table_info,
                             &workload.case_name,
@@ -81,7 +87,8 @@ fn build_read_configs(table_name: &str) -> Vec<ReadConfig> {
     let mut configs = default_read_configs();
     if table_name.contains("V2Chkpt") {
         configs.push(ReadConfig {
-            name: "parallel2".into(),
+            name: "sm_parallel2".into(),
+            read_engine: ReadEngine::StateMachine,
             parallel_scan: ParallelScan::Enabled { num_threads: 2 },
         });
     }
