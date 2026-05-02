@@ -13,13 +13,15 @@
 //!
 //! **Limits:** nested struct children are not independently matched by parquet field ID in this
 //! path. Predicate pushdown inside the parquet decoder still keys off physical parquet statistics
-//! paths; declarative scans prefer residual [`KernelFilterExec`] after decode to avoid
+//! paths; declarative scans prefer residual native filters after decode to avoid
 //! over-pushdown.
 
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
+use datafusion_common::DFSchema;
 use datafusion_common::ScalarValue;
+use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_datasource::file_groups::FileGroup;
 use datafusion_datasource::file_scan_config::FileScanConfigBuilder;
 use datafusion_datasource::source::DataSourceExec;
@@ -28,7 +30,9 @@ use datafusion_datasource::TableSchema;
 use datafusion_datasource_json::source::JsonSource;
 use datafusion_datasource_parquet::source::ParquetSource;
 use datafusion_execution::object_store::ObjectStoreUrl;
+use datafusion_physical_expr::create_physical_expr;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion_physical_plan::filter::FilterExec;
 use datafusion_physical_plan::ExecutionPlan;
 use delta_kernel::arrow::datatypes::{DataType, Field, Schema};
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
@@ -38,7 +42,8 @@ use delta_kernel::plans::ir::nodes::{FileType, ScanNode};
 use delta_kernel::FileMeta;
 use parquet::arrow::RowNumber;
 
-use crate::exec::{KernelFilterExec, NullabilityValidationExec, OrderedUnionExec, RowIndexExec};
+use crate::compile::expr_translator;
+use crate::exec::{NullabilityValidationExec, OrderedUnionExec, RowIndexExec};
 
 struct PreparedScanFiles {
     file_group: FileGroup,
@@ -332,20 +337,20 @@ fn build_raw_scan(
     Ok(scan)
 }
 
-/// Applies nullability coercion, [`KernelFilterExec`] when [`ScanNode::predicate`] is set, and
+/// Applies nullability coercion, residual native filter when [`ScanNode::predicate`] is set, and
 /// optional row index augmentation.
 ///
 /// ## Predicate
 ///
-/// The scan predicate is evaluated **only** via [`KernelFilterExec`] on decoded record batches
-/// using the kernel Arrow evaluator (same implementation shape as [`FilterNode`] lowering). Native
-/// Parquet / JSON readers are not given pushdown predicates here, which guarantees evaluator parity
-/// with the kernel reference and avoids over-filtering relative to [`ScanNode`] semantics.
+/// The scan predicate is evaluated **only** as a residual native DataFusion [`FilterExec`] on
+/// decoded record batches. Native Parquet / JSON readers are not given pushdown predicates here,
+/// which avoids over-filtering relative to [`ScanNode`] semantics. NULL predicate rows are kept by
+/// compiling `coalesce(predicate, true)`.
 ///
 /// ## Row index
 ///
 /// Parquet scans with [`ScanNode::row_index_column`] decode arrow-rs virtual [`RowNumber`] columns
-/// in the file reader so indices are physical offsets **before** filtering; [`KernelFilterExec`]
+/// in the file reader so indices are physical offsets **before** filtering; residual filtering
 /// then masks rows without rewriting indices on survivors. JSON scans append contiguous indices
 /// with [`RowIndexExec`] **after** decoding (and after any scan predicate filter).
 ///
@@ -362,11 +367,7 @@ fn wrap_scan_extensions(
     ));
 
     let scan: Arc<dyn ExecutionPlan> = if let Some(pred) = &node.predicate {
-        Arc::new(KernelFilterExec::try_new(
-            scan,
-            node.schema.clone(),
-            Arc::clone(pred),
-        )?)
+        compile_residual_scan_filter_native(scan, &node.schema, pred.as_ref())?
     } else {
         scan
     };
@@ -411,7 +412,7 @@ fn compile_scan_single_group(
 ///
 /// ## Predicate
 ///
-/// [`ScanNode::predicate`] is applied exclusively via [`KernelFilterExec`] after decode (no reader
+/// [`ScanNode::predicate`] is applied exclusively via a residual native [`FilterExec`] after decode (no reader
 /// pushdown). Engines may later add conservative pushdown optimizations while retaining this filter
 /// as a residual guardrail.
 ///
@@ -453,6 +454,27 @@ pub fn compile_scan(node: &ScanNode) -> Result<Arc<dyn ExecutionPlan>, DeltaErro
     Ok(Arc::new(
         OrderedUnionExec::try_new(children).map_err(crate::error::datafusion_err_to_delta)?,
     ))
+}
+
+fn compile_residual_scan_filter_native(
+    child_plan: Arc<dyn ExecutionPlan>,
+    input_schema: &delta_kernel::schema::SchemaRef,
+    predicate: &delta_kernel::expressions::Expression,
+) -> Result<Arc<dyn ExecutionPlan>, DeltaError> {
+    let arrow_schema: delta_kernel::arrow::datatypes::Schema = input_schema
+        .as_ref()
+        .try_into_arrow()
+        .map_err(|e| crate::error::plan_compilation(format!("scan filter schema to Arrow: {e}")))?;
+    let df_schema = DFSchema::try_from(arrow_schema)
+        .map_err(|e| crate::error::plan_compilation(format!("scan filter DFSchema: {e}")))?;
+    let props = ExecutionProps::new();
+    let logical = expr_translator::kernel_expr_to_df(predicate)?;
+    let logical_keep_nulls = logical.clone().or(logical.is_null());
+    let physical = create_physical_expr(&logical_keep_nulls, &df_schema, &props)
+        .map_err(|e| crate::error::plan_compilation(format!("scan filter expression: {e}")))?;
+    let native =
+        FilterExec::try_new(physical, child_plan).map_err(crate::error::datafusion_err_to_delta)?;
+    Ok(Arc::new(native))
 }
 
 #[cfg(test)]

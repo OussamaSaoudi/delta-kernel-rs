@@ -261,13 +261,13 @@ async fn scan_predicate_matches_arrow_parquet_reference_multi_file_ordered() {
 
     assert_eq!(
         df_x, reference_x,
-        "KernelFilterExec output must match parquet iterator + kernel evaluator reference"
+        "native residual scan filter output must match parquet iterator + kernel evaluator reference"
     );
     assert_eq!(df_x, vec![12, 25, 30, 100]);
 }
 
 #[tokio::test]
-async fn scan_predicate_plan_always_wraps_kernel_filter_when_predicate_present() {
+async fn scan_predicate_plan_always_wraps_native_filter_when_predicate_present() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("solo.parquet");
     write_i64_parquet(&p, &[1, 2, 3]);
@@ -288,16 +288,16 @@ async fn scan_predicate_plan_always_wraps_kernel_filter_when_predicate_present()
     };
     let physical = compile_scan(&scan).unwrap();
     assert!(
-        plan_contains_kernel_filter(physical.as_ref()),
-        "scan predicate must lower to KernelFilterExec (guaranteed residual evaluation)"
+        plan_contains_native_filter(physical.as_ref()),
+        "scan predicate must lower to native FilterExec (guaranteed residual evaluation)"
     );
 }
 
-fn plan_contains_kernel_filter(plan: &dyn datafusion_physical_plan::ExecutionPlan) -> bool {
-    if plan.name() == "KernelFilterExec" {
+fn plan_contains_native_filter(plan: &dyn datafusion_physical_plan::ExecutionPlan) -> bool {
+    if plan.name() == "FilterExec" {
         return true;
     }
     plan.children()
         .iter()
-        .any(|c| plan_contains_kernel_filter(c.as_ref()))
+        .any(|c| plan_contains_native_filter(c.as_ref()))
 }
