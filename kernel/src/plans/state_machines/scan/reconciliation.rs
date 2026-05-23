@@ -42,14 +42,12 @@ use crate::expressions::{
 };
 use crate::log_segment::LogSegment;
 use crate::path::ParsedLogPath;
-use crate::plans::errors::{DeltaError, DeltaErrorCode, KernelErrAsDelta};
+use crate::plans::errors::{DeltaError, DeltaErrorCode, DeltaResultExt, KernelErrAsDelta};
 use crate::plans::ir::nodes::{default_scan_file_columns, FileFormat, FileType, ScanFileColumns};
 use crate::plans::kernel_reducers::SidecarCollector;
 use crate::plans::state_machines::framework::coroutine::context::Engine;
 use crate::plans::state_machines::framework::plan_context::{Context, LoadSpec, PlanBuilder};
-use crate::schema::{
-    arc_schema, ArrayType, DataType, SchemaRef, StructField, StructType, ToSchema,
-};
+use crate::schema::{arc_schema, ArrayType, DataType, SchemaRef, StructField, ToSchema};
 use crate::snapshot::Snapshot;
 use crate::utils::current_time_duration;
 use crate::{delta_error, FileMeta, Version};
@@ -501,7 +499,7 @@ pub(super) fn build_reconciliation(
                     ("sizeInBytes", col([SIDECAR_NAME, "sizeInBytes"])),
                 ])?
                 .load(LoadSpec {
-                    file_schema: sidecar_file_schema(base, shape.stats.as_ref()),
+                    file_schema: sidecar_file_schema(base, shape.stats.as_ref())?,
                     file_type: FileType::Parquet,
                     base_url: Some(sidecar_base),
                     passthrough_columns: vec![],
@@ -582,7 +580,7 @@ fn load_checkpoint_files(
     let stats = shape.stats.as_ref().map(|s| &s.schema);
     let scan = match shape.stats.as_ref() {
         Some(s) if s.checkpoint_layout == CheckpointStatsLayout::StatsParsed => {
-            let scan_schema = stats_parsed_file_schema(base, &s.schema);
+            let scan_schema = stats_parsed_file_schema(base, &s.schema)?;
             match file_format {
                 FileFormat::Parquet => ctx.scan_parquet(files, scan_schema)?,
                 FileFormat::Json => ctx.scan_json(files, scan_schema)?,
@@ -680,43 +678,32 @@ fn manifest_action_schema(base: &SchemaRef) -> SchemaRef {
 /// File schema for the sidecar parquet Load: `base` with `add.stats` swapped for
 /// `add.stats_parsed: stats_schema` when the checkpoint advertises native parsed stats.
 /// Other arms scan with `base` and JSON-parse `add.stats` post-Load.
-fn sidecar_file_schema(base: &SchemaRef, stats: Option<&StatsInfo>) -> SchemaRef {
+fn sidecar_file_schema(
+    base: &SchemaRef,
+    stats: Option<&StatsInfo>,
+) -> Result<SchemaRef, DeltaError> {
     match stats {
         Some(s) if s.checkpoint_layout == CheckpointStatsLayout::StatsParsed => {
             stats_parsed_file_schema(base, &s.schema)
         }
-        _ => Arc::clone(base),
+        _ => Ok(Arc::clone(base)),
     }
 }
 
 /// Build a checkpoint Load `file_schema` that swaps `add.stats: STRING` for
 /// `add.stats_parsed: stats_schema`. Parquet checkpoints with native parsed stats don't
 /// carry the JSON form, so asking the engine for both columns would be wasted I/O.
-fn stats_parsed_file_schema(base: &SchemaRef, stats_schema: &SchemaRef) -> SchemaRef {
-    let new_fields: Vec<StructField> = base
-        .fields()
-        .map(|f| {
-            if f.name() != ADD_NAME {
-                return f.clone();
-            }
-            let DataType::Struct(add) = f.data_type() else {
-                unreachable!("base places `add` as a struct slot at index 0");
-            };
-            let new_add = StructType::new_unchecked(add.fields().map(|inner| {
-                if inner.name() == "stats" {
-                    StructField::nullable("stats_parsed", stats_schema.as_ref().clone())
-                } else {
-                    inner.clone()
-                }
-            }));
-            StructField::new(
-                ADD_NAME,
-                DataType::Struct(Box::new(new_add)),
-                f.is_nullable(),
-            )
+fn stats_parsed_file_schema(
+    base: &SchemaRef,
+    stats_schema: &SchemaRef,
+) -> Result<SchemaRef, DeltaError> {
+    let new_field = StructField::nullable("stats_parsed", stats_schema.as_ref().clone());
+    let new_struct = base
+        .with_struct_at(&[ADD_NAME], |add| {
+            add.with_field_replaced("stats", new_field)
         })
-        .collect();
-    arc_schema(new_fields)
+        .or_delta(DeltaErrorCode::DeltaCommandInvariantViolation)?;
+    Ok(Arc::new(new_struct))
 }
 
 /// `{path, size, version}` Values upstream schema for commit_load.
@@ -801,6 +788,7 @@ mod tests {
     use crate::engine::arrow_expression::evaluate_expression::evaluate_expression;
     use crate::engine::sync::SyncEngine;
     use crate::expressions::UnaryExpressionOp;
+    use crate::schema::StructType;
     use crate::utils::test_utils::{parse_json_to_record_batch, string_array_to_engine_data};
     use crate::Engine as KernelEngine;
 

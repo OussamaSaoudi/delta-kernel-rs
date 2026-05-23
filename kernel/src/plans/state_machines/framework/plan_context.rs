@@ -49,7 +49,7 @@ use crate::plans::state_machines::framework::coroutine::context::{Engine, StepRe
 use crate::plans::state_machines::framework::step::{EngineRequest, SchemaQuery};
 use crate::plans::state_machines::framework::step_payload::EngineResponse;
 use crate::schema::{DataType, SchemaRef, StructField, StructType};
-use crate::{delta_error, FileMeta};
+use crate::{delta_error, Error, FileMeta};
 
 // ============================================================================
 // Shared state
@@ -830,12 +830,12 @@ fn identity_named_exprs(schema: &StructType) -> Vec<(String, ExpressionRef)> {
 
 // === Point-edit primitives over nested paths =================================
 
-/// Result of rebuilding a struct under a [`FieldOp`]: the per-field projection list
-/// (output name + expression) plus the matching output [`StructField`]s in declaration
-/// order. Pairs `0..n` of one mirror pairs `0..n` of the other.
-type RewrittenStruct = (Vec<(String, ExpressionRef)>, Vec<StructField>);
-
 /// Field-level edit applied to the parent struct identified by a path prefix.
+///
+/// Each variant carries the schema-level edit as well as the per-leaf expression that
+/// will populate the new column at the matching position in the projection list. The
+/// schema half is materialized by [`schema_after_field_op`]; the projection half by
+/// [`projection_for_path`].
 enum FieldOp {
     InsertAfter {
         sibling_leaf: String,
@@ -871,17 +871,18 @@ fn split_parent_leaf<'a>(
 /// Apply a field-level edit at the struct identified by `parent_path` within
 /// `input_schema`, then push a top-level [`NodeKind::Project`] that materializes the result.
 ///
-/// Walks the schema down `parent_path`, identity-projecting siblings via `col(...)`
-/// references, then applies `op` at the targeted struct. Each ancestor struct above the
-/// edit is rebuilt with [`Expression::struct_from`].
+/// The schema half of the edit is computed by [`schema_after_field_op`] (delegating to
+/// [`StructType::with_struct_at`]); the projection half is computed independently by
+/// [`projection_for_path`]. Each ancestor struct above the edit is re-emitted via
+/// [`Expression::struct_from`]; off-path siblings are identity-projected via `col(...)`.
 fn apply_field_op(
     builder: PlanBuilder,
     input_schema: &StructType,
     parent_path: &[String],
     op: FieldOp,
 ) -> Result<PlanBuilder, DeltaError> {
-    let (named_exprs, fields) = rewrite_at(input_schema, &[], parent_path, &op)?;
-    let output_schema = arc_struct_or_invariant(fields)?;
+    let output_schema = schema_after_field_op(input_schema, parent_path, &op)?;
+    let named_exprs = projection_for_path(&output_schema, &[], parent_path, &op)?;
     push_node(
         &builder.state,
         NodeKind::Project(ProjectNode {
@@ -893,155 +894,89 @@ fn apply_field_op(
     )
 }
 
-/// Validate that `op` can be applied at `schema`, the parent struct identified by
-/// `path_so_far`. All existence and collision checks live here, separated from the
-/// per-field iteration in `rewrite_at`.
-fn validate_op(
-    schema: &StructType,
-    path_so_far: &[String],
+/// Schema half of a [`FieldOp`]: walk `parent_path` into `input_schema` via
+/// [`StructType::with_struct_at`] and apply the schema-level edit at the leaf parent.
+/// Defers existence and collision checks to the underlying `with_field_*` methods.
+fn schema_after_field_op(
+    input_schema: &StructType,
+    parent_path: &[String],
     op: &FieldOp,
-) -> Result<(), DeltaError> {
-    match op {
-        FieldOp::InsertAfter {
-            sibling_leaf,
-            new_field,
-            ..
-        } => {
-            if schema.field(sibling_leaf).is_none() {
-                return Err(delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    "insert_col_after: sibling field {sibling_leaf:?} not found at path \
-                     {path_so_far:?}",
-                ));
+) -> Result<SchemaRef, DeltaError> {
+    let new_struct = input_schema
+        .with_struct_at(parent_path, |s| match op {
+            FieldOp::InsertAfter {
+                sibling_leaf,
+                new_field,
+                ..
+            } => s.with_field_inserted_after(Some(sibling_leaf), new_field.clone()),
+            FieldOp::Replace {
+                target_leaf,
+                new_field,
+                ..
+            } => s.with_field_replaced(target_leaf, new_field.clone()),
+            FieldOp::Drop { target_leaf } => {
+                if s.field(target_leaf).is_none() {
+                    return Err(Error::generic(format!("Field {target_leaf} not found")));
+                }
+                Ok(s.with_field_removed(target_leaf))
             }
-            if schema.field(new_field.name()).is_some() {
-                return Err(delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    "insert_col_after: field {name:?} already exists at path {path_so_far:?}",
-                    name = new_field.name(),
-                ));
-            }
-        }
-        FieldOp::Replace {
-            target_leaf,
-            new_field,
-            ..
-        } => {
-            if schema.field(target_leaf).is_none() {
-                return Err(delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    "replace_col: field {target_leaf:?} not found at path {path_so_far:?}",
-                ));
-            }
-            if target_leaf != new_field.name() && schema.field(new_field.name()).is_some() {
-                return Err(delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    "replace_col: rename target {name:?} already exists at path {path_so_far:?}",
-                    name = new_field.name(),
-                ));
-            }
-        }
-        FieldOp::Drop { target_leaf } => {
-            if schema.field(target_leaf).is_none() {
-                return Err(delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    "drop_col: field {target_leaf:?} not found at path {path_so_far:?}",
-                ));
-            }
-        }
-    }
-    Ok(())
+        })
+        .or_delta(DeltaErrorCode::DeltaCommandInvariantViolation)?;
+    Ok(Arc::new(new_struct))
 }
 
-/// Walk `schema` along `remaining`, rebuilding each ancestor struct on the way down and
-/// applying `op` once `remaining` is exhausted (the empty-`remaining` boundary identifies
-/// the parent struct the op acts on).
+/// Projection half of a [`FieldOp`]: walk the *output* schema along `remaining`. Drops,
+/// inserts, and renames are already baked into the output, so each output field needs
+/// exactly one expression: a freshly-introduced field uses the op's `new_expr`; the
+/// on-path ancestor recurses and re-emits via [`Expression::struct_from`]; everything
+/// else identity-projects from the input via [`col_ref_at`].
 ///
-/// Off-path siblings are identity-projected via `col(...)`; the on-path child is
-/// recursively rebuilt and re-emitted via `Expression::struct_from`. At the leaf level
-/// (`remaining.is_empty()`), per-field op semantics apply: `Drop` skips the target,
-/// `Replace` swaps it, `InsertAfter` pushes the new field after its sibling.
-fn rewrite_at(
-    schema: &StructType,
+/// `path_so_far` accumulates the absolute prefix so identity references resolve from
+/// the data root rather than the inner struct.
+fn projection_for_path(
+    output: &StructType,
     path_so_far: &[String],
     remaining: &[String],
     op: &FieldOp,
-) -> Result<RewrittenStruct, DeltaError> {
-    if remaining.is_empty() {
-        validate_op(schema, path_so_far, op)?;
-    } else if schema.field(&remaining[0]).is_none() {
-        return Err(delta_error!(
-            DeltaErrorCode::DeltaCommandInvariantViolation,
-            "rewrite_at: field {target:?} not found in schema at path {path_so_far:?}",
-            target = remaining[0],
-        ));
-    }
-    let cap = schema.fields().count() + 1;
-    let mut named_exprs: Vec<(String, ExpressionRef)> = Vec::with_capacity(cap);
-    let mut fields: Vec<StructField> = Vec::with_capacity(cap);
-    for f in schema.fields() {
-        let fname = f.name();
-        // Recursive case: this field is on the path -- recurse and re-emit.
-        if let Some((target, rest)) = remaining.split_first() {
-            if fname == target {
-                let sub = match f.data_type() {
-                    DataType::Struct(s) => s.as_ref(),
-                    other => {
+) -> Result<Vec<(String, ExpressionRef)>, DeltaError> {
+    output
+        .fields()
+        .map(|f| {
+            let fname = f.name();
+            if let Some((target, rest)) = remaining.split_first() {
+                if fname == target {
+                    let DataType::Struct(sub) = f.data_type() else {
                         return Err(delta_error!(
                             DeltaErrorCode::DeltaCommandInvariantViolation,
-                            "rewrite_at: field {fname:?} is not a struct (found {other:?})",
+                            "projection_for_path: field {fname:?} is not a struct",
                         ));
-                    }
-                };
-                let mut sub_path = path_so_far.to_vec();
-                sub_path.push(fname.clone());
-                let (sub_named, sub_fields) = rewrite_at(sub, &sub_path, rest, op)?;
-                let sub_struct = StructType::try_new(sub_fields.clone())
-                    .or_delta(DeltaErrorCode::DeltaCommandInvariantViolation)?;
-                fields.push(StructField::new(
-                    fname.clone(),
-                    DataType::Struct(Box::new(sub_struct)),
-                    f.is_nullable(),
-                ));
-                let exprs: Vec<ExpressionRef> = sub_named.into_iter().map(|(_, e)| e).collect();
-                named_exprs.push((fname.clone(), Arc::new(Expression::struct_from(exprs))));
-                continue;
-            }
-        } else {
-            // Leaf case: per-field op semantics.
-            match op {
-                FieldOp::Drop { target_leaf } if fname == target_leaf => continue,
-                FieldOp::Replace {
-                    target_leaf,
-                    new_field,
-                    new_expr,
-                } if fname == target_leaf => {
-                    named_exprs.push((new_field.name().clone(), Arc::clone(new_expr)));
-                    fields.push(new_field.clone());
-                    continue;
+                    };
+                    let mut sub_path = path_so_far.to_vec();
+                    sub_path.push(fname.clone());
+                    let exprs: Vec<ExpressionRef> = projection_for_path(sub, &sub_path, rest, op)?
+                        .into_iter()
+                        .map(|(_, e)| e)
+                        .collect();
+                    return Ok((fname.clone(), Arc::new(Expression::struct_from(exprs))));
                 }
-                _ => {}
-            }
-        }
-        // Identity-project this field (off-path sibling, or leaf non-target).
-        named_exprs.push((fname.clone(), col_ref_at(path_so_far, fname)));
-        fields.push(f.clone());
-        // At the leaf level, InsertAfter emits the new field immediately after its sibling.
-        if remaining.is_empty() {
-            if let FieldOp::InsertAfter {
-                sibling_leaf,
+            } else if let FieldOp::Replace {
                 new_field,
                 new_expr,
+                ..
+            }
+            | FieldOp::InsertAfter {
+                new_field,
+                new_expr,
+                ..
             } = op
             {
-                if fname == sibling_leaf {
-                    named_exprs.push((new_field.name().clone(), Arc::clone(new_expr)));
-                    fields.push(new_field.clone());
+                if fname == new_field.name() {
+                    return Ok((fname.clone(), Arc::clone(new_expr)));
                 }
             }
-        }
-    }
-    Ok((named_exprs, fields))
+            Ok((fname.clone(), col_ref_at(path_so_far, fname)))
+        })
+        .collect()
 }
 
 /// Build a `col(...)` reference to `leaf` within the struct rooted at `prefix`. When
