@@ -1,5 +1,4 @@
-//! Shared helpers for the streaming [`super::LoadExec`] and the eager
-//! [`super::EagerLoadTableProvider`] dispatch in [`crate::executor`].
+//! Shared helpers for the streaming [`super::LoadExec`] and load dispatch in [`crate::executor`].
 
 use std::sync::Arc;
 
@@ -18,6 +17,7 @@ use datafusion_execution::TaskContext;
 use datafusion_expr::{ColumnarValue, ScalarUDF, Volatility};
 use datafusion_physical_expr::expressions::{cast, col};
 use datafusion_physical_expr::{PhysicalExpr, ScalarFunctionExpr};
+use datafusion_physical_expr_adapter::PhysicalExprAdapterFactory;
 use datafusion_physical_plan::filter::FilterExec;
 use datafusion_physical_plan::projection::{ProjectionExec, ProjectionExpr};
 use datafusion_physical_plan::ExecutionPlan;
@@ -28,16 +28,18 @@ use delta_kernel::arrow::array::{
 };
 use delta_kernel::arrow::compute::cast as arrow_cast;
 use delta_kernel::arrow::datatypes::{
-    DataType as ArrowDataType, Field as ArrowField, FieldRef, Schema as ArrowSchema,
+    DataType as ArrowDataType, Field as ArrowField, FieldRef, Fields, Schema as ArrowSchema,
     SchemaRef as ArrowSchemaRef,
 };
 use delta_kernel::expressions::ColumnName;
+use delta_kernel::object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 use delta_kernel::plans::ir::nodes::{FileType, LoadNode};
-use delta_kernel::Engine;
+use delta_kernel::{Engine, Error as KernelError};
 use parquet::arrow::RowNumber;
 use roaring::RoaringTreemap;
 use url::Url;
 
+use crate::error::{internal_error, plan_compilation};
 use crate::exec::field_id_adapter::FieldIdPhysicalExprAdapterFactory;
 
 /// DataFusion's parquet/json openers require a non-`None` batch size before
@@ -51,7 +53,7 @@ const ROW_NUMBER_COL: &str = "_row_number";
 pub(crate) fn load_base_url(node: &LoadNode) -> Result<&Url, DataFusionError> {
     node.base_url
         .as_ref()
-        .ok_or_else(|| crate::error::plan_compilation("LoadNode.base_url must be set"))
+        .ok_or_else(|| plan_compilation("LoadNode.base_url must be set"))
 }
 
 /// Join `path_str` onto the load node's `base_url`.
@@ -61,7 +63,7 @@ pub(crate) fn resolve_file_location(
 ) -> Result<Url, DataFusionError> {
     let base = load_base_url(node)?;
     base.join(path_str.trim()).map_err(|e| {
-        crate::error::plan_compilation(format!(
+        plan_compilation(format!(
             "LoadNode could not join base_url `{base}` with path `{path_str}`: {e}"
         ))
     })
@@ -75,23 +77,21 @@ pub(crate) fn extract_column_array(
     let mut parts = cn.path().iter();
     let head = parts
         .next()
-        .ok_or_else(|| crate::error::plan_compilation(format!("empty column path `{cn}`")))?;
+        .ok_or_else(|| plan_compilation(format!("empty column path `{cn}`")))?;
     let mut current = batch.column_by_name(head).cloned().ok_or_else(|| {
-        crate::error::plan_compilation(format!(
+        plan_compilation(format!(
             "batch schema {:?} missing top-level `{head}` while extracting `{cn}`",
             batch.schema(),
         ))
     })?;
     for seg in parts {
         let sa = current.as_struct_opt().ok_or_else(|| {
-            crate::error::plan_compilation(format!(
+            plan_compilation(format!(
                 "expected struct while extracting `{cn}` segment `{seg}`"
             ))
         })?;
         current = sa.column_by_name(seg).cloned().ok_or_else(|| {
-            crate::error::plan_compilation(format!(
-                "struct missing `{seg}` while extracting `{cn}`"
-            ))
+            plan_compilation(format!("struct missing `{seg}` while extracting `{cn}`"))
         })?;
     }
     Ok(current)
@@ -118,11 +118,11 @@ pub(crate) fn extract_row_inputs(
     let path_cn = &node.file_meta.path;
     let path_arr = extract_column_array(batch, path_cn)?;
     if path_arr.is_null(row) {
-        return Err(crate::error::plan_compilation(format!(
+        return Err(plan_compilation(format!(
             "LoadNode path column `{path_cn}` was NULL at upstream row {row}"
         )));
     }
-    // Path columns are always Utf8 per kernel's scan_live_actions_schema.
+    // Path columns are always Utf8 in scan-emitted Load plans.
     let url = resolve_file_location(node, path_arr.as_string::<i32>().value(row))?;
     let size = match node.file_meta.size.as_ref() {
         Some(sz_cn) => {
@@ -168,14 +168,14 @@ fn read_optional_dv_descriptor(
         return Ok(None);
     }
     let sa = arr.as_struct_opt().ok_or_else(|| {
-        crate::error::internal_error(format!(
+        internal_error(format!(
             "LoadNode dv_ref column `{}` must be a struct matching DeletionVectorDescriptor",
             dv_cn.column
         ))
     })?;
     let col = |name: &str| {
         sa.column_by_name(name).ok_or_else(|| {
-            crate::error::internal_error(format!("deletion vector struct missing `{name}` column"))
+            internal_error(format!("deletion vector struct missing `{name}` column"))
         })
     };
     let storage_type: DeletionVectorStorageType = col("storageType")?
@@ -183,7 +183,7 @@ fn read_optional_dv_descriptor(
         .value(row)
         .trim()
         .parse()
-        .map_err(|e: delta_kernel::Error| crate::error::internal_error(e.to_string()))?;
+        .map_err(|e: KernelError| internal_error(e.to_string()))?;
     let path_or_inline_dv = col("pathOrInlineDv")?
         .as_string::<i32>()
         .value(row)
@@ -212,11 +212,8 @@ pub(crate) async fn resolve_dv_async(
     let join =
         tokio::task::spawn_blocking(move || descriptor.read(engine.storage_handler(), &base_url))
             .await
-            .map_err(|e| {
-                crate::error::internal_error(format!("DV resolve task join failed: {e}"))
-            })?;
-    let treemap =
-        join.map_err(|e| crate::error::internal_error(format!("DV resolve failed: {e}")))?;
+            .map_err(|e| internal_error(format!("DV resolve task join failed: {e}")))?;
+    let treemap = join.map_err(|e| internal_error(format!("DV resolve failed: {e}")))?;
     Ok(Arc::new(treemap))
 }
 
@@ -271,8 +268,7 @@ pub(crate) fn build_file_source(
     // `DataType` equality including metadata embedded in `Struct`/`List` child fields).
     // Top-level metadata stays so [`super::field_id_adapter::FieldIdPhysicalExprAdapter`]
     // can match by `PARQUET:field_id` / `delta.columnMapping.*` (required for ID-mode CM).
-    // [`super::super::compile::stamp_udf::StampFieldUdf`] re-stamps logical nested metadata
-    // at the SSA `Project` boundary.
+    // `StampFieldUdf` re-stamps logical nested metadata at the SSA `Project` boundary.
     //
     // Passthrough fields: pass through verbatim. The partition-col broadcast inherits
     // metadata from the upstream `ScalarValue`'s `data_type`, which in turn matches the
@@ -287,7 +283,7 @@ pub(crate) fn build_file_source(
         ArrowSchema::new(stripped_file_fields).with_metadata(full_schema.metadata().clone()),
     );
     let mut table_schema = TableSchema::new(file_arrow_schema, passthrough_fields.to_vec());
-    if include_row_number && matches!(file_type, FileType::Parquet) {
+    if include_row_number && file_type == FileType::Parquet {
         let virt_field: FieldRef = Arc::new(
             ArrowField::new(ROW_NUMBER_COL, ArrowDataType::Int64, false)
                 .with_extension_type(RowNumber),
@@ -326,12 +322,9 @@ pub(crate) fn build_file_source(
 /// Strip a field's own metadata + all metadata embedded in its nested children. Internal
 /// helper for the [`strip_nested_metadata_dt`] recursion only; callers that need to
 /// preserve the top-level field's metadata should use [`strip_nested_metadata_only`].
-fn strip_field_metadata_recursive(
-    field: &delta_kernel::arrow::datatypes::Field,
-) -> delta_kernel::arrow::datatypes::Field {
-    use delta_kernel::arrow::datatypes::Field;
+fn strip_field_metadata_recursive(field: &ArrowField) -> ArrowField {
     let stripped_dt = strip_nested_metadata_dt(field.data_type());
-    Field::new(field.name(), stripped_dt, field.is_nullable())
+    ArrowField::new(field.name(), stripped_dt, field.is_nullable())
 }
 
 /// Strip metadata from child fields embedded inside `Struct` / `List` / `Map` etc., but
@@ -344,30 +337,26 @@ fn strip_field_metadata_recursive(
 /// [`super::field_id_adapter::FieldIdPhysicalExprAdapter`] can still match columns by id
 /// (critical for ID-mode column mapping where logical names don't uniquely identify the
 /// physical column).
-pub(crate) fn strip_nested_metadata_only(
-    field: &delta_kernel::arrow::datatypes::Field,
-) -> delta_kernel::arrow::datatypes::Field {
-    use delta_kernel::arrow::datatypes::Field;
+pub(crate) fn strip_nested_metadata_only(field: &ArrowField) -> ArrowField {
     let stripped_dt = strip_nested_metadata_dt(field.data_type());
-    Field::new(field.name(), stripped_dt, field.is_nullable())
+    ArrowField::new(field.name(), stripped_dt, field.is_nullable())
         .with_metadata(field.metadata().clone())
 }
 
 /// Helper: strip metadata recursively inside a `DataType`'s nested children (full strip --
 /// child field metadata, grandchild metadata, etc.). Non-nested types pass through.
-fn strip_nested_metadata_dt(
-    dt: &delta_kernel::arrow::datatypes::DataType,
-) -> delta_kernel::arrow::datatypes::DataType {
-    use delta_kernel::arrow::datatypes::{DataType, Fields};
-    let strip_inner = |f: &Arc<delta_kernel::arrow::datatypes::Field>| {
-        Arc::new(strip_field_metadata_recursive(f))
-    };
+fn strip_nested_metadata_dt(dt: &ArrowDataType) -> ArrowDataType {
+    let strip_inner = |f: &Arc<ArrowField>| Arc::new(strip_field_metadata_recursive(f));
     match dt {
-        DataType::Struct(fs) => DataType::Struct(Fields::from_iter(fs.iter().map(strip_inner))),
-        DataType::List(inner) => DataType::List(strip_inner(inner)),
-        DataType::LargeList(inner) => DataType::LargeList(strip_inner(inner)),
-        DataType::FixedSizeList(inner, n) => DataType::FixedSizeList(strip_inner(inner), *n),
-        DataType::Map(entry, sorted) => DataType::Map(strip_inner(entry), *sorted),
+        ArrowDataType::Struct(fs) => {
+            ArrowDataType::Struct(Fields::from_iter(fs.iter().map(strip_inner)))
+        }
+        ArrowDataType::List(inner) => ArrowDataType::List(strip_inner(inner)),
+        ArrowDataType::LargeList(inner) => ArrowDataType::LargeList(strip_inner(inner)),
+        ArrowDataType::FixedSizeList(inner, n) => {
+            ArrowDataType::FixedSizeList(strip_inner(inner), *n)
+        }
+        ArrowDataType::Map(entry, sorted) => ArrowDataType::Map(strip_inner(entry), *sorted),
         other => other.clone(),
     }
 }
@@ -376,7 +365,7 @@ fn strip_nested_metadata_dt(
 /// default name-based adapter.
 pub(crate) fn adapter_factory_for(
     file_type: FileType,
-) -> Option<Arc<dyn datafusion_physical_expr_adapter::PhysicalExprAdapterFactory>> {
+) -> Option<Arc<dyn PhysicalExprAdapterFactory>> {
     match file_type {
         FileType::Parquet => Some(Arc::new(FieldIdPhysicalExprAdapterFactory)),
         FileType::Json => None,
@@ -393,7 +382,7 @@ pub(crate) fn into_partitioned_file(
     let listing = ListingTableUrl::parse(url.as_str())?;
     let object_store_url = listing.object_store();
     let store_path = listing.prefix().clone();
-    let object_meta = delta_kernel::object_store::ObjectMeta {
+    let object_meta = ObjectMeta {
         location: store_path,
         last_modified: chrono::Utc.timestamp_nanos(0),
         size: u64::try_from(size.max(0)).unwrap_or(0),
@@ -409,9 +398,8 @@ pub(crate) fn into_partitioned_file(
 /// HEAD-resolve `pf.object_meta.size` if it's currently unknown (0). No-op otherwise.
 pub(crate) async fn resolve_size_if_unknown(
     pf: &mut PartitionedFile,
-    object_store: Arc<dyn delta_kernel::object_store::ObjectStore>,
+    object_store: Arc<dyn ObjectStore>,
 ) -> Result<(), DataFusionError> {
-    use delta_kernel::object_store::ObjectStoreExt;
     if pf.object_meta.size > 0 {
         return Ok(());
     }
@@ -419,7 +407,7 @@ pub(crate) async fn resolve_size_if_unknown(
         .head(&pf.object_meta.location)
         .await
         .map_err(|e| {
-            crate::error::internal_error(format!(
+            internal_error(format!(
                 "object-store HEAD failed for `{}`: {e}",
                 pf.object_meta.location
             ))
@@ -429,7 +417,7 @@ pub(crate) async fn resolve_size_if_unknown(
 }
 
 /// Per-file [`ExecutionPlan`]: bare `DataSourceExec` when `dv` is `None`; otherwise
-/// `DataSourceExec` (with `_row_number` virtual) → `FilterExec(not_in_dv(_row_number))` →
+/// `DataSourceExec` (with `_row_number` virtual) -> `FilterExec(not_in_dv(_row_number))` ->
 /// `ProjectionExec` (drops `_row_number`). `file_source` must already be projection-pushed
 /// and DV-configured.
 pub(crate) async fn build_per_file_plan(
@@ -468,7 +456,7 @@ pub(crate) async fn build_per_file_plan(
 
     let input_schema = plan.schema();
     let row_num_col = col(ROW_NUMBER_COL, &input_schema).map_err(|e| {
-        crate::error::internal_error(format!(
+        internal_error(format!(
             "build_per_file_plan: missing `{ROW_NUMBER_COL}` virtual column on \
              DataSourceExec schema {input_schema:?}: {e}"
         ))
@@ -494,7 +482,7 @@ pub(crate) async fn build_per_file_plan(
         .map(|out_field| {
             let name = out_field.name();
             let expr = col(name, &filtered_schema).map_err(|e| {
-                crate::error::internal_error(format!(
+                internal_error(format!(
                     "build_per_file_plan: output column `{name}` missing from filtered schema \
                      {filtered_schema:?}: {e}"
                 ))

@@ -1,8 +1,7 @@
 //! Lazy [`TableProvider`] for `NodeKind::Load`: defers all work to `scan()`, which lowers
 //! the upstream `LogicalPlan` and wraps it in a [`super::LoadExec`]. Used for non-Values
-//! upstreams or any node with a deletion vector. See also [`super::EagerLoadTableProvider`]
-//! for the bare-Values fast path. Filter pushdown is currently off; projection and limit
-//! flow through to [`super::LoadExec`].
+//! upstreams or any node with a deletion vector. Filter pushdown is currently off; projection
+//! and limit flow through to [`super::LoadExec`].
 
 use std::sync::Arc;
 
@@ -19,9 +18,11 @@ use delta_kernel::plans::ir::nodes::LoadNode;
 use delta_kernel::schema::SchemaRef;
 use delta_kernel::Engine;
 
+use crate::error::plan_compilation;
 use crate::exec::load_helpers::strip_nested_metadata_only;
 use crate::exec::LoadExec;
 
+/// Table provider that lowers a `NodeKind::Load` upstream into [`LoadExec`] at scan time.
 pub struct LoadTableProvider {
     upstream_logical: LogicalPlan,
     node: Arc<LoadNode>,
@@ -42,16 +43,14 @@ impl LoadTableProvider {
         output_kernel_schema: SchemaRef,
     ) -> Result<Self, DataFusionError> {
         // Mirror the per-field metadata policy in [`super::LoadExec`]'s TableSchema (see
-        // [`crate::exec::load_helpers::build_file_source`] for the rationale): file fields
-        // strip nested metadata to match the parquet decoder's bare output; passthrough
-        // fields pass through verbatim to match the partition-col broadcast.
+        // [`super::load_helpers::build_file_source`] for the rationale): file fields strip nested
+        // metadata to match the parquet decoder's bare output; passthrough fields pass through
+        // verbatim to match the partition-col broadcast.
         let file_field_count = node.file_schema.fields().len();
         let kernel_arrow_schema: ArrowSchema = output_kernel_schema
             .as_ref()
             .try_into_arrow()
-            .map_err(|e| {
-                crate::error::plan_compilation(format!("LoadTableProvider output schema: {e}"))
-            })?;
+            .map_err(|e| plan_compilation(format!("LoadTableProvider output schema: {e}")))?;
         let adjusted_fields: Vec<_> = kernel_arrow_schema
             .fields()
             .iter()

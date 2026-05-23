@@ -1,8 +1,8 @@
 //! Field-id-aware [`PhysicalExprAdapter`]: rewrites column references to match physical
 //! parquet schemas via `PARQUET:field_id` (name fallback), then -- if logical vs physical
-//! [`DataType`]s differ -- wraps the column in `RenameNestedFieldsByIdExpr` (metadata
-//! rename via kernel's `apply_schema_to`) → `CastExpr` (drop extras, NULL-fill missing
-//! nullables, error on missing non-nullables, apply type widening).
+//! [`DataType`]s differ -- wraps the column in `RenameNestedFieldsByIdExpr` (metadata rename
+//! via kernel's `apply_schema_to`) -> `CastExpr` (drop extras, NULL-fill missing nullables,
+//! error on missing non-nullables, apply type widening).
 
 use std::fmt;
 use std::hash::Hash;
@@ -15,7 +15,7 @@ use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::expressions::{self, CastExpr, Column};
 use datafusion_physical_expr_adapter::{PhysicalExprAdapter, PhysicalExprAdapterFactory};
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
-use delta_kernel::arrow::array::RecordBatch;
+use delta_kernel::arrow::array::{ArrayRef, RecordBatch};
 use delta_kernel::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 use delta_kernel::engine::arrow_conversion::TryFromArrow;
 use delta_kernel::engine::arrow_expression::apply_schema::apply_schema_to;
@@ -237,7 +237,7 @@ impl PhysicalExpr for RenameNestedFieldsByIdExpr {
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> DfResult<ColumnarValue> {
-        let rename = |array: &delta_kernel::arrow::array::ArrayRef| {
+        let rename = |array: &ArrayRef| {
             apply_schema_to(array, &self.rename_target).map_err(|e| {
                 DataFusionError::Internal(format!(
                     "FieldIdRename: kernel apply_schema_to failed for `{}`: {e}",
@@ -320,7 +320,7 @@ fn build_renamed_physical_field(physical: &Field, logical: &Field) -> Field {
 mod tests {
     use std::collections::HashMap;
 
-    use datafusion_physical_expr::expressions::Column;
+    use datafusion_physical_expr::expressions::{Column, Literal};
     use delta_kernel::arrow::array::{
         Array, ArrayRef, Int32Array, Int64Array, StringArray, StructArray,
     };
@@ -365,7 +365,7 @@ mod tests {
         }
     }
 
-    // Flat rename via PARQUET:field_id; output type matches → plain Column.
+    // Flat rename via PARQUET:field_id; output type matches -> plain Column.
     #[test]
     fn flat_rename_passthrough() -> DfResult<()> {
         let logical = Arc::new(Schema::new(vec![
@@ -455,7 +455,7 @@ mod tests {
         Ok(())
     }
 
-    // No field IDs anywhere → name-fallback passthrough.
+    // No field IDs anywhere -> name-fallback passthrough.
     #[test]
     fn no_field_ids_passthrough() -> DfResult<()> {
         let logical = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
@@ -494,7 +494,7 @@ mod tests {
         Ok(())
     }
 
-    // Missing nullable logical column → typed NULL literal (matches default adapter).
+    // Missing nullable logical column -> typed NULL literal (matches default adapter).
     #[test]
     fn missing_nullable_logical_column_yields_null_literal() -> DfResult<()> {
         let logical = Arc::new(Schema::new(vec![
@@ -504,13 +504,13 @@ mod tests {
         let physical = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
         let rewritten = rewrite_column(Arc::clone(&logical), Arc::clone(&physical), "b_missing")?;
         let literal = rewritten
-            .downcast_ref::<datafusion_physical_expr::expressions::Literal>()
+            .downcast_ref::<Literal>()
             .expect("expected NULL literal for missing nullable column");
         assert!(literal.value().is_null());
         Ok(())
     }
 
-    // Missing non-nullable logical column → error (silent NULL-fill would be data corruption).
+    // Missing non-nullable logical column -> error (silent NULL-fill would be data corruption).
     #[test]
     fn missing_non_nullable_logical_column_errors() {
         let logical = Arc::new(Schema::new(vec![

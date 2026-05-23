@@ -18,7 +18,9 @@ use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::{BinaryExpr, Case, InList, LambdaVariable};
 use datafusion_expr::expr_fn::{cast, lambda};
 use datafusion_expr::{lit, Expr, Operator};
-use datafusion_functions::core::expr_fn::{get_field, named_struct, r#struct as make_struct};
+use datafusion_functions::core::expr_fn::{
+    coalesce, get_field, named_struct, r#struct as make_struct,
+};
 use datafusion_functions_nested::expr_fn::{array_transform, make_array};
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::expressions::{
@@ -30,26 +32,64 @@ use delta_kernel::expressions::{
 use delta_kernel::schema::{DataType, PrimitiveType, StructField, StructType};
 
 use crate::compile::json_parse;
-use crate::error::unsupported;
+use crate::error::{internal_error, plan_compilation, unsupported};
 
 /// Optional target context for [`kernel_expr_to_df`]. See module docs for the contract.
 #[derive(Default, Clone, Copy)]
 pub struct TranslationContext<'a> {
+    /// Output field whose declared kernel type drives target shaping and primitive casts.
     pub output_field: Option<&'a StructField>,
     /// Required by identity-`Transform` to resolve source struct physical field names.
     pub input_schema: Option<&'a ArrowSchema>,
 }
 
 impl<'a> TranslationContext<'a> {
+    /// Context with no output target or input schema; natural-type translation only.
     pub fn untyped() -> Self {
         Self::default()
     }
 
+    /// Context for a projection arm: `output_field` drives casts/shaping and `input_schema`
+    /// resolves physical column names for identity transforms.
     pub fn typed(output_field: &'a StructField, input_schema: &'a ArrowSchema) -> Self {
         Self {
             output_field: Some(output_field),
             input_schema: Some(input_schema),
         }
+    }
+
+    /// Lower kernel `If(condition, then, else)` to `Expr::Case`, propagating this context to both
+    /// arms so they share the same target type.
+    fn translate_if(&self, if_expr: &IfExpression) -> Result<Expr, DataFusionError> {
+        let cond = Box::new(kernel_pred_to_df(&if_expr.condition)?);
+        let then = Box::new(kernel_expr_to_df(&if_expr.then_expr, self)?);
+        let r#else = Box::new(kernel_expr_to_df(&if_expr.else_expr, self)?);
+        Ok(Expr::Case(Case::new(
+            None,
+            vec![(cond, then)],
+            Some(r#else),
+        )))
+    }
+
+    /// Apply this context's target type to `raw`: wrap primitives in `cast(..)`; pass nested
+    /// container targets through unchanged because DataFusion's cast is name-based there.
+    fn apply_target_cast(&self, raw: Expr) -> Result<Expr, DataFusionError> {
+        let Some(field) = self.output_field else {
+            return Ok(raw);
+        };
+        if matches!(
+            field.data_type(),
+            DataType::Struct(_) | DataType::Array(_) | DataType::Map(_)
+        ) {
+            return Ok(raw);
+        }
+        let arrow_ty: ArrowDataType = field.data_type().try_into_arrow().map_err(|e| {
+            plan_compilation(format!(
+                "kernel_expr_to_df: target type conversion failed for `{}`: {e}",
+                field.name()
+            ))
+        })?;
+        Ok(cast(raw, arrow_ty))
     }
 }
 
@@ -96,10 +136,10 @@ pub fn kernel_expr_to_df(
             binary_expr_to_df(*op, left, right)?
         }
         Expression::Variadic(VariadicExpression { op, exprs }) => variadic_to_df(*op, exprs, cx)?,
-        Expression::If(if_expr) => if_to_df(if_expr, cx)?,
+        Expression::If(if_expr) => cx.translate_if(if_expr)?,
         Expression::Unary(_) => {
             return Err(unsupported(
-                "expr_translator: Unary(ToJson) is not yet supported",
+                "expr_translator: Unary(ToJson) is not supported",
             ))
         }
         Expression::Opaque(_) => {
@@ -118,12 +158,12 @@ pub fn kernel_expr_to_df(
         | Expression::MapToStruct(_)
         | Expression::Transform(_)
         | Expression::Struct(_, _) => {
-            return Err(crate::error::internal_error(
+            return Err(internal_error(
                 "expr_translator: target-shaping arm fell through; should have returned early",
             ));
         }
     };
-    apply_target_cast(raw, cx)
+    cx.apply_target_cast(raw)
 }
 
 /// Translate a kernel [`Predicate`] to a boolean-typed DataFusion [`Expr`].
@@ -172,7 +212,7 @@ fn map_to_struct_to_df(
         )
     })?;
     let DataType::Struct(target_struct) = target_field.data_type() else {
-        return Err(crate::error::plan_compilation(format!(
+        return Err(plan_compilation(format!(
             "MapToStruct projection requires Struct output type, got {:?}",
             target_field.data_type()
         )));
@@ -181,7 +221,7 @@ fn map_to_struct_to_df(
     let mut args = Vec::with_capacity(target_struct.fields().count() * 2);
     for child in target_struct.fields() {
         let arrow_ty: ArrowDataType = child.data_type().try_into_arrow().map_err(|e| {
-            crate::error::plan_compilation(format!(
+            plan_compilation(format!(
                 "MapToStruct target field `{}` type conversion failed: {e}",
                 child.name()
             ))
@@ -194,14 +234,14 @@ fn map_to_struct_to_df(
 }
 
 /// Identity `Transform` with a Struct target encodes column-mapping physical->logical
-/// rename for struct columns. Non-identity transforms are not yet supported.
+/// rename for struct columns. Non-identity transforms are not supported.
 fn transform_to_df(
     transform: &Transform,
     cx: &TranslationContext<'_>,
 ) -> Result<Expr, DataFusionError> {
     if !transform.is_identity() {
         return Err(unsupported(
-            "Non-identity Transform expressions are not yet supported",
+            "Non-identity Transform expressions are not supported",
         ));
     }
     let target_field = cx
@@ -210,7 +250,7 @@ fn transform_to_df(
     let target_struct = match target_field.data_type() {
         DataType::Struct(s) => s.as_ref(),
         other => {
-            return Err(crate::error::plan_compilation(format!(
+            return Err(plan_compilation(format!(
                 "Identity Transform projection requires Struct output type, got {other:?}"
             )))
         }
@@ -222,7 +262,7 @@ fn transform_to_df(
         .input_schema
         .ok_or_else(|| unsupported("identity Transform requires an input schema in context"))?;
     let source_fields = lookup_struct_fields_via_path(input_schema, input_path)?;
-    let input_expr = kernel_expr_to_df_untyped(&Expression::Column(input_path.clone()))?;
+    let input_expr = kernel_expr_to_df_untyped(&Expression::from(input_path.clone()))?;
     rebuild_struct_with_target_names(input_expr, &source_fields, target_struct)
 }
 
@@ -377,7 +417,7 @@ fn variadic_to_df(
                 .iter()
                 .map(|e| kernel_expr_to_df(e, cx))
                 .collect::<Result<_, _>>()?;
-            Ok(datafusion_functions::core::expr_fn::coalesce(args))
+            Ok(coalesce(args))
         }
         VariadicExpressionOp::Array => {
             let args: Vec<Expr> = exprs
@@ -387,39 +427,6 @@ fn variadic_to_df(
             Ok(make_array(args))
         }
     }
-}
-
-/// `If(condition, then, else)` -> `Expr::Case`. Then/else inherit `cx` so the same target
-/// type applies to both arms.
-fn if_to_df(if_expr: &IfExpression, cx: &TranslationContext<'_>) -> Result<Expr, DataFusionError> {
-    let cond = Box::new(kernel_pred_to_df(&if_expr.condition)?);
-    let then = Box::new(kernel_expr_to_df(&if_expr.then_expr, cx)?);
-    let r#else = Box::new(kernel_expr_to_df(&if_expr.else_expr, cx)?);
-    Ok(Expr::Case(Case::new(
-        None,
-        vec![(cond, then)],
-        Some(r#else),
-    )))
-}
-
-/// Wrap `raw` in `cast(..)` for primitive targets; pass through for nested targets.
-fn apply_target_cast(raw: Expr, cx: &TranslationContext<'_>) -> Result<Expr, DataFusionError> {
-    let Some(field) = cx.output_field else {
-        return Ok(raw);
-    };
-    if matches!(
-        field.data_type(),
-        DataType::Struct(_) | DataType::Array(_) | DataType::Map(_)
-    ) {
-        return Ok(raw);
-    }
-    let arrow_ty: ArrowDataType = field.data_type().try_into_arrow().map_err(|e| {
-        crate::error::plan_compilation(format!(
-            "kernel_expr_to_df: target type conversion failed for `{}`: {e}",
-            field.name()
-        ))
-    })?;
-    Ok(cast(raw, arrow_ty))
 }
 
 // === Scalar / NULL conversion helpers ===
@@ -445,7 +452,7 @@ fn scalar_value_to_df(scalar: &Scalar) -> Result<ScalarValue, DataFusionError> {
         Scalar::Struct(v) => scalar_struct_value_to_df(v)?,
         Scalar::Array(_) | Scalar::Map(_) => {
             return Err(unsupported(format!(
-                "expr_translator: complex literal scalar {:?} is not yet supported",
+                "expr_translator: complex literal scalar {:?} is not supported",
                 scalar.data_type()
             )))
         }
@@ -522,7 +529,7 @@ fn lookup_struct_fields_via_path(
 ) -> Result<ArrowFields, DataFusionError> {
     let segments = path.path();
     let Some((first, rest)) = segments.split_first() else {
-        return Err(crate::error::plan_compilation(
+        return Err(plan_compilation(
             "Identity Transform input_path must have at least one segment",
         ));
     };
@@ -531,14 +538,14 @@ fn lookup_struct_fields_via_path(
         .iter()
         .find(|f| f.name() == first.as_str())
         .ok_or_else(|| {
-            crate::error::plan_compilation(format!(
+            plan_compilation(format!(
                 "Identity Transform input_path root `{first}` not found in input schema"
             ))
         })?;
     let mut current = first_field.data_type();
     for segment in rest {
         let ArrowDataType::Struct(fields) = current else {
-            return Err(crate::error::plan_compilation(format!(
+            return Err(plan_compilation(format!(
                 "Identity Transform input_path traverses non-struct field at `{segment}`"
             )));
         };
@@ -546,7 +553,7 @@ fn lookup_struct_fields_via_path(
             .iter()
             .find(|f| f.name() == segment.as_str())
             .ok_or_else(|| {
-                crate::error::plan_compilation(format!(
+                plan_compilation(format!(
                     "Identity Transform input_path segment `{segment}` not found in struct"
                 ))
             })?;
@@ -554,7 +561,7 @@ fn lookup_struct_fields_via_path(
     }
     match current {
         ArrowDataType::Struct(fields) => Ok(fields.clone()),
-        other => Err(crate::error::plan_compilation(format!(
+        other => Err(plan_compilation(format!(
             "Identity Transform input_path must resolve to a struct, found {other:?}"
         ))),
     }
@@ -570,7 +577,7 @@ fn rebuild_struct_with_target_names(
 ) -> Result<Expr, DataFusionError> {
     let target_count = target_struct.fields().count();
     if source_fields.len() != target_count {
-        return Err(crate::error::plan_compilation(format!(
+        return Err(plan_compilation(format!(
             "Identity Transform field count mismatch: source struct has {} fields, target \
              projection schema has {target_count} fields",
             source_fields.len(),
@@ -598,19 +605,10 @@ fn rebuild_struct_with_target_names(
     )))
 }
 
-/// Reshape `base_expr` so its values use `target_dt`'s logical names while keeping the
-/// physical values intact. The recursion mirrors the kernel's column-mapping rename
-/// shape:
+/// Reshape `base_expr` to match `target_dt`'s logical field names without changing values.
 ///
-/// - Struct -> Struct: recurse via [`rebuild_struct_with_target_names`] (which emits `CASE WHEN
-///   parent IS NOT NULL THEN named_struct(...) ELSE NULL END` over the children).
-/// - List / LargeList / FixedSizeList of any element -> Array: dispatch to
-///   [`rebuild_list_with_target_element`] which wraps the list in an `array_transform` lambda that
-///   recursively reshapes the element.
-/// - Everything else (primitive, Map, mismatched outer kinds): pass `base_expr` through unchanged.
-///   Primitive names flow through the parent's `named_struct` literal; Map reshape isn't
-///   implemented yet (no kernel schema in the current test corpus needs it; the engine's outer
-///   projection still produces the right top-level name via `Expr::alias`).
+/// Returns `base_expr` unchanged when outer kinds differ or no rename is needed. Struct and
+/// array targets recurse into children; map reshape is unsupported and passes through.
 fn rebuild_field_for_target(
     base_expr: Expr,
     source_dt: &ArrowDataType,
@@ -694,7 +692,7 @@ pub fn build_logical_projection(
     let source_count = source.fields().len();
     let target_count = target.fields().count();
     if source_count != target_count {
-        return Err(crate::error::plan_compilation(format!(
+        return Err(plan_compilation(format!(
             "build_logical_projection: source schema has {source_count} top-level field(s); \
              target schema has {target_count}"
         )));
@@ -719,8 +717,7 @@ mod tests {
     use std::sync::Arc;
 
     use delta_kernel::expressions::{
-        column_expr, ArrayData, BinaryPredicateOp, ColumnName, Expression as Expr_,
-        Predicate as Pred, Scalar,
+        column_expr, ArrayData, BinaryPredicateOp, Expression as Expr_, Predicate as Pred, Scalar,
     };
     use delta_kernel::schema::{ArrayType, DataType, StructField, StructType};
     use rstest::rstest;
@@ -737,7 +734,7 @@ mod tests {
     #[rstest]
     #[case::depth_2(Expr_::column(["add", "path"]), "get_field(add, Utf8(\"path\"))")]
     #[case::depth_3(
-        Expr_::Column(ColumnName::new(["a", "b", "c"])),
+        Expr_::column(["a", "b", "c"]),
         "get_field(get_field(a, Utf8(\"b\")), Utf8(\"c\"))"
     )]
     fn nested_column_lowers_to_get_field_chain(#[case] kernel: Expr_, #[case] expected: &str) {
@@ -766,75 +763,58 @@ mod tests {
         assert_eq!(lower_pred(kernel), expected);
     }
 
-    #[test]
-    fn translates_arithmetic_binary() {
-        assert_eq!(
-            lower_expr(column_expr!("a") + Expr_::literal(5i64)),
-            "a + Int64(5)"
-        );
-    }
-
-    #[test]
-    fn translates_in_to_in_list() {
+    #[rstest]
+    #[case::not(Pred::not(column_expr!("x").is_null()), "NOT x IS NULL")]
+    #[case::and_and(
+        Pred::and(
+            column_expr!("a").is_null(),
+            column_expr!("b").gt(Expr_::literal(5i64)),
+        ),
+        "a IS NULL AND b > Int64(5)"
+    )]
+    #[case::or_chain(
+        Pred::or_from([
+            column_expr!("a").is_null(),
+            column_expr!("b").is_null(),
+            column_expr!("c").is_null(),
+        ]),
+        "a IS NULL OR b IS NULL OR c IS NULL"
+    )]
+    #[case::in_list({
         let arr = ArrayData::try_new(
             ArrayType::new(DataType::LONG, false),
             vec![Scalar::Long(1), Scalar::Long(2), Scalar::Long(3)],
         )
         .unwrap();
-        let p = Pred::binary(
+        Pred::binary(
             BinaryPredicateOp::In,
             column_expr!("x"),
             Expr_::literal(Scalar::Array(arr)),
-        );
-        assert_eq!(lower_pred(p), "x IN ([Int64(1), Int64(2), Int64(3)])");
+        )
+    }, "x IN ([Int64(1), Int64(2), Int64(3)])")]
+    #[case::arith_then_gt_and_not_isnull(
+        Pred::and(
+            (column_expr!("a") + Expr_::literal(1i64)).gt(Expr_::literal(5i64)),
+            Pred::not(column_expr!("b").is_null()),
+        ),
+        "a + Int64(1) > Int64(5) AND NOT b IS NULL"
+    )]
+    fn translates_compound_predicates(#[case] pred: Pred, #[case] expected: &str) {
+        assert_eq!(lower_pred(pred), expected);
     }
 
-    #[test]
-    fn translates_not_predicate() {
-        assert_eq!(
-            lower_pred(Pred::not(column_expr!("x").is_null())),
-            "NOT x IS NULL"
-        );
-    }
-
-    #[test]
-    fn translates_junction_and_or_left_associative() {
-        // AND: IsNull + Gt
-        assert_eq!(
-            lower_pred(Pred::and(
-                column_expr!("a").is_null(),
-                column_expr!("b").gt(Expr_::literal(5i64)),
-            )),
-            "a IS NULL AND b > Int64(5)"
-        );
-        // OR_from chain: ((a IS NULL OR b IS NULL) OR c IS NULL).
-        assert_eq!(
-            lower_pred(Pred::or_from([
-                column_expr!("a").is_null(),
-                column_expr!("b").is_null(),
-                column_expr!("c").is_null(),
-            ])),
-            "a IS NULL OR b IS NULL OR c IS NULL"
-        );
-    }
-
-    #[test]
-    fn translates_if_to_case() {
-        let kernel = Expr_::if_then_else(
+    #[rstest]
+    #[case::arith_add(column_expr!("a") + Expr_::literal(5i64), "a + Int64(5)")]
+    #[case::if_null_guard(
+        Expr_::if_then_else(
             column_expr!("x").is_null(),
             Expr_::literal(0i64),
             column_expr!("x"),
-        );
-        assert_eq!(
-            lower_expr(kernel),
-            "CASE WHEN x IS NULL THEN Int64(0) ELSE x END"
-        );
-    }
-
-    #[test]
-    fn nested_if_lowers_to_nested_case() {
-        // IF(a IS NULL, 0, IF(a > 100, 100, a)) -- clamp pattern
-        let kernel = Expr_::if_then_else(
+        ),
+        "CASE WHEN x IS NULL THEN Int64(0) ELSE x END"
+    )]
+    #[case::if_nested_clamp(
+        Expr_::if_then_else(
             column_expr!("a").is_null(),
             Expr_::literal(0i64),
             Expr_::if_then_else(
@@ -842,22 +822,12 @@ mod tests {
                 Expr_::literal(100i64),
                 column_expr!("a"),
             ),
-        );
-        assert_eq!(
-            lower_expr(kernel),
-            "CASE WHEN a IS NULL THEN Int64(0) ELSE \
-             CASE WHEN a > Int64(100) THEN Int64(100) ELSE a END END"
-        );
-    }
-
-    #[test]
-    fn complex_nested_predicate_round_trips() {
-        // (a + 1 > 5) AND NOT (b IS NULL)
-        let p = Pred::and(
-            (column_expr!("a") + Expr_::literal(1i64)).gt(Expr_::literal(5i64)),
-            Pred::not(column_expr!("b").is_null()),
-        );
-        assert_eq!(lower_pred(p), "a + Int64(1) > Int64(5) AND NOT b IS NULL");
+        ),
+        "CASE WHEN a IS NULL THEN Int64(0) ELSE \
+         CASE WHEN a > Int64(100) THEN Int64(100) ELSE a END END"
+    )]
+    fn translates_expression_shapes(#[case] kernel: Expr_, #[case] expected: &str) {
+        assert_eq!(lower_expr(kernel), expected);
     }
 
     #[test]

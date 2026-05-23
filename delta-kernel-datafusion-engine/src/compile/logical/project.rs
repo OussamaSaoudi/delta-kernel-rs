@@ -1,5 +1,7 @@
-//! Lowering for [`NodeKind::Project`](delta_kernel::plans::ir::plan::NodeKind::Project) plus the
-//! root-rename visitor that handles input/output name collisions.
+//! Lowering for [`NodeKind::Project`] plus the root-rename visitor that handles input/output name
+//! collisions.
+//!
+//! [`NodeKind::Project`]: delta_kernel::plans::ir::plan::NodeKind::Project
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
@@ -15,6 +17,7 @@ use delta_kernel::expressions::{ColumnName, Expression};
 use delta_kernel::plans::ir::nodes::ProjectNode;
 use delta_kernel::transforms::ExpressionTransform;
 
+use crate::compile::expand_projection_columns;
 use crate::compile::expr_translator::{kernel_expr_to_df, TranslationContext};
 use crate::compile::stamp_udf::StampFieldUdf;
 
@@ -85,10 +88,9 @@ fn rewrite_expressions<'a, R: ExpressionTransform<'a>>(
         .collect()
 }
 
-/// Lower a [`NodeKind::Project`](delta_kernel::plans::ir::plan::NodeKind::Project) arm to a
-/// DataFusion [`LogicalPlan`]. `child_plan` is the already-compiled child plan; this helper
-/// handles input/output name collision avoidance, pre-CSE hoisting, and the final projection
-/// expression construction.
+/// Lower a [`NodeKind::Project`] arm to a DataFusion [`LogicalPlan`]. `child_plan` is the
+/// already-compiled child plan; this helper handles input/output name collision avoidance,
+/// conditional stamp-UDF wrapping, and the final projection expression construction.
 pub(super) fn compile_project_node(
     child_plan: LogicalPlan,
     node: &ProjectNode,
@@ -99,13 +101,13 @@ pub(super) fn compile_project_node(
         .map(|(_, e)| Arc::clone(e))
         .collect();
     let expanded_columns =
-        crate::compile::expand_projection_columns(&columns, node.output_schema.fields().count())?;
+        expand_projection_columns(&columns, node.output_schema.fields().count())?;
 
     // Insulate input names from output names to avoid DataFusion optimizer ambiguity.
     // When a kernel projection produces an output field whose name equals an unqualified
-    // column in the child schema, `push_down_leaf_projections` builds intermediate
-    // schemas that carry both the qualified upstream column (e.g. `relation_X.add`) and
-    // the unqualified projected column (`add`). DataFusion's `DFSchema` rejects that as
+    // column in the child schema, `push_down_leaf_projections` can build intermediate
+    // schemas that carry both a qualified upstream column and the unqualified projected
+    // column with the same leaf name. DataFusion's `DFSchema` rejects that as
     // `AmbiguousReference`. We pre-rename the colliding inputs to `__dk_in_<name>` and
     // rewrite the kernel expression roots to match. After the rename layer, no kernel
     // output name appears as an input column anywhere in the resolved schema.

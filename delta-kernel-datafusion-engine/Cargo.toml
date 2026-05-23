@@ -1,6 +1,6 @@
 [package]
 name = "delta-kernel-datafusion-engine"
-description = "DataFusion-backed executor scaffold for Delta Kernel declarative plans (Phase 1.1)."
+description = "DataFusion-backed executor for Delta Kernel declarative plans."
 edition.workspace = true
 homepage.workspace = true
 license.workspace = true

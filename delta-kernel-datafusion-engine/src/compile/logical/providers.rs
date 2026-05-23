@@ -1,13 +1,15 @@
-//! [`TableProvider`] for
-//! [`NodeKind::ListFiles`](delta_kernel::plans::ir::plan::NodeKind::ListFiles) nodes, emitting
-//! one `(path, size, modification_time)` row per object under a URL prefix.
+//! [`TableProvider`] for [`NodeKind::ListFiles`] nodes, emitting one `(path, size,
+//! modification_time)` row per object under a URL prefix.
+//!
+//! [`NodeKind::ListFiles`]: delta_kernel::plans::ir::plan::NodeKind::ListFiles
 
 use std::sync::Arc;
 
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::provider_as_source;
-use datafusion_common::arrow::datatypes::Schema as ArrowSchema;
+use datafusion_common::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datafusion_common::error::DataFusionError;
+use datafusion_common::Result as DfResult;
 use datafusion_expr::logical_plan::LogicalPlan;
 use datafusion_expr::{Expr, LogicalPlanBuilder, TableType};
 use datafusion_physical_plan::ExecutionPlan;
@@ -15,11 +17,10 @@ use delta_kernel::plans::ir::nodes::ListFilesNode;
 
 use crate::exec::FileListingExec;
 
-/// [`TableProvider`] for
-/// [`NodeKind::ListFiles`](delta_kernel::plans::ir::plan::NodeKind::ListFiles): enumerates a
-/// storage prefix via the object store registered for the path's scheme/host and emits a `(path,
-/// size, modification_time)` row per object. The actual listing happens inside the returned
-/// [`ExecutionPlan`] at execute time; planning is fast.
+/// [`TableProvider`] for [`NodeKind::ListFiles`]: enumerates a storage prefix via the object
+/// store registered for the path's scheme/host and emits a `(path, size, modification_time)` row
+/// per object. The actual listing happens inside the returned [`ExecutionPlan`] at execute time;
+/// planning is fast.
 #[derive(Debug)]
 struct FileListingTableProvider {
     path: url::Url,
@@ -28,7 +29,6 @@ struct FileListingTableProvider {
 
 impl FileListingTableProvider {
     fn new(path: url::Url) -> Self {
-        use datafusion_common::arrow::datatypes::{DataType, Field};
         let schema = Arc::new(ArrowSchema::new(vec![
             Field::new("path", DataType::Utf8, false),
             Field::new("size", DataType::Int64, false),
@@ -52,7 +52,7 @@ impl TableProvider for FileListingTableProvider {
         _projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
-    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(FileListingExec::new(self.path.clone())))
     }
 }

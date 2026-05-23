@@ -1,29 +1,33 @@
-//! Kernel [`Plan`](delta_kernel::plans::ir::plan::Plan) -> DataFusion [`LogicalPlan`] lowering.
+//! Kernel [`Plan`] -> DataFusion [`LogicalPlan`] lowering.
 //!
-//! Topological walk over [`PlanNode`](delta_kernel::plans::ir::plan::PlanNode)s. Each statement's
-//! output [`Ref`](delta_kernel::plans::ir::plan::Ref) is mapped to a freshly built
-//! [`LogicalPlan`]. Inputs are guaranteed to be earlier in `plan.stmts` than outputs by
-//! [`Plan::push`](delta_kernel::plans::ir::plan::Plan::push), so a single forward pass works.
+//! Topological walk over [`PlanNode`]s. Each statement's output [`Ref`] is mapped to a freshly
+//! built [`LogicalPlan`]. Inputs are guaranteed to be earlier in `plan.stmts` than outputs by
+//! [`Plan::push`], so a single forward pass works.
 //!
-//! Every [`NodeKind`](delta_kernel::plans::ir::plan::NodeKind) variant wraps a payload struct
-//! defined in [`delta_kernel::plans::ir::nodes`]; engine helpers consume those payload structs
-//! by reference (`&LoadNode`, `&ScanParquetNode`, etc.) without repacking. Cross-statement
-//! data flow happens entirely through DataFusion's logical-plan tree (no relation registry,
-//! no named handles).
+//! Every [`NodeKind`] variant wraps a payload struct defined in the kernel IR nodes module;
+//! engine helpers consume those payload structs by reference (`&LoadNode`, `&ScanParquetNode`,
+//! etc.) without repacking. Cross-statement data flow happens entirely through DataFusion's
+//! logical-plan tree (no relation registry, no named handles).
+//!
+//! [`Plan`]: delta_kernel::plans::ir::plan::Plan
+//! [`PlanNode`]: PlanNode
+//! [`Ref`]: Ref
+//! [`LogicalPlan`]: LogicalPlan
+//! [`Plan::push`]: delta_kernel::plans::ir::plan::Plan::push
+//! [`NodeKind`]: NodeKind
 //!
 //! # Schema policy
 //!
-//! Kernel `Plan`s do not carry per-Ref kernel schemas (those live on the
-//! [`ContextState`](crate::plans::state_machines::framework::plan_context) only during
-//! construction). DataFusion derives output schemas from `LogicalPlan` shape and arrow
+//! Kernel `Plan`s do not carry per-Ref kernel schemas (those live on the plan builder only
+//! during IR construction). DataFusion derives output schemas from `LogicalPlan` shape and arrow
 //! types; the only place a kernel [`SchemaRef`] is reconstructed engine-side is
 //! [`NodeKind::Load`], whose output schema is computed here from the upstream's arrow shape
 //! via [`StructType::try_from_arrow`] and threaded into [`LoadTableProvider::try_new`].
 //!
-//! [`NodeKind::Load`]: delta_kernel::plans::ir::plan::NodeKind::Load
-//! [`SchemaRef`]: delta_kernel::schema::SchemaRef
+//! [`NodeKind::Load`]: NodeKind::Load
+//! [`SchemaRef`]: SchemaRef
 //! [`StructType::try_from_arrow`]: delta_kernel::engine::arrow_conversion::TryFromArrow
-//! [`LoadTableProvider`]: crate::exec::LoadTableProvider
+//! [`LoadTableProvider`]: LoadTableProvider
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,12 +41,13 @@ use datafusion_expr::logical_plan::{EmptyRelation, LogicalPlan, Values};
 use datafusion_expr::{lit, Expr, ExprFunctionExt, JoinType as DfJoinType, LogicalPlanBuilder};
 use datafusion_functions_window::row_number::row_number;
 use delta_kernel::engine::arrow_conversion::{TryFromArrow, TryIntoArrow};
-use delta_kernel::expressions::{ColumnName, Expression};
+use delta_kernel::expressions::Expression;
 use delta_kernel::plans::ir::nodes::{
     EquiJoinNode, LoadNode, MaxByVersionNode, UnionNode, ValuesNode,
 };
 use delta_kernel::plans::ir::plan::{JoinKind, NodeKind, PlanNode, Ref};
-use delta_kernel::schema::{SchemaRef, StructType};
+use delta_kernel::plans::schema_expr::field_op::load_output_schema;
+use delta_kernel::schema::StructType;
 
 use super::ordered_union::compile_ordered_union;
 use super::project::compile_project_node;
@@ -60,14 +65,15 @@ use crate::exec::LoadTableProvider;
 /// Walks `stmts` in order, lowering each statement and threading the resulting `LogicalPlan`
 /// into a `Ref`-keyed map. The plan returned for `terminal` is then handed back. Statements
 /// unreachable from `terminal` are still compiled (DCE is the builder's job, not the engine's);
-/// engines relying on dead-code elimination should call
-/// [`Plan::reachable_from`](delta_kernel::plans::ir::plan::Plan::reachable_from) before passing
+/// engines relying on dead-code elimination should call [`Plan::reachable_from`] before passing
 /// the stmts in. Taking `&[PlanNode]` rather than `&Plan` avoids needing a `Plan::from_stmts`
-/// constructor; both the [`ResultPlan`](delta_kernel::plans::ir::plan::ResultPlan)-returning
-/// drive path (where the caller already has a `Plan`) and the [`EngineRequest::Reduce`] dispatch
-/// (where the executor only sees raw stmts) share this entry point.
+/// constructor; both the [`ResultPlan`]-returning drive path (where the caller already has a
+/// `Plan`) and the [`EngineRequest::Reduce`] dispatch (where the executor only sees raw stmts)
+/// share this entry point.
 ///
-/// [`EngineRequest::Reduce`]: delta_kernel::plans::state_machines::framework::step::EngineRequest::Reduce
+/// [`Plan::reachable_from`]: delta_kernel::plans::ir::plan::Plan::reachable_from
+/// [`ResultPlan`]: delta_kernel::plans::ir::plan::ResultPlan
+/// [`EngineRequest::Reduce`]: delta_kernel::plans::state_machines::framework::state_machine::EngineRequest::Reduce
 pub fn compile_plan(
     stmts: &[PlanNode],
     terminal: Ref,
@@ -85,11 +91,11 @@ pub fn compile_plan(
     })
 }
 
-/// Look up a previously compiled child plan; the caller clones for ownership.
+/// Look up a compiled child plan; the caller clones for ownership.
 fn lookup(built: &HashMap<Ref, LogicalPlan>, r: Ref) -> Result<&LogicalPlan, DataFusionError> {
     built.get(&r).ok_or_else(|| {
         plan_compilation(format!(
-            "compile_plan: input {r:?} not yet compiled (out-of-order stmts?)",
+            "compile_plan: input {r:?} not compiled (out-of-order stmts?)",
         ))
     })
 }
@@ -144,13 +150,18 @@ fn lower_union(
         .map(|r| lookup(built, *r).cloned())
         .collect::<Result<_, _>>()?;
     if children.len() == 1 {
-        return Ok(children.into_iter().next().unwrap());
+        return children
+            .into_iter()
+            .next()
+            .ok_or_else(|| plan_compilation("compile_plan: internal: Union lost children"));
     }
     if node.ordered {
         compile_ordered_union(children)
     } else {
         let mut iter = children.into_iter();
-        let first = iter.next().unwrap();
+        let first = iter
+            .next()
+            .ok_or_else(|| plan_compilation("compile_plan: internal: Union lost children"))?;
         iter.try_fold(first, |acc, right| {
             LogicalPlanBuilder::from(acc).union(right)?.build()
         })
@@ -178,29 +189,6 @@ fn kernel_schema_from_logical(plan: &LogicalPlan) -> Result<StructType, DataFusi
             "compile_plan: arrow -> kernel schema conversion failed: {e}",
         ))
     })
-}
-
-/// Walk a kernel struct schema for a (possibly nested) column path, returning the leaf
-/// data type.
-fn walk_column_type(
-    schema: &StructType,
-    col: &ColumnName,
-) -> Option<delta_kernel::schema::DataType> {
-    use delta_kernel::schema::DataType;
-    let path = col.path();
-    if path.is_empty() {
-        return None;
-    }
-    let mut current = schema.field(path.first()?)?.data_type().clone();
-    for seg in &path[1..] {
-        match current {
-            DataType::Struct(s) => {
-                current = s.field(seg.as_str())?.data_type().clone();
-            }
-            _ => return None,
-        }
-    }
-    Some(current)
 }
 
 fn lower_values(node: &ValuesNode) -> Result<LogicalPlan, DataFusionError> {
@@ -243,11 +231,12 @@ fn lower_load(
 ) -> Result<LogicalPlan, DataFusionError> {
     let upstream_logical = lookup(built, upstream_ref)?.clone();
     let upstream_kernel = kernel_schema_from_logical(&upstream_logical)?;
-    let output_kernel_schema = build_load_output_kernel_schema(
+    let output_kernel_schema = load_output_schema(
         &node.file_schema,
         &node.passthrough_columns,
         &upstream_kernel,
-    )?;
+    )
+    .map_err(|e| plan_compilation(format!("compile_plan: Load output schema: {e}")))?;
     let provider: Arc<dyn TableProvider> = Arc::new(LoadTableProvider::try_new(
         upstream_logical,
         Arc::new(node.clone()),
@@ -255,34 +244,6 @@ fn lower_load(
         output_kernel_schema,
     )?);
     LogicalPlanBuilder::scan("kernel_load", provider_as_source(provider), None)?.build()
-}
-
-/// Build the kernel-typed output schema for `NodeKind::Load`: the file_schema fields followed by
-/// one field per passthrough column whose type is looked up by walking the upstream's kernel
-/// schema.
-fn build_load_output_kernel_schema(
-    file_schema: &SchemaRef,
-    passthrough_columns: &[ColumnName],
-    upstream: &StructType,
-) -> Result<SchemaRef, DataFusionError> {
-    use delta_kernel::schema::StructField;
-    let mut fields: Vec<StructField> = file_schema.fields().cloned().collect();
-    for col in passthrough_columns {
-        let ty = walk_column_type(upstream, col).ok_or_else(|| {
-            plan_compilation(format!(
-                "compile_plan: Load passthrough column {col:?} not found in upstream schema",
-            ))
-        })?;
-        let leaf = col.path().last().ok_or_else(|| {
-            plan_compilation("compile_plan: Load passthrough column path is empty".to_string())
-        })?;
-        fields.push(StructField::nullable(leaf.clone(), ty));
-    }
-    StructType::try_new(fields).map(Arc::new).map_err(|e| {
-        plan_compilation(format!(
-            "compile_plan: Load output schema construction failed: {e}",
-        ))
-    })
 }
 
 /// Lower `NodeKind::MaxByVersion` to `row_number() OVER (PARTITION BY ... ORDER BY version DESC)`

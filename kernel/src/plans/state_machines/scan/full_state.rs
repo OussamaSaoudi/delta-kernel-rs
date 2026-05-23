@@ -1,44 +1,27 @@
-//! Canonical Full Snapshot Read (FSR) declarative plans — *window-on-commits +
-//! anti-join-on-checkpoint*.
+//! Canonical Full Snapshot Read (FSR) declarative plans.
 //!
-//! Mirrors Delta log-replay semantics by composing three or four declarative plans:
-//!
-//! 1. **commit_load** materializes the raw per-commit action stream into `fsr.commit_raw`, covering
-//!    `ascending_commit_files ∪ ascending_compaction_files` so downstream steps can `ORDER BY
-//!    version DESC` to recover "newest action wins" semantics.
-//! 2. **commit_dedup** runs a `row_number PARTITION BY key ORDER BY version DESC` window over the
-//!    commit tail to pick the winners, materialized into `fsr.commit_dedup`.
-//! 3. **sidecar_load** (only when `has_sidecars`) materializes V2-multipart sidecar parquet actions
-//!    into `fsr.sidecar_actions`.
-//! 4. **results** anti-joins the (top-level checkpoint ∪ sidecar_actions) stream against
-//!    `commit_dedup`, unions in the winners, applies retention, and binds the final reconciled
-//!    action stream to `fsr.results`.
-//!
-//! The window applies only to the (small) commit tail; the (large) checkpoint stream
-//! goes through a single hash anti-join, avoiding per-key orderings over the full snapshot.
-//!
-//! `dv_unique_id` is computed as `If(storageType IS NULL, NULL,
-//! ToJson(Array(storageType, pathOrInlineDv)))` — equality-equivalent (not byte-equivalent)
-//! to [`crate::actions::deletion_vector::DeletionVectorDescriptor::unique_id_from_parts`].
-//! `offset` is omitted because kernel lacks an int-to-string cast; inline DVs sharing
-//! `pathOrInlineDv` would already imply identical byte payloads.
+//! [`FullState::state_machine`] yields a single [`ResultPlan`] that runs the shared
+//! reconciliation pipeline (window-on-commits + anti-join-on-checkpoint) against the
+//! snapshot's log segment. Optional stats projection is configured via
+//! [`FullStateBuilder::with_stats`] before [`FullStateBuilder::build`].
 
 use std::sync::Arc;
 
 use super::reconciliation::{execute_reconciliation, fsr_dedup_key, FSR_BASE};
 use crate::plans::errors::{DeltaError, KernelErrAsDelta};
 use crate::plans::ir::plan::ResultPlan;
-use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
+use crate::plans::state_machines::framework::coroutine::CoroutineSM;
 use crate::plans::state_machines::framework::plan_context::Context;
 use crate::scan::state_info::StateInfo;
 use crate::scan::StatsOutputMode;
 use crate::snapshot::Snapshot;
 
 /// Configured FSR plan source. Construct via [`FullState::for_table`] (or
-/// [`Snapshot::full_state_builder`](crate::snapshot::Snapshot::full_state_builder)), call
-/// [`FullStateBuilder::build`], then drive [`Self::state_machine`] through an engine. The
-/// snapshot is the sole source of truth for the table's log segment and `_last_checkpoint`
-/// hint; the resolver derives shape from those, no override hook.
+/// [`Snapshot::full_state_builder`]), call [`FullStateBuilder::build`], then drive
+/// [`Self::state_machine`] through an engine.
+///
+/// The snapshot is the sole source of truth for the table's log segment and
+/// `_last_checkpoint` hint; the resolver derives shape from those with no override hook.
 #[derive(Debug, Clone)]
 pub struct FullState {
     snapshot: Arc<Snapshot>,
@@ -62,11 +45,9 @@ impl FullState {
         }
     }
 
-    /// CoroutineSM SM driving the FSR pipeline end-to-end.
+    /// CoroutineSM driving the FSR pipeline end-to-end.
     ///
-    /// Builds against the [`crate::plans::state_machines::framework::plan_context::Context`]
-    /// (plan-construction / PlanBuilder API) and yields a single
-    /// [`ResultPlan`](crate::plans::ir::plan::ResultPlan) containing the entire
+    /// Builds against [`Context`] and yields a single [`ResultPlan`] containing the full
     /// reconciliation as one flat plan. Engines drive this through `drive_to_dataframe`.
     pub fn state_machine(&self) -> Result<CoroutineSM<ResultPlan>, DeltaError> {
         let snapshot = self.snapshot.clone();

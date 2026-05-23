@@ -475,8 +475,7 @@ pub trait EvaluationHandler: AsAny {
 
     /// Create a single-row all-null-value [`EngineData`] with the schema specified by
     /// `output_schema`.
-    // NOTE: we should probably allow DataType instead of SchemaRef, but can expand that in the
-    // future.
+    // NOTE: we should probably allow DataType instead of SchemaRef when expanding this API.
     fn null_row(&self, output_schema: SchemaRef) -> DeltaResult<Box<dyn EngineData>>;
 
     /// Create a multi-row [`EngineData`] by applying the given schema to multiple rows of values.
@@ -914,8 +913,7 @@ pub trait ParquetHandler: AsAny {
 /// # Naming note
 ///
 /// The plans / state-machines subsystem reuses the name `Engine` for an unrelated coroutine
-/// handle (see
-/// [`plans::state_machines::framework::coroutine::context::Engine`](crate::plans::state_machines::framework::coroutine::context::Engine)).
+/// handle (`plans::state_machines::framework::coroutine::Engine`).
 /// That handle is the SM-internal `yield` channel; this `Engine` trait is the connector-facing
 /// I/O abstraction. The two never appear in the same scope -- the SM handle is `pub(crate)` and
 /// the trait is the public surface -- but if you ever do need both, alias one at the use site

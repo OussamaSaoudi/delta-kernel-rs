@@ -2,17 +2,21 @@
 //!
 //! For each upstream metadata row, [`build_load_stream`] runs `buffer_unordered` over open
 //! futures: each resolves the optional DV via [`resolve_dv_async`], builds a per-file plan
-//! via [`build_per_file_plan`] (`DataSourceExec` plus an optional `FilterExec(not_in_dv)`
-//! → `ProjectionExec` stack when DV is present), and drains it. Output ordering across files
+//! via [`build_per_file_plan`] (`DataSourceExec` plus an optional `FilterExec(not_in_dv)` ->
+//! `ProjectionExec` stack when DV is present), and drains it. Output ordering across files
 //! is unspecified; intra-file order is preserved. JSON+DV is rejected at construction.
 
 use std::fmt;
 use std::sync::Arc;
 
+use datafusion::physical_plan::execute_stream;
 use datafusion_common::error::DataFusionError;
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::Result as DfResult;
+use datafusion_datasource::file::FileSource;
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::equivalence::EquivalenceProperties;
+use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use datafusion_physical_plan::execution_plan::EmissionType;
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion_physical_plan::{
@@ -25,6 +29,7 @@ use delta_kernel::plans::ir::nodes::{FileType, LoadNode};
 use delta_kernel::Engine;
 use futures::stream::{Stream, StreamExt, TryStreamExt};
 
+use crate::error::plan_compilation;
 use crate::exec::load_helpers::{
     build_file_source, build_per_file_plan, extract_row_inputs, load_base_url, resolve_dv_async,
     RowInputs,
@@ -36,6 +41,7 @@ const DEFAULT_LOAD_CONCURRENCY: usize = 8;
 /// Caps tokio task pressure for very-wide scans.
 const MAX_LOAD_CONCURRENCY: usize = 64;
 
+/// Streaming physical plan that opens one file per upstream metadata row.
 pub struct LoadExec {
     node: Arc<LoadNode>,
     /// Used only for deletion-vector resolution; file decoding goes through DataFusion's
@@ -51,16 +57,17 @@ pub struct LoadExec {
     /// Indices into `node.passthrough_columns` to materialize, in projected order. `Arc` so
     /// per-row open futures can clone cheaply.
     projected_passthrough: Arc<Vec<usize>>,
-    /// File source without `_row_number` for rows whose DV column is null (or the whole load
-    /// node has no DV).
-    file_source_no_dv: Arc<dyn datafusion_datasource::file::FileSource>,
+    /// File source without `_row_number` for rows whose DV column is null (or the whole load node
+    /// has no DV).
+    file_source_no_dv: Arc<dyn FileSource>,
     /// File source with `_row_number` virtual column appended for DV rows. `None` iff
     /// `node.dv_ref.is_none()`.
-    file_source_with_dv: Option<Arc<dyn datafusion_datasource::file::FileSource>>,
+    file_source_with_dv: Option<Arc<dyn FileSource>>,
     properties: Arc<PlanProperties>,
 }
 
 impl LoadExec {
+    /// Build a load plan over `upstream` using the `LoadNode` payload and optional projection.
     pub fn new(
         upstream: Arc<dyn ExecutionPlan>,
         node: Arc<LoadNode>,
@@ -70,8 +77,8 @@ impl LoadExec {
         limit: Option<usize>,
     ) -> DfResult<Self> {
         // JSON has no `_row_number` virtual column; delta DVs only apply to parquet anyway.
-        if matches!(node.file_type, FileType::Json) && node.dv_ref.is_some() {
-            return Err(crate::error::plan_compilation(
+        if node.file_type == FileType::Json && node.dv_ref.is_some() {
+            return Err(plan_compilation(
                 "LoadNode with FileType::Json and dv_ref set is not supported (no \
                  _row_number virtual column for JSON)",
             ));
@@ -187,11 +194,9 @@ impl ExecutionPlan for LoadExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(
-            &dyn datafusion_physical_expr_common::physical_expr::PhysicalExpr,
-        ) -> DfResult<datafusion_common::tree_node::TreeNodeRecursion>,
-    ) -> DfResult<datafusion_common::tree_node::TreeNodeRecursion> {
-        Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+        _f: &mut dyn FnMut(&dyn PhysicalExpr) -> DfResult<TreeNodeRecursion>,
+    ) -> DfResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
@@ -226,10 +231,7 @@ impl ExecutionPlan for LoadExec {
         }
         // Coalesce the upstream's partitions into one stream so the row expander sees one
         // batch at a time.
-        let upstream = datafusion::physical_plan::execute_stream(
-            Arc::clone(&self.upstream),
-            Arc::clone(&context),
-        )?;
+        let upstream = execute_stream(Arc::clone(&self.upstream), Arc::clone(&context))?;
         let concurrency = context
             .session_config()
             .target_partitions()
@@ -266,8 +268,8 @@ fn build_load_stream(
     upstream: SendableRecordBatchStream,
     node: Arc<LoadNode>,
     engine: Arc<dyn Engine>,
-    file_source_no_dv: Arc<dyn datafusion_datasource::file::FileSource>,
-    file_source_with_dv: Option<Arc<dyn datafusion_datasource::file::FileSource>>,
+    file_source_no_dv: Arc<dyn FileSource>,
+    file_source_with_dv: Option<Arc<dyn FileSource>>,
     projected_passthrough: Arc<Vec<usize>>,
     output_schema: ArrowSchemaRef,
     task_context: Arc<TaskContext>,

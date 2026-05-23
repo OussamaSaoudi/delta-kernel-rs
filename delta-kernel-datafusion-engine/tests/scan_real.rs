@@ -4,8 +4,7 @@
 //! Cross-checks the scan path's `scan_metadata` row count against the kernel default-engine
 //! reference (`Scan::scan_metadata` add-path set, the same source of truth used by the FSR
 //! golden tests). `scan_data` is asserted to drive without error and produce some rows; the
-//! per-row data correctness is implicitly covered by parity with the metadata add-path set +
-//! the engine-level scan-correctness tests in `scan_correctness.rs`.
+//! per-row data correctness is covered by kernel parity in the metadata test above.
 
 mod common;
 
@@ -105,10 +104,10 @@ async fn scan_metadata_row_count_matches_kernel_reference(#[case] fixture: &str)
     );
 }
 
-/// `scan_data` drives end-to-end without error and produces at least one row. The detailed
-/// per-row data correctness is covered by `scan_correctness.rs` plus kernel parity in the
-/// metadata test above; this case asserts the full data-stage pipeline (Load + logical
-/// projection on top of reconciliation) wires up.
+/// `scan_data` drives end-to-end without error and produces at least one row. Detailed
+/// per-row data correctness is covered by kernel parity in the metadata test above; this case
+/// asserts the full data-stage pipeline (Load + logical projection on top of reconciliation)
+/// wires up.
 #[rstest]
 #[case::commit_only("app-txn-no-checkpoint")]
 #[case::v1_checkpoint("app-txn-checkpoint")]

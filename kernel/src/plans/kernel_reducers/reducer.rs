@@ -3,8 +3,9 @@
 //! Adding a new KDF: declare the struct, derive `Clone`, write
 //! `impl KernelReducer for T { ... }` with `kind`, `apply`, `finish`, and pair it with a
 //! `KernelReducerOutput` impl declaring the typed output. KDFs ride on the
-//! [`EngineRequest::Reduce`](crate::plans::state_machines::framework::step::EngineRequest::Reduce)
-//! step, which is dispatched in-process and never serialized.
+//! [`EngineRequest::Reduce`] step, which is dispatched in-process and never serialized.
+//!
+//! [`EngineRequest::Reduce`]: crate::plans::state_machines::framework::state_machine::EngineRequest::Reduce
 //!
 //! # Object-safety notes
 //!
@@ -50,14 +51,14 @@ pub enum KernelReducerKind {
 
 /// Identity for a kernel-reducer entry on a finished handle.
 ///
-/// Stamped at plan-build time when a [`EngineRequest::Reduce`] step is constructed. The fresh
+/// Stamped at plan-build time when an [`EngineRequest::Reduce`] step is constructed. The fresh
 /// UUID `id` ensures stale handles from a prior plan can't be confused with current
 /// ones -- a [`FinishedHandle`] arriving with a token from a dead plan fails the
 /// [`Extractor`] sanity check at decode time.
 ///
 /// `Display` emits `<kind>#<id>`.
 ///
-/// [`EngineRequest::Reduce`]: crate::plans::state_machines::framework::step::EngineRequest::Reduce
+/// [`EngineRequest::Reduce`]: crate::plans::state_machines::framework::state_machine::EngineRequest::Reduce
 /// [`FinishedHandle`]: super::handle::FinishedHandle
 /// [`Extractor`]: super::handle::Extractor
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -103,8 +104,8 @@ pub trait KernelReducer: DynClone + Send + Sync + std::fmt::Debug {
     /// TODO: enforce cardinality of applied rows. Each reducer impl should declare an
     /// expected per-batch (or total) row-count contract so the runtime can assert that
     /// the engine isn't incorrectly providing rows (e.g. `CheckpointHintReader` is
-    /// single-row, `MetadataProtocolReader` short-circuits on Break, etc.). Today
-    /// impls silently accept whatever the engine hands them.
+    /// single-row, `MetadataProtocolReader` short-circuits on Break, etc.). Impls
+    /// silently accept whatever the engine hands them.
     fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<KdfControl>;
 
     /// Consume the finalized KDF, returning its state erased to

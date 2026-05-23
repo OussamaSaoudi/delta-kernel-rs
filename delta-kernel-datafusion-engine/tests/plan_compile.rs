@@ -1,7 +1,7 @@
-//! Round-trip integration tests for the `compile_plan` lowering. Each test builds a
-//! [`Plan`](delta_kernel::plans::ir::plan::Plan) via the [`Context`] builder, wraps it in
-//! a [`ResultPlan`], and runs it through [`DataFusionExecutor::result_plan_to_dataframe`] --
-//! exercising the per-`NodeKind` lowerings without requiring a state machine.
+//! Round-trip integration tests for the `compile_plan` lowering. Each test builds a plan via
+//! the [`Context`] builder, wraps it in a [`ResultPlan`], and runs it through
+//! [`DataFusionExecutor::result_plan_to_dataframe`] -- exercising the per-`NodeKind` lowerings
+//! without requiring a state machine.
 
 mod common;
 
@@ -15,13 +15,16 @@ use delta_kernel::arrow::datatypes::Int64Type;
 use delta_kernel::expressions::{
     ColumnName, Expression, ExpressionRef, Predicate, PredicateRef, Scalar,
 };
-use delta_kernel::plans::ir::nodes::{FileType, ReduceSink, ScanFileColumns};
+use delta_kernel::plans::ir::nodes::{FileType, LoadNode, ReduceSink, ScanFileColumns};
 use delta_kernel::plans::ir::plan::ResultPlan;
-use delta_kernel::plans::state_machines::framework::plan_context::{Context, LoadSpec};
-use delta_kernel::plans::state_machines::framework::step::EngineRequest;
-use delta_kernel::plans::state_machines::framework::step_payload::EngineResponse;
+use delta_kernel::plans::state_machines::framework::plan_context::Context;
+use delta_kernel::plans::state_machines::framework::state_machine::{
+    EngineRequest, EngineResponse,
+};
 use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
 use delta_kernel_datafusion_engine::{testing, DataFusionExecutor};
+use test_utils::parquet::write_i64_parquet;
+use url::Url;
 
 fn run_to_one_batch(rp: ResultPlan) -> RecordBatch {
     let exec = DataFusionExecutor::try_new().expect("executor");
@@ -38,7 +41,7 @@ fn run_to_one_batch(rp: ResultPlan) -> RecordBatch {
 }
 
 fn long_field(name: &str) -> StructField {
-    StructField::new(name, DataType::LONG, true)
+    StructField::nullable(name, DataType::LONG)
 }
 
 fn long_schema(fields: &[&str]) -> SchemaRef {
@@ -93,7 +96,7 @@ fn filter_drops_rows_where_predicate_is_false() {
         .unwrap();
     let predicate: PredicateRef = Arc::new(Predicate::gt(
         Expression::column(["x"]),
-        Expression::literal(Scalar::Long(2)),
+        Expression::literal(2i64),
     ));
     let builder = src.filter(predicate).unwrap();
     let rp = ctx.into_result_plan(builder).unwrap();
@@ -200,7 +203,7 @@ async fn step_reduce_drains_plan_into_reducer_handle() {
         .unwrap();
     let predicate: PredicateRef = Arc::new(Predicate::gt(
         Expression::column(["v"]),
-        Expression::literal(Scalar::Long(2)),
+        Expression::literal(2i64),
     ));
     let builder = src.filter(predicate).unwrap();
     let rp = ctx.into_result_plan(builder).unwrap();
@@ -242,9 +245,6 @@ async fn step_reduce_drains_plan_into_reducer_handle() {
 /// `LogicalPlan`.
 #[tokio::test]
 async fn load_node_reads_files_and_broadcasts_passthrough() {
-    use test_utils::parquet::write_i64_parquet;
-    use url::Url;
-
     let dir = tempfile::tempdir().unwrap();
     let parquet_path = dir.path().join("data.parquet");
     write_i64_parquet(&parquet_path, "x", &[10_i64, 20_i64]);
@@ -280,7 +280,7 @@ async fn load_node_reads_files_and_broadcasts_passthrough() {
         )
         .unwrap();
     let builder = upstream
-        .load(LoadSpec {
+        .load(LoadNode {
             file_schema,
             file_type: FileType::Parquet,
             base_url: Some(base_url),

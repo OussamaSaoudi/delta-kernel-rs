@@ -1,11 +1,11 @@
 //! `SidecarCollector` — reducer KDF that collects sidecar file references
 //! from a V2 checkpoint manifest scan.
 //!
-//! Delegates row visiting to the existing
-//! [`SidecarVisitor`](crate::actions::visitors::SidecarVisitor) and
+//! Delegates row visiting to the existing [`SidecarVisitor`] and
 //! resolves the captured sidecars against `log_root` into `Vec<FileMeta>`
-//! via [`Sidecar::to_filemeta`](crate::actions::Sidecar::to_filemeta) in
-//! [`KernelReducerOutput::into_output`].
+//! via [`Sidecar::to_filemeta`] in [`KernelReducerOutput::into_output`].
+//!
+//! [`Sidecar::to_filemeta`]: crate::actions::Sidecar::to_filemeta
 
 use url::Url;
 
@@ -25,6 +25,7 @@ pub struct SidecarCollector {
 }
 
 impl SidecarCollector {
+    /// Construct a collector that resolves sidecar paths under `log_root`.
     pub fn new(log_root: Url) -> Self {
         Self {
             log_root,
@@ -80,10 +81,7 @@ mod tests {
     #[test]
     fn kind_is_stable() {
         let s = SidecarCollector::new(log_root());
-        assert_eq!(
-            crate::plans::kernel_reducers::KernelReducer::kind(&s),
-            KernelReducerKind::SidecarCollector
-        );
+        assert_eq!(KernelReducer::kind(&s), KernelReducerKind::SidecarCollector);
     }
 
     #[test]

@@ -12,8 +12,8 @@
 //! independent source of truth before being frozen here: the FSR result's `add.path` set is
 //! verified row-for-row against the kernel default-engine `scan_metadata` add-path set (the
 //! classic kernel reference replay through `DefaultEngineBuilder`). After that the golden is
-//! frozen: any future code change that perturbs the output forces an explicit re-validate-and-
-//! update cycle.
+//! frozen: any code change that perturbs the output forces an explicit re-validate-and-update
+//! cycle.
 
 mod common;
 

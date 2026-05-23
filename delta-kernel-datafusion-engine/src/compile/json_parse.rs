@@ -5,12 +5,15 @@
 
 use datafusion_common::arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 use datafusion_common::error::DataFusionError;
-use datafusion_expr::expr::ScalarFunction;
+use datafusion_expr::expr::{Cast, ScalarFunction};
 use datafusion_expr::{lit, Expr};
+use datafusion_functions::core::expr_fn::named_struct;
 use datafusion_functions_json::udfs::{
     json_get_bool_udf, json_get_float_udf, json_get_int_udf, json_get_str_udf,
 };
 use delta_kernel::schema::{DataType, PrimitiveType, StructField, StructType};
+
+use crate::error::unsupported;
 
 /// Generate extraction expression for a single field in `target_schema`.
 pub(crate) fn generate_json_extract_expr(
@@ -24,16 +27,16 @@ pub(crate) fn generate_json_extract_expr(
     match field.data_type() {
         DataType::Primitive(prim) => generate_primitive_extract(json_col, prim, &field_path),
         DataType::Struct(inner) => generate_struct_extract(json_col, inner, &field_path),
-        DataType::Array(_) => Err(crate::error::unsupported(format!(
-            "ParseJson array extraction is not yet supported for field '{}'",
+        DataType::Array(_) => Err(unsupported(format!(
+            "ParseJson array extraction is not supported for field '{}'",
             field.name()
         ))),
-        DataType::Map(_) => Err(crate::error::unsupported(format!(
-            "ParseJson map extraction is not yet supported for field '{}'",
+        DataType::Map(_) => Err(unsupported(format!(
+            "ParseJson map extraction is not supported for field '{}'",
             field.name()
         ))),
-        DataType::Variant(_) => Err(crate::error::unsupported(format!(
-            "ParseJson variant extraction is not yet supported for field '{}'",
+        DataType::Variant(_) => Err(unsupported(format!(
+            "ParseJson variant extraction is not supported for field '{}'",
             field.name()
         ))),
     }
@@ -86,10 +89,7 @@ fn generate_primitive_extract(
     };
 
     match target_type {
-        Some(data_type) => Ok(Expr::Cast(datafusion_expr::expr::Cast::new(
-            Box::new(extracted),
-            data_type,
-        ))),
+        Some(data_type) => Ok(Expr::Cast(Cast::new(Box::new(extracted), data_type))),
         None => Ok(extracted),
     }
 }
@@ -104,7 +104,7 @@ fn generate_struct_extract(
         args.push(lit(field.name().to_string()));
         args.push(generate_json_extract_expr(json_col, field, path)?);
     }
-    Ok(datafusion_functions::core::expr_fn::named_struct(args))
+    Ok(named_struct(args))
 }
 
 /// Generate top-level extraction expressions for each output field.

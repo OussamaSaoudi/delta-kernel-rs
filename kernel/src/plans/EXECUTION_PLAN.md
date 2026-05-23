@@ -17,7 +17,11 @@ Prototype landed locally; nothing merged. Already in the tree:
   `UnionNode`, `LoadNode`, `MaxByVersionNode`, `EquiJoinNode`,
   `ListFilesNode`, `ValuesNode`, `ReduceSink`, `ScanFileColumns`,
   `DvRef`).
-- `kernel/src/plans/ir/schema_inference.rs` — `infer_expression_type`.
+- `kernel/src/plans/schema_expr/` — builder-time schema/expression utilities:
+  - `check.rs` — bidirectional type checker (`check_expression`, `check_column_refs`).
+  - `field_op.rs` — `FieldOp` + `compile_field_op` (point-edits over nested structs)
+    plus `load_output_schema` shared with engine-side lowering, and small helpers
+    (`arc_struct_or_invariant`, `identity_named_expr`).
 - `kernel/src/plans/kernel_reducers/` — `KernelReducer` trait, `Extractor<O>`,
   `KernelReducerToken`/`Kind`, `ReducerHandle`/`FinishedHandle`, and the three
   concrete impls (`CheckpointHintReader`, `MetadataProtocolReader`,
@@ -72,7 +76,8 @@ Each PR exits with `cargo build --workspace --all-features` clean,
 
 #### PR-1: IR types + schema inference
 
-Land `plans/ir/plan.rs`, `plans/ir/nodes/mod.rs`, `plans/ir/schema_inference.rs`.
+Land `plans/ir/plan.rs`, `plans/ir/nodes/mod.rs`, `plans/schema_expr/`
+(`check.rs`, `field_op.rs`).
 
 **Verify**: unit tests for each `NodeKind`, `Plan::reachable_from` DCE,
 `infer_expression_type` covering every `Expression` variant. No call sites
@@ -287,7 +292,7 @@ Mechanical sweeps; small individually.
 ## Parallelization
 
 Day 1 (foundation, independent):
-- PR-1 (IR + schema_inference)
+- PR-1 (IR + schema_expr)
 - PR-2 (kernel_reducers rename)
 - PR-3 (framework rename) — gated on PR-2 if framework references
   KernelReducer.

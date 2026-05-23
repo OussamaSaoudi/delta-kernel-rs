@@ -5,7 +5,7 @@
 //! `EngineRequest::Reduce` (a plan dataflow drained into a [`ReduceSink`]). Terminal
 //! `ResultPlan`s describe a single self-contained dataflow DAG that compiles to a `LogicalPlan`.
 //!
-//! [`ReduceSink`]: delta_kernel::plans::ir::nodes::ReduceSink
+//! [`ReduceSink`]: ReduceSink
 
 use std::sync::Arc;
 
@@ -20,12 +20,13 @@ use delta_kernel::engine::default::DefaultEngineBuilder;
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::plans::errors::DeltaError;
 use delta_kernel::plans::ir::nodes::ReduceSink;
+use delta_kernel::plans::ir::plan::{PlanNode, Ref, ResultPlan};
 use delta_kernel::plans::kernel_reducers::{FinishedHandle, KdfControl};
-use delta_kernel::plans::state_machines::framework::coroutine::driver::CoroutineSM;
+use delta_kernel::plans::state_machines::framework::coroutine::CoroutineSM;
 use delta_kernel::plans::state_machines::framework::engine_error::{EngineError, EngineErrorKind};
-use delta_kernel::plans::state_machines::framework::state_machine::{NextStep, StateMachine};
-use delta_kernel::plans::state_machines::framework::step::{EngineRequest, SchemaQuery};
-use delta_kernel::plans::state_machines::framework::step_payload::EngineResponse;
+use delta_kernel::plans::state_machines::framework::state_machine::{
+    EngineRequest, EngineResponse, NextStep, SchemaQuery, StateMachine,
+};
 use delta_kernel::plans::state_machines::scan::FullState;
 use delta_kernel::scan::Scan;
 use delta_kernel::{Engine, Error as KernelError};
@@ -33,7 +34,7 @@ use futures::TryStreamExt;
 use url::Url;
 
 use crate::compile::{compile_plan, CompileContext};
-use crate::error::DfResultIntoDelta;
+use crate::error::{wrap_delta_err, DfResultIntoDelta};
 
 fn default_kernel_engine() -> Arc<dyn Engine> {
     Arc::new(DefaultEngineBuilder::new(Arc::new(LocalFileSystem::new())).build())
@@ -79,7 +80,7 @@ pub struct DataFusionExecutor {
 
 impl DataFusionExecutor {
     /// Builds an executor backed by [`TaskContext::default()`] and a local-filesystem
-    /// [`DefaultEngine`](delta_kernel::engine::default::DefaultEngine).
+    /// default kernel engine.
     pub fn try_new() -> Result<Self, DeltaError> {
         Self::try_new_with_engine(default_kernel_engine())
     }
@@ -124,14 +125,11 @@ impl DataFusionExecutor {
     ///
     /// # `!Send` future
     ///
-    /// The kernel state machine is a CPU-only sequencer (see
-    /// [`delta_kernel::plans::state_machines::framework::coroutine::driver::CoroutineSM`] module
-    /// docs); it intentionally does not implement `Send`. The future returned here
-    /// inherits that and is therefore `!Send`. Callers needing a `Send` future drive this on a
-    /// single-threaded runtime (`tokio::runtime::Builder::new_current_thread()` +
-    /// `block_on`) or wrap the call in a [`tokio::task::LocalSet`].
-    ///
-    /// [`ResultPlan`]: delta_kernel::plans::ir::plan::ResultPlan
+    /// The kernel state machine is a CPU-only sequencer (see [`CoroutineSM`] module docs); it
+    /// intentionally does not implement `Send`. The future returned here inherits that and is
+    /// therefore `!Send`. Callers needing a `Send` future drive this on a single-threaded runtime
+    /// (`tokio::runtime::Builder::new_current_thread()` + `block_on`) or wrap the call in a
+    /// [`tokio::task::LocalSet`].
     pub async fn drive_to_completion<R: 'static>(
         &self,
         mut sm: CoroutineSM<R>,
@@ -154,11 +152,9 @@ impl DataFusionExecutor {
     /// Drive a coroutine that yields a [`ResultPlan`] and open its terminal output as a
     /// [`DataFrame`]. Result plans describe a single self-contained dataflow DAG; the compiled
     /// `LogicalPlan` is wrapped directly in a [`DataFrame`] for the caller.
-    ///
-    /// [`ResultPlan`]: delta_kernel::plans::ir::plan::ResultPlan
     pub async fn drive_to_dataframe(
         &self,
-        sm: CoroutineSM<delta_kernel::plans::ir::plan::ResultPlan>,
+        sm: CoroutineSM<ResultPlan>,
     ) -> Result<DataFrame, DeltaError> {
         let rp = self.drive_to_completion(sm).await?;
         self.result_plan_to_dataframe(&rp)
@@ -168,12 +164,7 @@ impl DataFusionExecutor {
     /// `ResultPlan` (for example after driving a coroutine by hand) and don't need the
     /// `CoroutineSM` wrapping that [`Self::drive_to_dataframe`] provides; also the canonical
     /// entry point for tests that construct result plans directly without an SM.
-    ///
-    /// [`ResultPlan`]: delta_kernel::plans::ir::plan::ResultPlan
-    pub fn result_plan_to_dataframe(
-        &self,
-        rp: &delta_kernel::plans::ir::plan::ResultPlan,
-    ) -> Result<DataFrame, DeltaError> {
+    pub fn result_plan_to_dataframe(&self, rp: &ResultPlan) -> Result<DataFrame, DeltaError> {
         let ctx = CompileContext {
             engine: Arc::clone(&self.engine),
         };
@@ -232,8 +223,8 @@ impl DataFusionExecutor {
     /// the reduce sink, and return the finalized handle.
     async fn run_reduce(
         &self,
-        stmts: &[delta_kernel::plans::ir::plan::PlanNode],
-        terminal: delta_kernel::plans::ir::plan::Ref,
+        stmts: &[PlanNode],
+        terminal: Ref,
         sink: &ReduceSink,
     ) -> Result<FinishedHandle, DataFusionError> {
         let ctx = CompileContext {
@@ -247,9 +238,8 @@ impl DataFusionExecutor {
         self.drain_reduce_sink(physical, sink).await
     }
 
-    /// Drain `physical` through a
-    /// [`KernelReducer`](delta_kernel::plans::kernel_reducers::KernelReducer) handle
-    /// minted from `sink` and return the finalized handle.
+    /// Drain `physical` through a `KernelReducer` handle minted from `sink` and return the
+    /// finalized handle.
     async fn drain_reduce_sink(
         &self,
         physical: Arc<dyn ExecutionPlan>,
@@ -261,7 +251,7 @@ impl DataFusionExecutor {
         let mut stream = physical.execute(0, Arc::clone(&self.task_ctx))?;
         while let Some(batch) = stream.try_next().await? {
             let arrow = ArrowEngineData::new(batch);
-            match handle.apply(&arrow).map_err(crate::error::wrap_delta_err)? {
+            match handle.apply(&arrow).map_err(wrap_delta_err)? {
                 KdfControl::Continue => {}
                 KdfControl::Break => break,
             }

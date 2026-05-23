@@ -2,18 +2,18 @@
 //!
 //! Engine internals operate in [`DataFusionError`] space: every helper here produces a
 //! [`DataFusionError`] variant, so engine code can use bare `?` to propagate errors. Conversion
-//! into kernel-flavored errors ([`DeltaError`],
-//! [`delta_kernel::plans::state_machines::framework::engine_error::EngineError`]) happens only at
-//! the engine -> kernel boundary methods on [`crate::DataFusionExecutor`], and is exposed as the
-//! [`DfResultIntoDelta`] extension trait so boundary call sites can write `.into_delta()`
+//! into kernel-flavored errors ([`DeltaError`], `EngineError`) happens only at the engine ->
+//! kernel boundary methods on [`DataFusionExecutor`][crate::DataFusionExecutor], and is exposed
+//! as the [`DfResultIntoDelta`] extension trait so boundary call sites can write `.into_delta()`
 //! instead of `.map_err(df_to_delta)`.
 
 use datafusion_common::error::DataFusionError;
+use delta_kernel::delta_error;
 use delta_kernel::plans::errors::{DeltaError, DeltaErrorCode};
 
 /// Wrap an arbitrary error chain into a [`DataFusionError::External`].
 ///
-/// Bridges kernel-side errors (e.g. [`DeltaError`], [`delta_kernel::Error`]) into the
+/// Bridges kernel-side errors (e.g. [`DeltaError`], kernel `Error`) into the
 /// engine's native [`DataFusionError`] flow.
 pub fn wrap_delta_err<E>(err: E) -> DataFusionError
 where
@@ -51,13 +51,13 @@ pub fn df_to_delta(e: DataFusionError) -> DeltaError {
             Ok(delta_err) => *delta_err,
             Err(orig) => {
                 let wrapped = DataFusionError::External(orig);
-                delta_kernel::delta_error!(
+                delta_error!(
                     DeltaErrorCode::DeltaCommandInvariantViolation,
                     source = wrapped,
                 )
             }
         },
-        other => delta_kernel::delta_error!(
+        other => delta_error!(
             DeltaErrorCode::DeltaCommandInvariantViolation,
             source = other,
         ),

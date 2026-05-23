@@ -1,14 +1,9 @@
 //! Scan plan builder.
 //!
-//! Mirrors [`super::file_scan::Scan::build_plans`] / [`super::file_scan::Scan::do_data_stage`]
-//! but builds against the [`super::super::framework::plan_context`] (`Context` / `PlanBuilder`)
-//! API and the kernel plan IR. The scan-side terminal projection (reconciled rows -> flat
-//! `scan_file_row`) and the data-phase Load + logical projection are expressed as builder
-//! chains; reconciliation upstream of the terminal is shared with FSR via
-//! [`super::reconciliation`].
-//!
-//! After PR8 deletes the legacy registry-based pipeline, the SMs in [`super::file_scan`]
-//! will be retired in favor of the plan-construction SMs declared on `Scan` here.
+//! Builds the scan pipeline against [`Context`] / [`PlanBuilder`] and the kernel plan IR:
+//! shared reconciliation, terminal projection to flat `scan_file_row`, and an optional data
+//! phase (Load + logical projection). Reconciliation upstream of the terminal is shared with
+//! FSR via [`super::reconciliation`].
 
 use std::sync::Arc;
 
@@ -18,9 +13,9 @@ use crate::actions::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::ADD_NAME;
 use crate::expressions::{col, ColumnName, Expression};
 use crate::plans::errors::DeltaError;
-use crate::plans::ir::nodes::{default_scan_file_columns, DvRef, FileType};
-use crate::plans::state_machines::framework::coroutine::context::Engine;
-use crate::plans::state_machines::framework::plan_context::{Context, LoadSpec, PlanBuilder};
+use crate::plans::ir::nodes::{default_scan_file_columns, DvRef, FileType, LoadNode};
+use crate::plans::state_machines::framework::coroutine::Engine;
+use crate::plans::state_machines::framework::plan_context::{Context, PlanBuilder};
 use crate::scan::log_replay::FILE_CONSTANT_VALUES_NAME;
 use crate::scan::Scan;
 use crate::schema::{DataType, MapType, SchemaRef, StructField, StructType, ToSchema};
@@ -29,9 +24,8 @@ use crate::schema::{DataType, MapType, SchemaRef, StructField, StructType, ToSch
 // Scan plan builder
 // ============================================================================
 
-/// Build the scan plan against `ctx`. Mirrors [`Scan::build_plans`] -- runs the shared
-/// reconciliation, then projects to the flat scan-file row shape and (when `with_data`)
-/// appends the data phase.
+/// Build the scan plan against `ctx`: shared reconciliation, terminal projection to flat
+/// `scan_file_row`, and (when `with_data`) the data phase.
 ///
 /// Returns a [`PlanBuilder`] terminating on either:
 /// - the live-actions stream (`with_data == false`), or
@@ -79,7 +73,7 @@ pub(super) async fn build_scan_plan(
 }
 
 /// Append the data stage onto the live-actions builder and return the data-stream
-/// builder. Mirrors [`Scan::do_data_stage`].
+/// builder.
 ///
 /// Splits per-file: the upstream builder emits one row per surviving file (flat
 /// `scan_file_row` shape), and [`PlanBuilder::load`] expands each row into the file's
@@ -92,7 +86,7 @@ fn do_data_stage(scan: &Scan, live_actions: PlanBuilder) -> Result<PlanBuilder, 
 
     // Per-file parquet read; broadcasts the file-constant struct and `path` to every
     // emitted record-row. Output schema = physical_schema ++ {path, fileConstantValues}.
-    let raw_data = live_actions.load(LoadSpec {
+    let raw_data = live_actions.load(LoadNode {
         file_schema: scan.physical_schema().clone(),
         file_type: FileType::Parquet,
         base_url: Some(scan.snapshot().table_root().clone()),
@@ -190,6 +184,7 @@ fn project_scan_file_row(
 mod tests {
     use super::*;
     use crate::actions::{Remove, REMOVE_NAME};
+    use crate::expressions::Scalar;
     use crate::schema::arc_schema;
 
     /// Build a synthetic input builder whose schema mimics the reconciled action stream
@@ -219,18 +214,11 @@ mod tests {
             StructField::nullable(REMOVE_NAME, Remove::to_schema()),
         ]);
         let ctx = Context::new();
-        let builder = ctx
-            .values(schema, Vec::<Vec<crate::expressions::Scalar>>::new())
-            .unwrap();
+        let builder = ctx.values(schema, Vec::<Vec<Scalar>>::new()).unwrap();
         (ctx, builder)
     }
 
-    /// Without partitions: the terminal emits the four-field `fileConstantValues` and
-    /// drops the `partitionValues` Map slot.
-    #[test]
-    fn project_scan_file_row_drops_partition_values_map_when_no_parts() {
-        let (_ctx, builder) = make_input_builder(None);
-        let out = project_scan_file_row(builder, None).unwrap();
+    fn assert_fcv_field_names(out: PlanBuilder, expected_fcv_fields: &[&str]) {
         let schema = out.schema().unwrap();
         let fields: Vec<_> = schema.fields().map(|f| f.name().clone()).collect();
         assert_eq!(
@@ -242,41 +230,31 @@ mod tests {
             panic!("fileConstantValues must be a struct");
         };
         let fcv_fields: Vec<_> = fcv.fields().map(|f| f.name().as_str()).collect();
-        assert_eq!(
-            fcv_fields,
-            [
-                "baseRowId",
-                "defaultRowCommitVersion",
-                "tags",
-                "clusteringProvider",
-            ],
-            "partitionValues Map slot must be dropped when no partitions",
-        );
+        assert_eq!(fcv_fields, expected_fcv_fields);
     }
 
-    /// With partitions: `fileConstantValues.partitionValues_parsed` is appended as a
-    /// passthrough column ref (not `map_to_struct`); the Map slot remains absent.
-    #[test]
-    fn project_scan_file_row_appends_partitions_parsed_when_some() {
-        let parts = arc_schema([StructField::nullable("p", DataType::STRING)]);
-        let (_ctx, builder) = make_input_builder(Some(&parts));
-        let out = project_scan_file_row(builder, Some(&parts)).unwrap();
-        let schema = out.schema().unwrap();
-        let DataType::Struct(fcv) = schema.field(FILE_CONSTANT_VALUES_NAME).unwrap().data_type()
-        else {
-            panic!("fileConstantValues must be a struct");
-        };
-        let fcv_fields: Vec<_> = fcv.fields().map(|f| f.name().as_str()).collect();
-        assert_eq!(
-            fcv_fields,
-            [
-                "baseRowId",
-                "defaultRowCommitVersion",
-                "tags",
-                "clusteringProvider",
-                "partitionValues_parsed",
-            ],
-            "partitions present => partitionValues_parsed appended; Map slot stays absent",
-        );
+    #[rstest::rstest]
+    #[case::no_partitions(
+        None,
+        &["baseRowId", "defaultRowCommitVersion", "tags", "clusteringProvider"],
+    )]
+    #[case::with_partitions(
+        Some(arc_schema([StructField::nullable("p", DataType::STRING)])),
+        &[
+            "baseRowId",
+            "defaultRowCommitVersion",
+            "tags",
+            "clusteringProvider",
+            "partitionValues_parsed",
+        ],
+    )]
+    fn project_scan_file_row_partitions(
+        #[case] parts: Option<SchemaRef>,
+        #[case] expected_fcv_fields: &[&str],
+    ) {
+        let parts_ref = parts.as_ref();
+        let (_ctx, builder) = make_input_builder(parts_ref);
+        let out = project_scan_file_row(builder, parts_ref).unwrap();
+        assert_fcv_field_names(out, expected_fcv_fields);
     }
 }

@@ -76,10 +76,7 @@ mod tests {
     #[test]
     fn kind_is_stable() {
         let r = MetadataProtocolReader::default();
-        assert_eq!(
-            crate::plans::kernel_reducers::KernelReducer::kind(&r),
-            KernelReducerKind::MetadataProtocol
-        );
+        assert_eq!(KernelReducer::kind(&r), KernelReducerKind::MetadataProtocol);
     }
 
     #[test]

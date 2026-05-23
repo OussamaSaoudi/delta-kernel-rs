@@ -1,11 +1,18 @@
+//! Object-store listing as a single-partition [`FileListingExec`] plan.
+//!
+//! Emits `(path, size, modification_time)` rows for every object under a prefix URL. Used by
+//! the compile path for `NodeKind::ListFiles`.
+
 use std::fmt;
 use std::sync::Arc;
 
 use datafusion_common::error::DataFusionError;
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::Result as DfResult;
 use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::equivalence::EquivalenceProperties;
+use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion_physical_plan::{
@@ -13,16 +20,21 @@ use datafusion_physical_plan::{
     SendableRecordBatchStream,
 };
 use delta_kernel::arrow::array::{Int64Array, RecordBatch, StringArray};
-use delta_kernel::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, SchemaRef};
+use delta_kernel::arrow::datatypes::{
+    DataType, Field as ArrowField, Schema as ArrowSchema, SchemaRef,
+};
 use delta_kernel::object_store::{self, ObjectMeta, ObjectStore};
 use futures::{Stream, StreamExt, TryStreamExt};
+use url::Url;
+
+use crate::error::wrap_delta_err;
 
 const BATCH_SIZE: usize = 1024;
 
 fn metas_to_batch(
     metas: &[ObjectMeta],
     schema: &SchemaRef,
-    base_url: &url::Url,
+    base_url: &Url,
 ) -> DfResult<RecordBatch> {
     let paths = StringArray::from_iter_values(metas.iter().map(|m| {
         let mut full = base_url.clone();
@@ -39,18 +51,20 @@ fn metas_to_batch(
     .map_err(Into::into)
 }
 
+/// Physical plan that lists object-store files under a prefix URL.
 pub struct FileListingExec {
-    path: url::Url,
+    path: Url,
     schema: SchemaRef,
     properties: Arc<PlanProperties>,
 }
 
 impl FileListingExec {
-    pub fn new(path: url::Url) -> Self {
+    /// Build a listing plan for `path` with the fixed `(path, size, modification_time)` schema.
+    pub fn new(path: Url) -> Self {
         let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("path", DataType::Utf8, false),
-            Field::new("size", DataType::Int64, false),
-            Field::new("modification_time", DataType::Int64, false),
+            ArrowField::new("path", DataType::Utf8, false),
+            ArrowField::new("size", DataType::Int64, false),
+            ArrowField::new("modification_time", DataType::Int64, false),
         ]));
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -99,11 +113,9 @@ impl ExecutionPlan for FileListingExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(
-            &dyn datafusion_physical_expr_common::physical_expr::PhysicalExpr,
-        ) -> DfResult<datafusion_common::tree_node::TreeNodeRecursion>,
-    ) -> DfResult<datafusion_common::tree_node::TreeNodeRecursion> {
-        Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+        _f: &mut dyn FnMut(&dyn PhysicalExpr) -> DfResult<TreeNodeRecursion>,
+    ) -> DfResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
@@ -148,7 +160,7 @@ fn listing_stream(
     store: Arc<dyn ObjectStore>,
     prefix: object_store::path::Path,
     schema: SchemaRef,
-    base_url: url::Url,
+    base_url: Url,
     sort: bool,
 ) -> std::pin::Pin<Box<dyn Stream<Item = DfResult<RecordBatch>> + Send>> {
     if sort {
@@ -157,7 +169,7 @@ fn listing_stream(
                 .list(Some(&prefix))
                 .try_collect()
                 .await
-                .map_err(crate::error::wrap_delta_err)?;
+                .map_err(wrap_delta_err)?;
             metas.sort_by(|a, b| a.location.cmp(&b.location));
             for chunk in metas.chunks(BATCH_SIZE) {
                 yield metas_to_batch(chunk, &schema, &base_url)?;
@@ -172,7 +184,7 @@ fn listing_stream(
                     let metas: Vec<ObjectMeta> = chunk
                         .into_iter()
                         .collect::<Result<_, _>>()
-                        .map_err(crate::error::wrap_delta_err)?;
+                        .map_err(wrap_delta_err)?;
                     metas_to_batch(&metas, &schema, &base_url)
                 }),
         )

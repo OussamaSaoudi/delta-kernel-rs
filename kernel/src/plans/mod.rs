@@ -5,12 +5,12 @@
 //! collect results) along with the state-machine framework that drives execution.
 //!
 //! Entry points:
-//! - [`crate::plans::ir::plan`] -- `Plan` / `PlanNode` / `NodeKind` / `Ref` and the terminal
-//!   `ResultPlan` the engine compiles to a single dataflow DAG.
-//! - [`crate::plans::state_machines::framework::plan_context`] -- the `Context` / `PlanBuilder` API
-//!   SM bodies use to construct plans.
-//! - [`crate::plans::state_machines::framework::coroutine`] -- coroutine-backed `StateMachine`
-//!   implementation.
+//! - [`ir::plan`][crate::plans::ir::plan] -- `Plan` / `PlanNode` / `NodeKind` / `Ref` and the
+//!   terminal `ResultPlan` the engine compiles to a single dataflow DAG.
+//! - [`state_machines::framework::plan_context`][crate::plans::state_machines::framework::plan_context] --
+//!   the `Context` / `PlanBuilder` API SM bodies use to construct plans.
+//! - [`state_machines::framework::coroutine`][crate::plans::state_machines::framework::coroutine]
+//!   -- coroutine-backed `StateMachine` implementation.
 //!
 //! # Feature gate
 //!
@@ -20,4 +20,5 @@
 pub mod errors;
 pub mod ir;
 pub mod kernel_reducers;
+pub mod schema_expr;
 pub mod state_machines;

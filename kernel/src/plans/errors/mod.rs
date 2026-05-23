@@ -1,7 +1,7 @@
 //! Typed error surface for the declarative plans layer.
 //!
 //! [`DeltaError`] is the error type used by state machines and the plan executor. It coexists
-//! with [`crate::Error`]; conversion at the boundary goes through the named bridges
+//! with [`Error`]; conversion at the boundary goes through the named bridges
 //! [`KernelErrAsDelta`] / [`DeltaErrAsKernel`] — deliberately no `From` impls, so the
 //! conversion sites are grep-able.
 //!
@@ -9,9 +9,9 @@
 //!
 //! Two macros:
 //!
-//! - [`crate::delta_error!`] — build a value. First arg is a [`DeltaErrorCode`], then an optional
-//!   `source = expr`, then an optional `format!`-style message.
-//! - [`crate::bail_delta!`] — early-return from an enclosing function.
+//! - `delta_error!` — build a value. First arg is a [`DeltaErrorCode`], then an optional `source =
+//!   expr`, then an optional `format!`-style message.
+//! - `bail_delta!` — early-return from an enclosing function.
 //!
 //! Plus [`DeltaResultExt::or_delta`] for attaching a code at a `?` site while preserving the
 //! underlying error in [`DeltaError::source`].
@@ -25,6 +25,8 @@
 //! ```
 
 use std::backtrace::Backtrace;
+
+use crate::Error;
 
 // ============================================================================
 // DeltaErrorCode — macro-driven declaration
@@ -48,7 +50,7 @@ macro_rules! delta_codes {
         /// Typed identifier for a Delta error.
         ///
         /// `#[repr(u32)]` pins the integer layout for FFI; `#[non_exhaustive]` reserves space
-        /// for future additions — downstream consumers must treat unknown integers as opaque.
+        /// for additional codes — downstream consumers must treat unknown integers as opaque.
         #[repr(u32)]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         #[non_exhaustive]
@@ -118,7 +120,7 @@ pub type BoxedSource = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub struct DeltaError {
     /// Stable typed identifier.
     pub code: DeltaErrorCode,
-    /// Pre-formatted message — built at construction time by [`crate::delta_error!`].
+    /// Pre-formatted message — built at construction time by `delta_error!`.
     pub message: String,
     /// Optional underlying error, forwarded via `std::error::Error::source()`.
     #[source]
@@ -146,14 +148,14 @@ impl DeltaError {
 // Bridges — kernel::Error <-> DeltaError
 // ============================================================================
 
-/// Lift a [`crate::Error`] into a [`DeltaError`] tagged with
-/// [`DeltaErrorCode::DeltaCommandInvariantViolation`]. Use when a more specific code isn't yet
+/// Lift an [`Error`] into a [`DeltaError`] tagged with
+/// [`DeltaErrorCode::DeltaCommandInvariantViolation`]. Use when a more specific code is not
 /// known; upgrading to a better `delta_error!(code, source = e, "...")` is a drop-in refactor.
 pub trait KernelErrAsDelta {
     fn into_delta_default(self) -> DeltaError;
 }
 
-impl KernelErrAsDelta for crate::Error {
+impl KernelErrAsDelta for Error {
     fn into_delta_default(self) -> DeltaError {
         let detail = self.to_string();
         crate::delta_error!(
@@ -164,16 +166,16 @@ impl KernelErrAsDelta for crate::Error {
     }
 }
 
-/// Wrap a [`DeltaError`] back into a [`crate::Error`] via [`crate::Error::GenericError`],
+/// Wrap a [`DeltaError`] back into an [`Error`] via [`Error::GenericError`],
 /// preserving code/message/source through `std::error::Error::source()`. Used at public-API
-/// boundaries whose outer signatures still return [`crate::DeltaResult`].
+/// boundaries whose outer signatures still return `DeltaResult`.
 pub trait DeltaErrAsKernel {
-    fn into_kernel_default(self) -> crate::Error;
+    fn into_kernel_default(self) -> Error;
 }
 
 impl DeltaErrAsKernel for DeltaError {
-    fn into_kernel_default(self) -> crate::Error {
-        crate::Error::GenericError {
+    fn into_kernel_default(self) -> Error {
+        Error::GenericError {
             source: Box::new(self),
         }
     }
@@ -185,7 +187,7 @@ impl DeltaErrAsKernel for DeltaError {
 
 /// Attach a [`DeltaErrorCode`] to any `Result<T, E>` where `E: std::error::Error`. The original
 /// error is preserved in [`DeltaError::source`], walkable via `std::error::Error::source()`.
-/// Use [`crate::delta_error!`] directly when you also need a custom message.
+/// Use `delta_error!` directly when you also need a custom message.
 pub trait DeltaResultExt<T> {
     fn or_delta(self, code: DeltaErrorCode) -> Result<T, DeltaError>;
 }

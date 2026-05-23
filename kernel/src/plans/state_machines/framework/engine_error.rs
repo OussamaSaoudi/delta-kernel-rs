@@ -2,16 +2,20 @@
 //!
 //! [`EngineError`] is **engine-facing**: the engine produces one when plan execution fails in a
 //! well-understood way; the kernel matches on [`EngineError::kind`] at SM level and translates
-//! to a typed [`DeltaError`](crate::plans::errors::DeltaError) via [`EngineError::into_delta`].
+//! to a typed [`DeltaError`] via [`EngineError::into_delta`].
 //! Kernel code MUST NOT gate control flow on the *text* of `message` fields inside variants:
 //! those strings are non-semantic and exist only for display.
+//!
+//! [`DeltaError`]: crate::plans::errors::DeltaError
+
+use std::error::Error;
 
 use crate::plans::errors::{BoxedSource, DeltaError, DeltaErrorCode};
-use crate::Version;
+use crate::{delta_error, Version};
 
 /// A structured error from executing a `Plan`. Pairs a typed [`EngineErrorKind`] (the semantic
 /// signal SMs match on) with an optional source chain forwarded through
-/// `std::error::Error::source()`.
+/// `Error::source()`.
 #[derive(Debug, thiserror::Error)]
 #[error("{kind}")]
 pub struct EngineError {
@@ -23,9 +27,9 @@ pub struct EngineError {
 
 /// Semantic tag of an [`EngineError`].
 ///
-/// Adding a new variant is the preferred way to express a new engine failure — string-matching
-/// on `message` fields is explicitly forbidden. `#[non_exhaustive]` reserves space for future
-/// variants.
+/// Adding a new variant is the preferred way to express a new engine failure -- string-matching
+/// on `message` fields is explicitly forbidden. `#[non_exhaustive]` reserves space for additional
+/// variants without breaking callers.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum EngineErrorKind {
@@ -38,7 +42,7 @@ pub enum EngineErrorKind {
     FileNotFound { path: String },
 
     /// A generic I/O failure that doesn't fit a more specific variant. `message` is
-    /// non-semantic — for display only.
+    /// non-semantic -- for display only.
     #[error("I/O error: {message}")]
     IoError { message: String },
 
@@ -67,7 +71,6 @@ impl EngineError {
     /// `to_string()` collapses to the static `"internal engine error"`. Use this method for
     /// any diagnostic detail derived from an `Internal`.
     pub fn display_with_source_chain(&self) -> String {
-        use std::error::Error;
         let mut out = self.kind.to_string();
         let mut cur: Option<&(dyn Error + 'static)> = self.source();
         while let Some(s) = cur {
@@ -80,15 +83,15 @@ impl EngineError {
 
     /// Construct an [`EngineErrorKind::Internal`] with the originating
     /// error attached as `source`. Use this whenever the engine has a
-    /// failure that doesn't fit a typed variant — kernel call sites
-    /// inspect `source` (via `std::error::Error::source()`) if they need
+    /// failure that doesn't fit a typed variant -- kernel call sites
+    /// inspect `source` (via `Error::source()`) if they need
     /// the underlying message or type.
     ///
     /// Adding a dedicated typed variant is preferred whenever a given
     /// cause starts recurring.
     pub fn internal<E>(err: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
+        E: Error + Send + Sync + 'static,
     {
         Self {
             kind: EngineErrorKind::Internal,
@@ -101,16 +104,16 @@ impl EngineError {
     /// The full engine source chain is preserved via `source =` on the resulting `DeltaError`,
     /// and the detail string is built with
     /// [`display_with_source_chain`](Self::display_with_source_chain) rather than
-    /// [`ToString::to_string`] — the latter would collapse [`EngineErrorKind::Internal`]
+    /// [`ToString::to_string`] -- the latter would collapse [`EngineErrorKind::Internal`]
     /// to the static string `"internal engine error"` and silently drop the underlying cause.
     ///
     /// SM bodies match on [`Self::kind`] and pick a semantically appropriate [`DeltaErrorCode`].
-    /// Bodies that don't (yet) discriminate by kind may pass
-    /// [`DeltaErrorCode::DeltaCommandInvariantViolation`] as a conservative default — or call
+    /// Bodies that do not discriminate by kind may pass
+    /// [`DeltaErrorCode::DeltaCommandInvariantViolation`] as a conservative default -- or call
     /// [`Self::into_delta_typed`] to get kind-based discrimination for free.
     pub fn into_delta(self, code: DeltaErrorCode) -> DeltaError {
         let detail = self.display_with_source_chain();
-        crate::delta_error!(code, source = self, "{detail}")
+        delta_error!(code, source = self, "{detail}")
     }
 
     /// Lift to a typed [`DeltaError`], picking the code from [`Self::kind`]. SM bodies that have
@@ -145,6 +148,9 @@ impl From<EngineErrorKind> for EngineError {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+    use std::io;
+
     use super::*;
 
     #[test]
@@ -157,7 +163,7 @@ mod tests {
 
     #[test]
     fn display_with_source_chain_renders_internal_payload() {
-        let err = EngineError::internal(std::io::Error::other(
+        let err = EngineError::internal(io::Error::other(
             "Non-Results plan failed: IllegalStateException: boom",
         ));
         let rendered = err.display_with_source_chain();
@@ -181,8 +187,7 @@ mod tests {
 
     #[test]
     fn internal_tags_kind_and_preserves_source() {
-        use std::error::Error;
-        let io = std::io::Error::other("boom");
+        let io = io::Error::other("boom");
         let err = EngineError::internal(io);
         assert_eq!(err.kind, EngineErrorKind::Internal);
         let src = err.source().expect("source preserved");

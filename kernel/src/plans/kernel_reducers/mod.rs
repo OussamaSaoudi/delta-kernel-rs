@@ -5,9 +5,10 @@
 //!
 //! The IR exposes one KDF shape: [`KernelReducer`], an observer over batches
 //! returning `Continue` / `Break`. It's wired into a plan via
-//! [`EngineRequest::Reduce`](crate::plans::state_machines::framework::step::EngineRequest::Reduce);
-//! the reducer drains the terminal row stream and accumulates finalized state for the engine
-//! to harvest.
+//! [`EngineRequest::Reduce`]; the reducer drains the terminal row stream and accumulates
+//! finalized state for the engine to harvest.
+//!
+//! [`EngineRequest::Reduce`]: crate::plans::state_machines::framework::state_machine::EngineRequest::Reduce
 //!
 //! KDFs dispatch in-process and never cross a serialization boundary.
 //!

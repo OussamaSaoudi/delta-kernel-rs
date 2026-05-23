@@ -15,9 +15,8 @@
 //!
 //! # Construction
 //!
-//! Plans are built by the
-//! [`Context`](crate::plans::state_machines::framework::plan_context::Context), which owns the
-//! in-flight [`Plan`] and mints fresh Refs as nodes are appended. [`Plan`] itself is a pure
+//! Plans are built by the [`Context`], which owns the in-flight [`Plan`] and mints fresh Refs
+//! as nodes are appended. [`Plan`] itself is a pure
 //! data container; the engine receives a fully-built plan and treats it as read-only.
 //!
 //! # Dead-code elimination
@@ -34,6 +33,8 @@ use super::nodes::{
     EquiJoinNode, FilterNode, ListFilesNode, LoadNode, MaxByVersionNode, ProjectNode, ScanJsonNode,
     ScanParquetNode, UnionNode, ValuesNode,
 };
+#[allow(unused_imports)]
+use crate::plans::state_machines::framework::plan_context::Context;
 
 // ============================================================================
 // Refs and plan nodes
@@ -41,8 +42,7 @@ use super::nodes::{
 
 /// Plan-scoped opaque identifier for a node's output value.
 ///
-/// Refs are minted sequentially by the
-/// [`Context`](crate::plans::state_machines::framework::plan_context::Context) starting from `0`.
+/// Refs are minted sequentially by the [`Context`] starting from `0`.
 /// Engines must treat Refs as opaque keys: their numeric value is implementation-defined
 /// and gaps are allowed (e.g. after [`Plan::reachable_from`] prunes nodes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -51,7 +51,7 @@ pub struct Ref(pub u32);
 /// One node in a plan: an operator kind, its input Refs, and its output Ref.
 ///
 /// `inputs` order matters and is documented per [`NodeKind`] variant (e.g. for
-/// [`NodeKind::EquiJoin`] the convention is `[left, right]`; for [`NodeKind::Union`]
+/// `NodeKind::EquiJoin` the convention is `[left, right]`; for `NodeKind::Union`
 /// inputs are concatenated in order).
 #[derive(Debug, Clone)]
 pub struct PlanNode {
@@ -66,9 +66,8 @@ pub struct PlanNode {
 
 /// Ordered nodes forming a DAG via input/output Refs.
 ///
-/// `Plan` is a pure data container. The
-/// [`Context`](crate::plans::state_machines::framework::plan_context::Context) is the sole
-/// authority that builds plans and mints Refs; the engine receives the assembled plan and
+/// `Plan` is a pure data container. The [`Context`] is the sole authority that builds plans
+/// and mints Refs; the engine receives the assembled plan and
 /// compiles it bottom-up via topological walk over the `inputs` edges.
 #[derive(Debug, Clone, Default)]
 pub struct Plan {

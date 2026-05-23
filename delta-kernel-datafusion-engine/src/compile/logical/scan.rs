@@ -1,6 +1,8 @@
-//! Lowering for [`NodeKind::ScanParquet`](delta_kernel::plans::ir::plan::NodeKind::ScanParquet)
-//! and [`NodeKind::ScanJson`](delta_kernel::plans::ir::plan::NodeKind::ScanJson) plus row-index
-//! plumbing helpers shared with [`super::ordered_union`].
+//! Lowering for [`NodeKind::ScanParquet`] and [`NodeKind::ScanJson`] plus row-index plumbing
+//! helpers shared with [`super::ordered_union`].
+//!
+//! [`NodeKind::ScanParquet`]: delta_kernel::plans::ir::plan::NodeKind::ScanParquet
+//! [`NodeKind::ScanJson`]: delta_kernel::plans::ir::plan::NodeKind::ScanJson
 
 use std::sync::Arc;
 
@@ -88,16 +90,11 @@ fn build_listing(
     let options = ListingOptions::new(format)
         .with_file_extension(file_extension)
         .with_table_partition_cols(partition_cols)
-        // Match the upstream `collect_statistics` default (apache/datafusion PR #16080).
-        // DataFusion's own stats collector (`statistics_from_parquet_metadata`) looks
-        // columns up by name on the logical file schema: when a logical
-        // name doesn't exist physically (column-mapping rename, Parquet
-        // field-ID matching), it stamps the column as `null_count ==
-        // num_rows`, and `constant_columns_from_stats` then rewrites the
-        // projection's column reference into `Literal::NULL` BEFORE the field-id root
-        // rename (see `field_id_projection.rs` in the fork) can take
-        // effect. Kernel does its own file-level skipping, so the DF stats
-        // path is redundant here.
+        // Disable DataFusion file statistics collection. The logical file schema may use
+        // column-mapping names that do not exist physically; DataFusion's stats collector
+        // then marks those columns all-null and constant-folds them to `Literal::NULL` before
+        // field-id projection can run. Kernel does its own file-level skipping, so this path
+        // is redundant here.
         .with_collect_stat(false)
         .with_target_partitions(1);
     let paths = files

@@ -2,14 +2,13 @@
 //!
 //! [`Context`] owns the in-flight plan and a per-Ref schema table. [`PlanBuilder`] is a
 //! shared handle to a specific [`Ref`] in that program; builder methods append new
-//! [`PlanNode`]s and return new [`PlanBuilder`]s threading the freshly minted Refs. Cursors are
+//! `PlanNode`s and return new [`PlanBuilder`]s threading the freshly minted Refs. Cursors are
 //! [`Clone`] (cheap `Rc` clone) so branching is explicit.
 //!
 //! State is shared via `Rc<RefCell<ContextState>>` so transform methods can mutate without
 //! requiring `&mut Context`. SMs are CPU-only sequencers and never need to cross thread
 //! boundaries, so `Rc` (vs. `Arc`) is the right shape. See the
-//! [`CoroutineSM`](crate::plans::state_machines::framework::coroutine::driver::CoroutineSM) module
-//! docs for the `!Send` rationale.
+//! `CoroutineSM` module docs for the `!Send` rationale.
 //!
 //! # Stale-builder protection
 //!
@@ -25,10 +24,12 @@
 //! across an await would panic at runtime; this is structurally avoided by every method
 //! in this module.
 //!
+//! [`CoroutineSM`]: crate::plans::state_machines::framework::coroutine::CoroutineSM
 //! [`PlanNode`]: crate::plans::ir::plan::PlanNode
 //! [`Ref`]: crate::plans::ir::plan::Ref
 
 use std::cell::RefCell;
+use std::mem;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -37,35 +38,38 @@ use url::Url;
 use crate::expressions::{
     ColumnName, Expression, ExpressionRef, IntoColumnName, PredicateRef, Scalar,
 };
-use crate::plans::errors::{DeltaError, DeltaErrorCode, DeltaResultExt};
+use crate::plans::errors::{DeltaError, DeltaErrorCode};
 use crate::plans::ir::nodes::{
-    DvRef, EquiJoinNode, FileType, FilterNode, ListFilesNode, LoadNode, MaxByVersionNode,
-    ProjectNode, ReduceSink, ScanFileColumns, ScanJsonNode, ScanParquetNode, UnionNode, ValuesNode,
+    EquiJoinNode, FilterNode, ListFilesNode, LoadNode, MaxByVersionNode, ProjectNode, ReduceSink,
+    ScanJsonNode, ScanParquetNode, UnionNode, ValuesNode,
 };
 use crate::plans::ir::plan::{JoinKind, NodeKind, Plan, PlanNode, Ref, ResultPlan};
-use crate::plans::ir::schema_inference::infer_expression_type;
 use crate::plans::kernel_reducers::{Extractor, KernelReducer, KernelReducerOutput};
-use crate::plans::state_machines::framework::coroutine::context::{Engine, StepResume, StepYield};
-use crate::plans::state_machines::framework::step::{EngineRequest, SchemaQuery};
-use crate::plans::state_machines::framework::step_payload::EngineResponse;
-use crate::schema::{DataType, SchemaRef, StructField, StructType};
-use crate::{delta_error, Error, FileMeta};
+use crate::plans::schema_expr::check::{check_column_refs, check_expression};
+use crate::plans::schema_expr::field_op::{
+    arc_struct_or_invariant, compile_field_op, identity_named_expr, load_output_schema, FieldOp,
+};
+use crate::plans::state_machines::framework::coroutine::{Engine, StepResume, StepYield};
+use crate::plans::state_machines::framework::state_machine::{
+    EngineRequest, EngineResponse, SchemaQuery,
+};
+use crate::schema::{SchemaRef, StructField};
+use crate::{delta_error, FileMeta};
 
 // ============================================================================
 // Shared state
 // ============================================================================
 
-/// In-flight plan being built, the per-Ref schema table, the Ref counter, and a
-/// session counter.
-#[derive(Debug)]
+/// In-flight plan being built, the per-Ref schema table, and a session counter.
+///
+/// Ref ids are derived directly from `plan.stmts.len()` at push time: each node's
+/// output Ref equals its index in `stmts`, so the counter and the vector length are
+/// always in lockstep. No separate `next_ref` field is needed.
+#[derive(Debug, Default)]
 struct ContextState {
     plan: Plan,
-    /// Per-Ref output schemas. Indexed by `Ref.0` during construction (Refs are
-    /// minted sequentially by `mint_ref`).
+    /// Per-Ref output schemas. `ref_schemas[i]` is the output schema of `plan.stmts[i]`.
     ref_schemas: Vec<SchemaRef>,
-    /// Next Ref id to mint. Owned by Context (not Plan) so the IR stays a pure
-    /// data container. Reset to 0 by `reduce` when the in-flight plan is taken.
-    next_ref: u32,
     /// Bumped by dispatch methods to invalidate cursors held across yields.
     session_id: u32,
 }
@@ -74,8 +78,7 @@ impl ContextState {
     /// Append a node to the in-flight plan, mint its output Ref, and record
     /// `schema` for the new Ref.
     fn push_node(&mut self, kind: NodeKind, inputs: Vec<Ref>, schema: SchemaRef) -> Ref {
-        let output = Ref(self.next_ref);
-        self.next_ref += 1;
+        let output = Ref(self.plan.stmts.len() as u32);
         self.plan.stmts.push(PlanNode {
             kind,
             inputs,
@@ -84,6 +87,36 @@ impl ContextState {
         self.ref_schemas.push(schema);
         debug_assert_eq!(self.ref_schemas.len(), self.plan.stmts.len());
         output
+    }
+
+    /// Validates that `builder` was minted in the current session (not stale across dispatch).
+    fn ensure_fresh(&self, builder: &PlanBuilder) -> Result<(), DeltaError> {
+        if self.session_id != builder.session_id {
+            return Err(delta_error!(
+                DeltaErrorCode::DeltaCommandInvariantViolation,
+                "stale builder: builder session={cs} expected {ss}",
+                cs = builder.session_id,
+                ss = self.session_id,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Bump the session counter, invalidating any `PlanBuilder` minted before this
+    /// call. Cursors held across the next [`Self::ensure_fresh`] will error. Called
+    /// at every dispatch boundary.
+    fn invalidate_cursors(&mut self) {
+        self.session_id = self.session_id.wrapping_add(1);
+    }
+
+    /// Drain the in-flight plan for shipment to the engine. Empties the per-Ref
+    /// schema table and invalidates cursors (so the Refs in the returned plan, which
+    /// restart from 0 on the next push, can't collide with any stale handle). The
+    /// caller pipes the returned plan through DCE before yielding it.
+    fn take_plan_for_dispatch(&mut self) -> Plan {
+        self.ref_schemas.clear();
+        self.invalidate_cursors();
+        mem::take(&mut self.plan)
     }
 }
 
@@ -96,30 +129,27 @@ impl ContextState {
 /// Source methods mint root [`PlanBuilder`]s, dispatch methods
 /// ([`Self::reduce`] / [`Self::schema_query`]) yield steps through a coroutine, and
 /// [`Self::into_result_plan`] is the terminal sync drain (backward-reachability DCE).
+#[derive(Default)]
 pub struct Context {
     state: Rc<RefCell<ContextState>>,
 }
 
-impl Default for Context {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Context {
-    /// Construct a fresh context with an empty plan.
+    /// Construct a fresh context with an empty plan. Equivalent to
+    /// [`Context::default()`]; provided for idiomatic call-site phrasing.
     pub fn new() -> Self {
-        Self {
-            state: Rc::new(RefCell::new(ContextState {
-                plan: Plan::new(),
-                ref_schemas: Vec::new(),
-                next_ref: 0,
-                session_id: 0,
-            })),
-        }
+        Self::default()
     }
 
-    /// Append a [`NodeKind::ListFiles`] source. Output schema is the engine-canonical listing
+    /// Append a source node with no inputs and return a handle to its output Ref.
+    fn push_source(&self, kind: NodeKind, schema: SchemaRef) -> Result<PlanBuilder, DeltaError> {
+        let state = &self.state;
+        let mut s = state.borrow_mut();
+        let r = s.push_node(kind, vec![], schema);
+        Ok(PlanBuilder::new(state, r, s.session_id))
+    }
+
+    /// Append a `NodeKind::ListFiles` source. Output schema is the engine-canonical listing
     /// shape supplied by the caller (the kernel does not pin it; consumers wire to the
     /// engine's listing schema).
     pub fn list_files(
@@ -127,58 +157,56 @@ impl Context {
         start_from: Url,
         listing_schema: SchemaRef,
     ) -> Result<PlanBuilder, DeltaError> {
-        push_node(
-            &self.state,
+        self.push_source(
             NodeKind::ListFiles(ListFilesNode { start_from }),
-            &[],
             listing_schema,
         )
     }
 
-    /// Append a [`NodeKind::ScanParquet`] source over Parquet `files`. Output schema
+    /// Append a `NodeKind::ScanParquet` source over Parquet `files`. Output schema
     /// is the caller-declared `schema`.
     pub fn scan_parquet(
         &self,
         files: Vec<FileMeta>,
         schema: SchemaRef,
     ) -> Result<PlanBuilder, DeltaError> {
-        let s = Arc::clone(&schema);
-        push_node(
-            &self.state,
-            NodeKind::ScanParquet(ScanParquetNode { files, schema }),
-            &[],
-            s,
+        self.push_source(
+            NodeKind::ScanParquet(ScanParquetNode {
+                files,
+                schema: Arc::clone(&schema),
+            }),
+            schema,
         )
     }
 
-    /// Append a [`NodeKind::ScanJson`] source over newline-delimited JSON `files`. Output
+    /// Append a `NodeKind::ScanJson` source over newline-delimited JSON `files`. Output
     /// schema is the caller-declared `schema`.
     pub fn scan_json(
         &self,
         files: Vec<FileMeta>,
         schema: SchemaRef,
     ) -> Result<PlanBuilder, DeltaError> {
-        let s = Arc::clone(&schema);
-        push_node(
-            &self.state,
-            NodeKind::ScanJson(ScanJsonNode { files, schema }),
-            &[],
-            s,
+        self.push_source(
+            NodeKind::ScanJson(ScanJsonNode {
+                files,
+                schema: Arc::clone(&schema),
+            }),
+            schema,
         )
     }
 
-    /// Append a [`NodeKind::Values`] source.
+    /// Append a `NodeKind::Values` source.
     pub fn values(
         &self,
         schema: SchemaRef,
         rows: Vec<Vec<Scalar>>,
     ) -> Result<PlanBuilder, DeltaError> {
-        let s = Arc::clone(&schema);
-        push_node(
-            &self.state,
-            NodeKind::Values(ValuesNode { schema, rows }),
-            &[],
-            s,
+        self.push_source(
+            NodeKind::Values(ValuesNode {
+                schema: Arc::clone(&schema),
+                rows,
+            }),
+            schema,
         )
     }
 
@@ -191,8 +219,7 @@ impl Context {
     /// boundary fail at runtime.
     ///
     /// Borrows the shared state only briefly (mutation + drain) and drops the borrow
-    /// before the awaited yield, so the await never holds a [`RefMut`](std::cell::RefMut).
-    // Currently exercised only by tests; PR6 wires it into FSR.
+    /// before the awaited yield, so the await never holds a `RefMut`.
     #[allow(dead_code)]
     pub(crate) async fn reduce<S>(
         &self,
@@ -207,18 +234,10 @@ impl Context {
         let sink = ReduceSink::new_reducer(reducer);
         let extractor = Extractor::for_reducer::<S>(sink.token.clone());
         let terminal = builder.ref_id;
-        let stmts: Vec<crate::plans::ir::plan::PlanNode> = {
+        let stmts: Vec<PlanNode> = {
             let mut s = self.state.borrow_mut();
-            ensure_fresh(&s, &builder)?;
-            let plan = std::mem::take(&mut s.plan);
-            s.ref_schemas.clear();
-            // Reset the Ref counter alongside the plan/schema reset: no Refs
-            // survive the reduce boundary (the plan ships to the engine and the
-            // session id bump invalidates any held PlanBuilders), so restarting
-            // from 0 is safe and keeps subsequent Refs compact.
-            s.next_ref = 0;
-            s.session_id = s.session_id.wrapping_add(1);
-            plan.reachable_from(terminal).stmts
+            s.ensure_fresh(&builder)?;
+            s.take_plan_for_dispatch().reachable_from(terminal).stmts
         };
         // Drop the builder handle so the only remaining Rc on `state` is `self`'s.
         drop(builder);
@@ -250,7 +269,6 @@ impl Context {
     /// The accumulator is preserved -- callers typically use the returned schema to
     /// build fresh sources, and old refs become unreachable from new cursors (the next
     /// `reduce`'s DCE prunes them).
-    // Currently exercised only by tests; PR6 wires it into FSR.
     #[allow(dead_code)]
     pub(crate) async fn schema_query(
         &self,
@@ -258,10 +276,7 @@ impl Context {
         path: impl Into<String>,
         step_name: &'static str,
     ) -> Result<SchemaRef, DeltaError> {
-        {
-            let mut s = self.state.borrow_mut();
-            s.session_id = s.session_id.wrapping_add(1);
-        }
+        self.state.borrow_mut().invalidate_cursors();
         let StepResume(result) = engine
             .yield_(StepYield {
                 operation: EngineRequest::SchemaQuery(SchemaQuery::new(path.into())),
@@ -290,7 +305,7 @@ impl Context {
         // Validate session before tearing down. Drop the borrow before `Rc::try_unwrap`.
         {
             let s = self.state.borrow();
-            ensure_fresh(&s, &builder)?;
+            s.ensure_fresh(&builder)?;
         }
         // Drop the builder's Rc handle so try_unwrap can succeed.
         drop(builder.state);
@@ -343,7 +358,7 @@ impl PlanBuilder {
     /// Returns an error if the builder is stale.
     pub fn schema(&self) -> Result<SchemaRef, DeltaError> {
         let state = self.state.borrow();
-        ensure_fresh(&state, self)?;
+        state.ensure_fresh(self)?;
         state
             .ref_schemas
             .get(self.ref_id.0 as usize)
@@ -357,31 +372,76 @@ impl PlanBuilder {
             })
     }
 
-    // === Filter / Project ====================================================
+    /// Validates that `other` shares the same underlying context state.
+    fn ensure_same_context(&self, other: &PlanBuilder) -> Result<(), DeltaError> {
+        if !Rc::ptr_eq(&self.state, &other.state) {
+            return Err(delta_error!(
+                DeltaErrorCode::DeltaCommandInvariantViolation,
+                "builder from a different context cannot be combined",
+            ));
+        }
+        Ok(())
+    }
 
-    /// Append a [`NodeKind::Filter`]. Output schema is unchanged.
-    pub fn filter(self, predicate: impl Into<PredicateRef>) -> Result<Self, DeltaError> {
-        let predicate = predicate.into();
-        let schema = self.schema()?;
-        push_node(
-            &self.state,
-            NodeKind::Filter(FilterNode { predicate }),
-            &[&self],
-            schema,
+    /// Append a unary node (`self` as sole input) and return a handle to its output Ref.
+    fn push_unary(self, kind: NodeKind, schema: SchemaRef) -> Result<Self, DeltaError> {
+        self.push_nary(kind, &[], schema)
+    }
+
+    /// Append an n-ary node over `self` and `others`, returning a handle to its output Ref.
+    fn push_nary(
+        self,
+        kind: NodeKind,
+        others: &[&PlanBuilder],
+        schema: SchemaRef,
+    ) -> Result<Self, DeltaError> {
+        let state = &self.state;
+        for other in others {
+            self.ensure_same_context(other)?;
+        }
+        let mut s = state.borrow_mut();
+        s.ensure_fresh(&self)?;
+        for other in others {
+            s.ensure_fresh(other)?;
+        }
+        let mut input_refs = vec![self.ref_id];
+        input_refs.extend(others.iter().map(|b| b.ref_id));
+        let r = s.push_node(kind, input_refs, schema);
+        Ok(PlanBuilder::new(state, r, s.session_id))
+    }
+
+    /// Apply a nested field edit and append the resulting projection node. The parent
+    /// path is derived from `op` itself ([`FieldOp::parent_path`]).
+    fn apply_field_op(self, op: FieldOp) -> Result<Self, DeltaError> {
+        let input_schema = self.schema()?;
+        let (output_schema, named_exprs) = compile_field_op(&input_schema, &op)?;
+        self.push_unary(
+            NodeKind::Project(ProjectNode {
+                named_exprs,
+                output_schema: Arc::clone(&output_schema),
+            }),
+            output_schema,
         )
     }
 
-    /// Append a [`NodeKind::Project`] with inferred output schema.
+    // === Filter / Project ====================================================
+
+    /// Append a `NodeKind::Filter`. Output schema is unchanged.
+    pub fn filter(self, predicate: impl Into<PredicateRef>) -> Result<Self, DeltaError> {
+        let predicate = predicate.into();
+        let schema = self.schema()?;
+        self.push_unary(NodeKind::Filter(FilterNode { predicate }), schema)
+    }
+
+    /// Append a `NodeKind::Project` with inferred output schema.
     ///
     /// Each pair becomes one output field `(name, infer_type(expr))`. Inference is
     /// narrow -- unsupported expressions error out and direct callers to
     /// [`Self::project_with_schema`].
-    pub fn project<I, K, V>(self, named_exprs: I) -> Result<Self, DeltaError>
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<ExpressionRef>,
-    {
+    pub fn project(
+        self,
+        named_exprs: impl IntoIterator<Item = (impl Into<String>, impl Into<ExpressionRef>)>,
+    ) -> Result<Self, DeltaError> {
         let input_schema = self.schema()?;
         let pairs: Vec<(String, Arc<Expression>)> = named_exprs
             .into_iter()
@@ -389,30 +449,30 @@ impl PlanBuilder {
             .collect();
         let mut fields = Vec::with_capacity(pairs.len());
         for (name, expr) in &pairs {
-            let ty = infer_expression_type(expr.as_ref(), &input_schema)?;
+            let ty = check_expression(expr.as_ref(), &input_schema, None)?;
             fields.push(StructField::nullable(name.clone(), ty));
         }
         let output_schema: SchemaRef = arc_struct_or_invariant(fields)?;
-        push_node(
-            &self.state,
+        self.push_unary(
             NodeKind::Project(ProjectNode {
                 named_exprs: pairs,
                 output_schema: Arc::clone(&output_schema),
             }),
-            &[&self],
             output_schema,
         )
     }
 
-    /// Append a [`NodeKind::Project`] with caller-supplied output schema. Positional:
-    /// `exprs[i]` becomes `schema.fields()[i]`. No type inference -- the schema declares
-    /// names and types directly. Use when both lists are produced together (e.g. physical
-    /// to logical column mapping).
-    pub fn project_with_schema<I, E>(self, exprs: I, schema: SchemaRef) -> Result<Self, DeltaError>
-    where
-        I: IntoIterator<Item = E>,
-        E: Into<ExpressionRef>,
-    {
+    /// Append a `NodeKind::Project` with caller-supplied output schema. Positional:
+    /// `exprs[i]` becomes `schema.fields()[i]`. Each expression's column references
+    /// are validated against the input schema via `schema_expr::check::check_column_refs`;
+    /// no type check is performed because callers routinely use this method to rename
+    /// fields (e.g. column-mapping physical -> logical), where output field names
+    /// differ from any inferrable type the expression could produce.
+    pub fn project_with_schema(
+        self,
+        exprs: impl IntoIterator<Item = impl Into<ExpressionRef>>,
+        schema: SchemaRef,
+    ) -> Result<Self, DeltaError> {
         let exprs: Vec<ExpressionRef> = exprs.into_iter().map(Into::into).collect();
         let field_count = schema.fields().count();
         if exprs.len() != field_count {
@@ -422,18 +482,20 @@ impl PlanBuilder {
                 got = exprs.len(),
             ));
         }
+        let input_schema = self.schema()?;
+        for expr in &exprs {
+            check_column_refs(expr.as_ref(), &input_schema)?;
+        }
         let pairs: Vec<(String, Arc<Expression>)> = schema
             .fields()
             .map(|f| f.name().clone())
             .zip(exprs)
             .collect();
-        push_node(
-            &self.state,
+        self.push_unary(
             NodeKind::Project(ProjectNode {
                 named_exprs: pairs,
                 output_schema: Arc::clone(&schema),
             }),
-            &[&self],
             schema,
         )
     }
@@ -441,67 +503,46 @@ impl PlanBuilder {
     // === Schema-edit sugar (over project) ====================================
 
     /// Identity-by-name projection: every field in `schema` becomes `col(name)` against
-    /// the input. Validates that each name exists in the input and that types match.
+    /// the input. Each `col(name)` is bidirectionally checked against the input schema
+    /// with the corresponding target field's type as the expected output (see
+    /// `schema_expr::check::check_expression`).
     pub fn select(self, schema: SchemaRef) -> Result<Self, DeltaError> {
         let input_schema = self.schema()?;
         let pairs: Vec<(String, ExpressionRef)> = schema
             .fields()
             .map(|f| {
                 let name = f.name();
-                let input_field = input_schema.field(name).ok_or_else(|| {
-                    delta_error!(
-                        DeltaErrorCode::DeltaCommandInvariantViolation,
-                        "select: field {name:?} not present in input schema",
-                    )
-                })?;
-                if input_field.data_type() != f.data_type() {
-                    return Err(delta_error!(
-                        DeltaErrorCode::DeltaCommandInvariantViolation,
-                        "select: field {name:?} type mismatch -- input {input:?} vs target {target:?}",
-                        input = input_field.data_type(),
-                        target = f.data_type(),
-                    ));
-                }
-                Ok(identity_named_expr(name.clone()))
+                let expr = identity_named_expr(name.clone());
+                check_expression(expr.1.as_ref(), &input_schema, Some(f.data_type()))?;
+                Ok(expr)
             })
             .collect::<Result<_, DeltaError>>()?;
-        push_node(
-            &self.state,
+        self.push_unary(
             NodeKind::Project(ProjectNode {
                 named_exprs: pairs,
                 output_schema: Arc::clone(&schema),
             }),
-            &[&self],
             schema,
         )
     }
 
-    /// Append a caller-typed `(field, expr)` after the existing fields. Use when the
-    /// expression's output type can't be derived by [narrow
-    /// inference](crate::plans::ir::schema_inference) (e.g. a `CaseWhen` returning an
-    /// `Array`, where inference returns an error and forces the caller into
-    /// [`Self::project_with_schema`]). The supplied [`StructField`] declares both the
-    /// new column's name and its full nullability + data type.
+    /// Append a caller-typed `(field, expr)` after the existing fields. The supplied
+    /// [`StructField`] declares both the new column's name and its full nullability +
+    /// data type. The expression is bidirectionally checked against the input schema
+    /// with `field.data_type()` as the expected output -- see
+    /// `schema_expr::check::check_expression` for the supported rules (including
+    /// `MapToStruct` and `Struct`, which require an expected type from context).
     pub fn append_col_typed(
         self,
         field: StructField,
         expr: impl Into<ExpressionRef>,
     ) -> Result<Self, DeltaError> {
-        let input_schema = self.schema()?;
-        let mut named_exprs = identity_named_exprs(&input_schema);
-        let mut fields: Vec<StructField> = input_schema.fields().cloned().collect();
-        named_exprs.push((field.name().clone(), expr.into()));
-        fields.push(field);
-        let output_schema: SchemaRef = arc_struct_or_invariant(fields)?;
-        push_node(
-            &self.state,
-            NodeKind::Project(ProjectNode {
-                named_exprs,
-                output_schema: Arc::clone(&output_schema),
-            }),
-            &[&self],
-            output_schema,
-        )
+        self.apply_field_op(FieldOp::insert_after(
+            ColumnName::default(),
+            None,
+            field,
+            expr.into(),
+        ))
     }
 
     /// Insert `leaf` immediately after `sibling`'s position in its parent struct.
@@ -510,23 +551,26 @@ impl PlanBuilder {
     /// `leaf.name()` is the new column's name. Errors if `sibling` doesn't resolve, if
     /// the parent isn't a struct, or if `leaf.name()` collides with an existing sibling.
     /// `sibling` accepts any [`IntoColumnName`] value -- a `&str` for top-level fields,
-    /// a tuple/array or [`column_name!`](crate::column_name) macro for nested paths.
+    /// a tuple/array or `column_name!` macro for nested paths.
     pub fn insert_col_after(
         self,
         sibling: impl IntoColumnName,
         leaf: StructField,
         expr: impl Into<ExpressionRef>,
     ) -> Result<Self, DeltaError> {
-        let path = sibling.into_column_name();
-        let expr = expr.into();
-        let schema = self.schema()?;
-        let (parent_path, sibling_leaf) = split_parent_leaf(&path, "insert_col_after")?;
-        let op = FieldOp::InsertAfter {
-            sibling_leaf,
-            new_field: leaf,
-            new_expr: expr,
-        };
-        apply_field_op(self, &schema, parent_path, op)
+        let sibling = sibling.into_column_name();
+        let (sibling_leaf, parent_components) = sibling.path().split_last().ok_or_else(|| {
+            delta_error!(
+                DeltaErrorCode::DeltaCommandInvariantViolation,
+                "insert_col_after: sibling path is empty",
+            )
+        })?;
+        self.apply_field_op(FieldOp::insert_after(
+            ColumnName::new(parent_components),
+            Some(sibling_leaf.clone()),
+            leaf,
+            expr.into(),
+        ))
     }
 
     /// Replace the field at `path` with `new_field` (allowing rename + retype) and
@@ -542,113 +586,54 @@ impl PlanBuilder {
         new_field: StructField,
         new_expr: impl Into<ExpressionRef>,
     ) -> Result<Self, DeltaError> {
-        let path = path.into_column_name();
-        let new_expr = new_expr.into();
-        let schema = self.schema()?;
-        let (parent_path, target_leaf) = split_parent_leaf(&path, "replace_col")?;
-        let op = FieldOp::Replace {
-            target_leaf,
+        self.apply_field_op(FieldOp::replace(
+            path.into_column_name(),
             new_field,
-            new_expr,
-        };
-        apply_field_op(self, &schema, parent_path, op)
+            new_expr.into(),
+        )?)
     }
 
     /// Remove the field at `path` from its parent struct.
     ///
     /// Errors if `path` doesn't resolve or if its parent isn't a struct. `path` accepts
     /// any [`IntoColumnName`] value -- a `&str` for top-level fields, a tuple/array or
-    /// [`column_name!`](crate::column_name) macro for nested paths.
+    /// `column_name!` macro for nested paths.
     pub fn drop_col(self, path: impl IntoColumnName) -> Result<Self, DeltaError> {
-        let path = path.into_column_name();
-        let schema = self.schema()?;
-        let (parent_path, target_leaf) = split_parent_leaf(&path, "drop_col")?;
-        let op = FieldOp::Drop { target_leaf };
-        apply_field_op(self, &schema, parent_path, op)
+        self.apply_field_op(FieldOp::drop_(path.into_column_name())?)
     }
 
     // === Load / aggregate / join / union =====================================
 
-    /// File-reader transform. Output schema is `spec.file_schema` plus a field per
+    /// File-reader transform. Output schema is `node.file_schema` plus a field per
     /// `passthrough_columns` entry (each field's type is taken from the input schema).
-    pub fn load(self, spec: LoadSpec) -> Result<Self, DeltaError> {
+    /// Computation is shared with the datafusion lowering path via
+    /// `schema_expr::field_op::load_output_schema`.
+    pub fn load(self, node: LoadNode) -> Result<Self, DeltaError> {
         let input_schema = self.schema()?;
-        let mut fields: Vec<StructField> = spec.file_schema.fields().cloned().collect();
-        for col in &spec.passthrough_columns {
-            let path = col.path();
-            let leaf_name = path
-                .last()
-                .ok_or_else(|| {
-                    delta_error!(
-                        DeltaErrorCode::DeltaCommandInvariantViolation,
-                        "load: passthrough column path is empty",
-                    )
-                })?
-                .clone();
-            let walk = input_schema
-                .walk_column_fields(col)
-                .or_delta(DeltaErrorCode::DeltaCommandInvariantViolation)?;
-            let leaf = walk.last().ok_or_else(|| {
-                delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    "load: passthrough column resolved to empty path",
-                )
-            })?;
-            fields.push(StructField::nullable(leaf_name, leaf.data_type().clone()));
-        }
-        let output_schema = arc_struct_or_invariant(fields)?;
-        let LoadSpec {
-            file_schema,
-            file_type,
-            base_url,
-            passthrough_columns,
-            file_meta,
-            dv_ref,
-        } = spec;
-        push_node(
-            &self.state,
-            NodeKind::Load(LoadNode {
-                file_schema,
-                file_type,
-                base_url,
-                passthrough_columns,
-                file_meta,
-                dv_ref,
-            }),
-            &[&self],
-            output_schema,
-        )
+        let output_schema =
+            load_output_schema(&node.file_schema, &node.passthrough_columns, &input_schema)?;
+        self.push_unary(NodeKind::Load(node), output_schema)
     }
 
     /// Top-1-per-group aggregate ordered by `version` descending. The group-by expressions
     /// and the version column are aggregation-internal: the output projects only the
     /// listed `value_columns`, lifted from the input schema in declared order.
     ///
-    /// The validator ensures every name in `value_columns` resolves in the input. Group-by
-    /// expression types are inferred (and must therefore be supported by
-    /// [`infer_expression_type`]) but do not contribute fields to the output -- they are
-    /// validated for the lowering's benefit only.
-    pub fn max_by_version<G, V, C, S>(
+    /// The validator ensures every name in `value_columns` resolves in the input.
+    /// Group-by expressions and `version` are checked against the input schema via
+    /// `schema_expr::check::check_expression` but do not contribute fields to the output.
+    pub fn max_by_version(
         self,
-        group_by: G,
-        version: V,
-        value_columns: C,
-    ) -> Result<Self, DeltaError>
-    where
-        G: IntoIterator,
-        G::Item: Into<ExpressionRef>,
-        V: Into<ExpressionRef>,
-        C: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
+        group_by: impl IntoIterator<Item = impl Into<ExpressionRef>>,
+        version: impl Into<ExpressionRef>,
+        value_columns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, DeltaError> {
         let group_by: Vec<ExpressionRef> = group_by.into_iter().map(Into::into).collect();
         let version_column: ExpressionRef = version.into();
         let value_columns: Vec<String> = value_columns.into_iter().map(Into::into).collect();
         let input_schema = self.schema()?;
-        for expr in &group_by {
-            // Validate group expressions resolve against the input schema. Inferred type
-            // is discarded -- the output schema is derived solely from `value_columns`.
-            infer_expression_type(expr.as_ref(), &input_schema)?;
+        for expr in group_by.iter().chain(std::iter::once(&version_column)) {
+            check_expression(expr.as_ref(), &input_schema, None)?;
         }
         let mut fields: Vec<StructField> = Vec::with_capacity(value_columns.len());
         for name in &value_columns {
@@ -661,43 +646,34 @@ impl PlanBuilder {
             fields.push(f.clone());
         }
         let output_schema = arc_struct_or_invariant(fields)?;
-        push_node(
-            &self.state,
+        self.push_unary(
             NodeKind::MaxByVersion(MaxByVersionNode {
                 group_by,
                 version_column,
                 value_columns,
             }),
-            &[&self],
             output_schema,
         )
     }
 
     /// Left-anti join: rows of `self` whose key matches no row of `other`. Output schema
     /// mirrors `self`.
-    pub fn left_anti_join<I, L, R>(
+    pub fn left_anti_join(
         self,
         other: PlanBuilder,
-        key_pairs: I,
-    ) -> Result<Self, DeltaError>
-    where
-        I: IntoIterator<Item = (L, R)>,
-        L: Into<ExpressionRef>,
-        R: Into<ExpressionRef>,
-    {
+        key_pairs: impl IntoIterator<Item = (impl Into<ExpressionRef>, impl Into<ExpressionRef>)>,
+    ) -> Result<Self, DeltaError> {
         let key_pairs: Vec<(ExpressionRef, ExpressionRef)> = key_pairs
             .into_iter()
             .map(|(l, r)| (l.into(), r.into()))
             .collect();
-        ensure_same_context(&self.state, &other)?;
         let output_schema = self.schema()?;
-        push_node(
-            &self.state,
+        self.push_nary(
             NodeKind::EquiJoin(EquiJoinNode {
                 kind: JoinKind::LeftAnti,
                 key_pairs,
             }),
-            &[&self, &other],
+            &[&other],
             output_schema,
         )
     }
@@ -705,287 +681,42 @@ impl PlanBuilder {
     /// Unordered union with one or more other cursors. All inputs must share the same
     /// schema (strict equality).
     pub fn union_all(self, others: &[PlanBuilder]) -> Result<Self, DeltaError> {
-        push_union(&self.state, &self, others, /* ordered= */ false)
+        let first_schema = self.schema()?;
+        for o in others {
+            if o.schema()? != first_schema {
+                return Err(delta_error!(
+                    DeltaErrorCode::DeltaCommandInvariantViolation,
+                    "union: input schemas disagree",
+                ));
+            }
+        }
+        let others_refs: Vec<&PlanBuilder> = others.iter().collect();
+        self.push_nary(
+            NodeKind::Union(UnionNode { ordered: false }),
+            &others_refs,
+            first_schema,
+        )
     }
 
     /// Order-preserving union with one or more other cursors. All inputs must share the
     /// same schema.
     pub fn union_ordered(self, others: &[PlanBuilder]) -> Result<Self, DeltaError> {
-        push_union(&self.state, &self, others, /* ordered= */ true)
-    }
-}
-
-// ============================================================================
-// LoadSpec
-// ============================================================================
-
-/// Configuration for [`PlanBuilder::load`]. Mirrors the fields of [`NodeKind::Load`].
-#[derive(Debug, Clone)]
-pub struct LoadSpec {
-    pub file_schema: SchemaRef,
-    pub file_type: FileType,
-    pub base_url: Option<Url>,
-    pub passthrough_columns: Vec<ColumnName>,
-    pub file_meta: ScanFileColumns,
-    pub dv_ref: Option<DvRef>,
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-fn ensure_fresh(state: &ContextState, builder: &PlanBuilder) -> Result<(), DeltaError> {
-    if state.session_id != builder.session_id {
-        return Err(delta_error!(
-            DeltaErrorCode::DeltaCommandInvariantViolation,
-            "stale builder: builder session={cs} expected {ss}",
-            cs = builder.session_id,
-            ss = state.session_id,
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_same_context(
-    state: &Rc<RefCell<ContextState>>,
-    builder: &PlanBuilder,
-) -> Result<(), DeltaError> {
-    if !Rc::ptr_eq(state, &builder.state) {
-        return Err(delta_error!(
-            DeltaErrorCode::DeltaCommandInvariantViolation,
-            "builder from a different context cannot be combined",
-        ));
-    }
-    Ok(())
-}
-
-/// Validate the input builders against `state`, append `kind` (with the inputs' Refs) to
-/// the in-flight plan, record `schema` for the freshly minted Ref, and return a handle
-/// to it. Source nodes pass `inputs: &[]`, unary `&[self]`, binary `&[self, other]`,
-/// and union the full input list.
-fn push_node(
-    state: &Rc<RefCell<ContextState>>,
-    kind: NodeKind,
-    inputs: &[&PlanBuilder],
-    schema: SchemaRef,
-) -> Result<PlanBuilder, DeltaError> {
-    for b in inputs {
-        ensure_same_context(state, b)?;
-    }
-    let mut s = state.borrow_mut();
-    for b in inputs {
-        ensure_fresh(&s, b)?;
-    }
-    let input_refs = inputs.iter().map(|b| b.ref_id).collect();
-    let r = s.push_node(kind, input_refs, schema);
-    Ok(PlanBuilder::new(state, r, s.session_id))
-}
-
-fn push_union(
-    state: &Rc<RefCell<ContextState>>,
-    first: &PlanBuilder,
-    others: &[PlanBuilder],
-    ordered: bool,
-) -> Result<PlanBuilder, DeltaError> {
-    let first_schema = first.schema()?;
-    for o in others {
-        if o.schema()? != first_schema {
-            return Err(delta_error!(
-                DeltaErrorCode::DeltaCommandInvariantViolation,
-                "union: input schemas disagree",
-            ));
+        let first_schema = self.schema()?;
+        for o in others {
+            if o.schema()? != first_schema {
+                return Err(delta_error!(
+                    DeltaErrorCode::DeltaCommandInvariantViolation,
+                    "union: input schemas disagree",
+                ));
+            }
         }
-    }
-    let mut inputs: Vec<&PlanBuilder> = Vec::with_capacity(1 + others.len());
-    inputs.push(first);
-    inputs.extend(others.iter());
-    push_node(
-        state,
-        NodeKind::Union(UnionNode { ordered }),
-        &inputs,
-        first_schema,
-    )
-}
-
-fn arc_struct_or_invariant(fields: Vec<StructField>) -> Result<SchemaRef, DeltaError> {
-    StructType::try_new(fields)
-        .map(Arc::new)
-        .or_delta(DeltaErrorCode::DeltaCommandInvariantViolation)
-}
-
-/// `(name, col(name))` -- one identity entry for a top-level projection list.
-fn identity_named_expr(name: impl Into<String>) -> (String, ExpressionRef) {
-    let name = name.into();
-    let expr = Arc::new(Expression::column([&name]));
-    (name, expr)
-}
-
-/// Identity projection list: every field becomes `(name, col(name))`.
-fn identity_named_exprs(schema: &StructType) -> Vec<(String, ExpressionRef)> {
-    schema
-        .fields()
-        .map(|f| identity_named_expr(f.name().clone()))
-        .collect()
-}
-
-// === Point-edit primitives over nested paths =================================
-
-/// Field-level edit applied to the parent struct identified by a path prefix.
-///
-/// Each variant carries the schema-level edit as well as the per-leaf expression that
-/// will populate the new column at the matching position in the projection list. The
-/// schema half is materialized by [`schema_after_field_op`]; the projection half by
-/// [`projection_for_path`].
-enum FieldOp {
-    InsertAfter {
-        sibling_leaf: String,
-        new_field: StructField,
-        new_expr: ExpressionRef,
-    },
-    Replace {
-        target_leaf: String,
-        new_field: StructField,
-        new_expr: ExpressionRef,
-    },
-    Drop {
-        target_leaf: String,
-    },
-}
-
-/// Split a path into `(parent_path, leaf)`. The leaf is the last component; the parent
-/// path is empty for top-level fields. Errors if the path is empty.
-fn split_parent_leaf<'a>(
-    path: &'a ColumnName,
-    op_name: &'static str,
-) -> Result<(&'a [String], String), DeltaError> {
-    let components = path.path();
-    let (leaf, parent) = components.split_last().ok_or_else(|| {
-        delta_error!(
-            DeltaErrorCode::DeltaCommandInvariantViolation,
-            "{op_name}: path is empty",
+        let others_refs: Vec<&PlanBuilder> = others.iter().collect();
+        self.push_nary(
+            NodeKind::Union(UnionNode { ordered: true }),
+            &others_refs,
+            first_schema,
         )
-    })?;
-    Ok((parent, leaf.clone()))
-}
-
-/// Apply a field-level edit at the struct identified by `parent_path` within
-/// `input_schema`, then push a top-level [`NodeKind::Project`] that materializes the result.
-///
-/// The schema half of the edit is computed by [`schema_after_field_op`] (delegating to
-/// [`StructType::with_struct_at`]); the projection half is computed independently by
-/// [`projection_for_path`]. Each ancestor struct above the edit is re-emitted via
-/// [`Expression::struct_from`]; off-path siblings are identity-projected via `col(...)`.
-fn apply_field_op(
-    builder: PlanBuilder,
-    input_schema: &StructType,
-    parent_path: &[String],
-    op: FieldOp,
-) -> Result<PlanBuilder, DeltaError> {
-    let output_schema = schema_after_field_op(input_schema, parent_path, &op)?;
-    let named_exprs = projection_for_path(&output_schema, &[], parent_path, &op)?;
-    push_node(
-        &builder.state,
-        NodeKind::Project(ProjectNode {
-            named_exprs,
-            output_schema: Arc::clone(&output_schema),
-        }),
-        &[&builder],
-        output_schema,
-    )
-}
-
-/// Schema half of a [`FieldOp`]: walk `parent_path` into `input_schema` via
-/// [`StructType::with_struct_at`] and apply the schema-level edit at the leaf parent.
-/// Defers existence and collision checks to the underlying `with_field_*` methods.
-fn schema_after_field_op(
-    input_schema: &StructType,
-    parent_path: &[String],
-    op: &FieldOp,
-) -> Result<SchemaRef, DeltaError> {
-    let new_struct = input_schema
-        .with_struct_at(parent_path, |s| match op {
-            FieldOp::InsertAfter {
-                sibling_leaf,
-                new_field,
-                ..
-            } => s.with_field_inserted_after(Some(sibling_leaf), new_field.clone()),
-            FieldOp::Replace {
-                target_leaf,
-                new_field,
-                ..
-            } => s.with_field_replaced(target_leaf, new_field.clone()),
-            FieldOp::Drop { target_leaf } => {
-                if s.field(target_leaf).is_none() {
-                    return Err(Error::generic(format!("Field {target_leaf} not found")));
-                }
-                Ok(s.with_field_removed(target_leaf))
-            }
-        })
-        .or_delta(DeltaErrorCode::DeltaCommandInvariantViolation)?;
-    Ok(Arc::new(new_struct))
-}
-
-/// Projection half of a [`FieldOp`]: walk the *output* schema along `remaining`. Drops,
-/// inserts, and renames are already baked into the output, so each output field needs
-/// exactly one expression: a freshly-introduced field uses the op's `new_expr`; the
-/// on-path ancestor recurses and re-emits via [`Expression::struct_from`]; everything
-/// else identity-projects from the input via [`col_ref_at`].
-///
-/// `path_so_far` accumulates the absolute prefix so identity references resolve from
-/// the data root rather than the inner struct.
-fn projection_for_path(
-    output: &StructType,
-    path_so_far: &[String],
-    remaining: &[String],
-    op: &FieldOp,
-) -> Result<Vec<(String, ExpressionRef)>, DeltaError> {
-    output
-        .fields()
-        .map(|f| {
-            let fname = f.name();
-            if let Some((target, rest)) = remaining.split_first() {
-                if fname == target {
-                    let DataType::Struct(sub) = f.data_type() else {
-                        return Err(delta_error!(
-                            DeltaErrorCode::DeltaCommandInvariantViolation,
-                            "projection_for_path: field {fname:?} is not a struct",
-                        ));
-                    };
-                    let mut sub_path = path_so_far.to_vec();
-                    sub_path.push(fname.clone());
-                    let exprs: Vec<ExpressionRef> = projection_for_path(sub, &sub_path, rest, op)?
-                        .into_iter()
-                        .map(|(_, e)| e)
-                        .collect();
-                    return Ok((fname.clone(), Arc::new(Expression::struct_from(exprs))));
-                }
-            } else if let FieldOp::Replace {
-                new_field,
-                new_expr,
-                ..
-            }
-            | FieldOp::InsertAfter {
-                new_field,
-                new_expr,
-                ..
-            } = op
-            {
-                if fname == new_field.name() {
-                    return Ok((fname.clone(), Arc::clone(new_expr)));
-                }
-            }
-            Ok((fname.clone(), col_ref_at(path_so_far, fname)))
-        })
-        .collect()
-}
-
-/// Build a `col(...)` reference to `leaf` within the struct rooted at `prefix`. When
-/// `prefix` is empty this is a top-level column reference.
-fn col_ref_at(prefix: &[String], leaf: &str) -> ExpressionRef {
-    let mut path: Vec<String> = Vec::with_capacity(prefix.len() + 1);
-    path.extend(prefix.iter().cloned());
-    path.push(leaf.to_string());
-    Arc::new(Expression::column(path))
+    }
 }
 
 // ============================================================================
@@ -996,17 +727,30 @@ fn col_ref_at(prefix: &[String], leaf: &str) -> ExpressionRef {
 mod tests {
     use std::any::Any;
 
+    use rstest::rstest;
+
     use super::*;
     use crate::expressions::{col, Predicate};
     use crate::plans::ir::plan::JoinKind;
     use crate::plans::kernel_reducers::{
         FinishedHandle, KdfControl, KernelReducerKind, KernelReducerOutput,
     };
-    use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
-    use crate::plans::state_machines::framework::state_machine::{NextStep, StateMachine};
-    use crate::plans::state_machines::framework::step_payload::EngineResponse;
-    use crate::schema::DataType;
-    use crate::DeltaResult;
+    use crate::plans::state_machines::framework::coroutine::CoroutineSM;
+    use crate::plans::state_machines::framework::state_machine::{
+        EngineResponse, NextStep, StateMachine,
+    };
+    use crate::schema::{DataType, StructType};
+    use crate::{DeltaResult, EngineData};
+
+    #[derive(Debug, Clone, Copy)]
+    enum FieldOpRejectCase {
+        InsertAfterMissingSibling,
+        InsertAfterNameCollision,
+        ReplaceColMissingPath,
+        DropColMissingPath,
+        SelectMissingField,
+        MaxByVersionUnknownValueColumn,
+    }
 
     fn id_ts_schema() -> SchemaRef {
         Arc::new(
@@ -1051,9 +795,7 @@ mod tests {
     fn filter_preserves_schema() {
         let ctx = Context::new();
         let src = ctx.values(id_ts_schema(), vec![]).unwrap();
-        let f = src
-            .filter(Arc::new(Predicate::BooleanExpression(col("id"))))
-            .unwrap();
+        let f = src.filter(Arc::new(Predicate::column(["id"]))).unwrap();
         assert_eq!(*f.schema().unwrap(), *id_ts_schema());
     }
 
@@ -1115,7 +857,7 @@ mod tests {
         Arc::new(
             StructType::try_new(vec![
                 StructField::nullable("commitInfo", DataType::STRING),
-                StructField::nullable("add", DataType::Struct(Box::new(add))),
+                StructField::nullable("add", add),
                 StructField::nullable("remove", DataType::STRING),
             ])
             .unwrap(),
@@ -1142,57 +884,101 @@ mod tests {
     }
 
     /// `insert_col_after` walks into a nested struct and inserts `add.stats_parsed`
-    /// after `add.stats`.
+    /// after `add.stats`. The expression is a `Struct` whose output type the builder
+    /// derives bidirectionally from `parsed_field.data_type()`.
     #[test]
     fn insert_col_after_nested_inserts_in_parent_struct() {
         let ctx = Context::new();
         let src = ctx.values(nested_add_schema(), vec![]).unwrap();
         let stats_struct =
             StructType::try_new(vec![StructField::nullable("numRecords", DataType::LONG)]).unwrap();
-        let parsed_field = StructField::nullable(
-            "stats_parsed",
-            DataType::Struct(Box::new(stats_struct.clone())),
-        );
+        let parsed_field = StructField::nullable("stats_parsed", stats_struct.clone());
+        let parsed_expr = Expression::struct_from([Arc::new(Expression::literal(0i64))]);
         let out = src
-            .insert_col_after(["add", "stats"], parsed_field, col(["add", "stats"]))
+            .insert_col_after(["add", "stats"], parsed_field, parsed_expr)
             .unwrap();
         let schema = out.schema().unwrap();
-        let add = match schema.field("add").unwrap().data_type() {
-            DataType::Struct(s) => s.as_ref(),
-            other => panic!("expected struct, got {other:?}"),
+        let DataType::Struct(add) = schema.field("add").unwrap().data_type() else {
+            panic!("expected struct");
         };
         let names: Vec<&str> = add.fields().map(|f| f.name().as_str()).collect();
         assert_eq!(names, ["path", "stats", "stats_parsed"]);
         assert_eq!(
             add.field("stats_parsed").unwrap().data_type(),
-            &DataType::Struct(Box::new(stats_struct)),
+            &DataType::from(stats_struct),
         );
     }
 
-    /// `insert_col_after` errors when the sibling does not exist at the requested path.
-    #[test]
-    fn insert_col_after_rejects_missing_sibling() {
+    /// `insert_col_after` errors when the sibling does not exist at the requested path,
+    /// when the new leaf collides with an existing sibling, when `replace_col` / `drop_col`
+    /// paths do not resolve, when `select` targets a missing field, or when
+    /// `max_by_version` lists an unknown value column.
+    #[rstest]
+    #[case::insert_after_missing_sibling(FieldOpRejectCase::InsertAfterMissingSibling, "missing")]
+    #[case::insert_after_name_collision(
+        FieldOpRejectCase::InsertAfterNameCollision,
+        "already exists"
+    )]
+    #[case::replace_col_missing_path(FieldOpRejectCase::ReplaceColMissingPath, "missing")]
+    #[case::drop_col_missing_path(FieldOpRejectCase::DropColMissingPath, "missing")]
+    #[case::select_missing_field(FieldOpRejectCase::SelectMissingField, "missing")]
+    #[case::max_by_version_unknown_value_column(
+        FieldOpRejectCase::MaxByVersionUnknownValueColumn,
+        "missing"
+    )]
+    fn field_op_rejects_invalid(#[case] case: FieldOpRejectCase, #[case] needle: &str) {
         let ctx = Context::new();
-        let src = ctx.values(nested_add_schema(), vec![]).unwrap();
-        let err = src
-            .insert_col_after(
-                ["add", "missing"],
-                StructField::nullable("x", DataType::LONG),
-                col(["add", "stats"]),
-            )
-            .unwrap_err();
-        assert!(err.to_string().contains("missing"), "got: {err}");
-    }
-
-    /// `insert_col_after` errors when the new leaf collides with an existing sibling.
-    #[test]
-    fn insert_col_after_rejects_name_collision() {
-        let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
-        let err = src
-            .insert_col_after("id", StructField::nullable("ts", DataType::LONG), col("id"))
-            .unwrap_err();
-        assert!(err.to_string().contains("already exists"), "got: {err}");
+        let err = match case {
+            FieldOpRejectCase::InsertAfterMissingSibling => {
+                let src = ctx.values(nested_add_schema(), vec![]).unwrap();
+                src.insert_col_after(
+                    ["add", "missing"],
+                    StructField::nullable("x", DataType::LONG),
+                    Expression::literal(0i64),
+                )
+                .unwrap_err()
+            }
+            FieldOpRejectCase::InsertAfterNameCollision => {
+                let src = ctx.values(id_ts_schema(), vec![]).unwrap();
+                src.insert_col_after(
+                    "id",
+                    StructField::nullable("ts", DataType::LONG),
+                    Expression::literal(0i64),
+                )
+                .unwrap_err()
+            }
+            FieldOpRejectCase::ReplaceColMissingPath => {
+                let src = ctx.values(nested_add_schema(), vec![]).unwrap();
+                src.replace_col(
+                    ["add", "missing"],
+                    StructField::nullable("missing", DataType::STRING),
+                    col(["add", "path"]),
+                )
+                .unwrap_err()
+            }
+            FieldOpRejectCase::DropColMissingPath => {
+                let src = ctx.values(id_ts_schema(), vec![]).unwrap();
+                src.drop_col("missing").unwrap_err()
+            }
+            FieldOpRejectCase::SelectMissingField => {
+                let src = ctx.values(id_ts_schema(), vec![]).unwrap();
+                let target = Arc::new(
+                    StructType::try_new(vec![StructField::nullable("missing", DataType::STRING)])
+                        .unwrap(),
+                );
+                src.select(target).unwrap_err()
+            }
+            FieldOpRejectCase::MaxByVersionUnknownValueColumn => {
+                let src = ctx.values(id_ts_schema(), vec![]).unwrap();
+                src.max_by_version(
+                    vec![Arc::new(col("id"))],
+                    Arc::new(col("ts")),
+                    vec!["missing".to_string()],
+                )
+                .unwrap_err()
+            }
+        };
+        assert!(err.to_string().contains(needle), "got: {err}");
     }
 
     /// `replace_col` retypes a field in place when the new field's name matches.
@@ -1221,39 +1007,21 @@ mod tests {
         let src = ctx.values(nested_add_schema(), vec![]).unwrap();
         let stats_struct =
             StructType::try_new(vec![StructField::nullable("numRecords", DataType::LONG)]).unwrap();
-        let new_field = StructField::nullable(
-            "stats_parsed",
-            DataType::Struct(Box::new(stats_struct.clone())),
-        );
+        let new_field = StructField::nullable("stats_parsed", stats_struct.clone());
+        let new_expr = Expression::struct_from([Arc::new(Expression::literal(0i64))]);
         let out = src
-            .replace_col(["add", "stats"], new_field, col(["add", "stats"]))
+            .replace_col(["add", "stats"], new_field, new_expr)
             .unwrap();
         let schema = out.schema().unwrap();
-        let add = match schema.field("add").unwrap().data_type() {
-            DataType::Struct(s) => s.as_ref(),
-            other => panic!("expected struct, got {other:?}"),
+        let DataType::Struct(add) = schema.field("add").unwrap().data_type() else {
+            panic!("expected struct");
         };
         let names: Vec<&str> = add.fields().map(|f| f.name().as_str()).collect();
         assert_eq!(names, ["path", "stats_parsed"]);
         assert_eq!(
             add.field("stats_parsed").unwrap().data_type(),
-            &DataType::Struct(Box::new(stats_struct)),
+            &DataType::from(stats_struct),
         );
-    }
-
-    /// `replace_col` errors when the path does not resolve.
-    #[test]
-    fn replace_col_rejects_missing_path() {
-        let ctx = Context::new();
-        let src = ctx.values(nested_add_schema(), vec![]).unwrap();
-        let err = src
-            .replace_col(
-                ["add", "missing"],
-                StructField::nullable("missing", DataType::STRING),
-                col(["add", "path"]),
-            )
-            .unwrap_err();
-        assert!(err.to_string().contains("missing"), "got: {err}");
     }
 
     /// `drop_col` removes a top-level field.
@@ -1265,27 +1033,6 @@ mod tests {
         let schema = out.schema().unwrap();
         let names: Vec<&str> = schema.fields().map(|f| f.name().as_str()).collect();
         assert_eq!(names, ["id"]);
-    }
-
-    /// `drop_col` errors when the path does not resolve.
-    #[test]
-    fn drop_col_rejects_missing_path() {
-        let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
-        let err = src.drop_col("missing").unwrap_err();
-        assert!(err.to_string().contains("missing"), "got: {err}");
-    }
-
-    /// `select` rejects target fields not in the input schema.
-    #[test]
-    fn select_rejects_missing_field() {
-        let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
-        let target = Arc::new(
-            StructType::try_new(vec![StructField::nullable("missing", DataType::STRING)]).unwrap(),
-        );
-        let err = src.select(target).unwrap_err();
-        assert!(err.to_string().contains("missing"), "got: {err}");
     }
 
     /// `left_anti_join` output schema mirrors the left input.
@@ -1371,21 +1118,6 @@ mod tests {
         assert_eq!(schema.field("ts").unwrap().data_type(), &DataType::LONG);
     }
 
-    /// `max_by_version` rejects value columns that are not present in the input schema.
-    #[test]
-    fn max_by_version_rejects_unknown_value_column() {
-        let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
-        let err = src
-            .max_by_version(
-                vec![Arc::new(col("id"))],
-                Arc::new(col("ts")),
-                vec!["missing".to_string()],
-            )
-            .unwrap_err();
-        assert!(err.to_string().contains("missing"), "got: {err}");
-    }
-
     // === CoroutineSM dispatch tests ============================================
 
     /// Test KernelReducer that echoes its constructor input as the output value.
@@ -1401,7 +1133,7 @@ mod tests {
         fn finish(self: Box<Self>) -> Box<dyn Any + Send> {
             Box::new(*self)
         }
-        fn apply(&mut self, _batch: &dyn crate::EngineData) -> DeltaResult<KdfControl> {
+        fn apply(&mut self, _batch: &dyn EngineData) -> DeltaResult<KdfControl> {
             Ok(KdfControl::Break)
         }
     }
@@ -1574,9 +1306,7 @@ mod tests {
                 .schema_query(&mut engine, "/x.parquet", "footer")
                 .await?;
             // Using `pre` after dispatch must fail with a stale-builder error.
-            let err = pre
-                .filter(Arc::new(Predicate::BooleanExpression(col("id"))))
-                .unwrap_err();
+            let err = pre.filter(Arc::new(Predicate::column(["id"]))).unwrap_err();
             assert!(err.to_string().contains("stale builder"), "got: {err}");
             Ok(())
         })

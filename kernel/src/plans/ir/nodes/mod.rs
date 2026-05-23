@@ -1,8 +1,10 @@
-//! Per-variant payload structs referenced by [`NodeKind`](super::plan::NodeKind) and the
+//! Per-variant payload structs referenced by [`NodeKind`] and the
 //! engine's compile path. Every payload struct is held inside exactly one `NodeKind`
 //! variant and carries that variant's fields verbatim -- the IR has a single source of
 //! truth for each operator's shape, and engine helpers take a `&FooNode` reference
 //! directly.
+//!
+//! [`NodeKind`]: super::plan::NodeKind
 
 use std::sync::Arc;
 
@@ -32,7 +34,7 @@ pub type FileFormat = FileType;
 // Source-variant payloads (zero inputs)
 // ============================================================================
 
-/// Payload of [`NodeKind::ListFiles`](super::plan::NodeKind::ListFiles).
+/// Payload of `NodeKind::ListFiles`.
 ///
 /// Lists files under a storage prefix. Engine emits a canonical file-listing
 /// schema (path / size / modificationTime / etc.).
@@ -41,7 +43,7 @@ pub struct ListFilesNode {
     pub start_from: Url,
 }
 
-/// Payload of [`NodeKind::ScanParquet`](super::plan::NodeKind::ScanParquet).
+/// Payload of `NodeKind::ScanParquet`.
 ///
 /// Reads Parquet `files` into row batches matching `schema`.
 #[derive(Debug, Clone)]
@@ -50,7 +52,7 @@ pub struct ScanParquetNode {
     pub schema: SchemaRef,
 }
 
-/// Payload of [`NodeKind::ScanJson`](super::plan::NodeKind::ScanJson).
+/// Payload of `NodeKind::ScanJson`.
 ///
 /// Reads newline-delimited JSON `files` into row batches matching `schema`.
 #[derive(Debug, Clone)]
@@ -59,7 +61,7 @@ pub struct ScanJsonNode {
     pub schema: SchemaRef,
 }
 
-/// Payload of [`NodeKind::Values`](super::plan::NodeKind::Values).
+/// Payload of `NodeKind::Values`.
 ///
 /// Inline literal rows. Builder enforces `rows[i].len() == schema.fields().count()`.
 #[derive(Debug, Clone)]
@@ -72,21 +74,23 @@ pub struct ValuesNode {
 // Transform-variant payloads (1+ inputs)
 // ============================================================================
 
-/// Payload of [`NodeKind::Project`](super::plan::NodeKind::Project).
+/// Payload of `NodeKind::Project`.
 ///
 /// Projects the single input through `named_exprs`, producing rows of `output_schema`.
 /// The schema is supplied by the builder (either inferred for narrow projections
 /// via the kernel's expression-type inference, or declared explicitly via
-/// [`PlanBuilder::project_with_schema`](crate::plans::state_machines::framework::plan_context::PlanBuilder::project_with_schema)
-/// when inference is insufficient). Engines compile against the declared schema
-/// directly and do not re-derive it from the expressions.
+/// [`PlanBuilder::project_with_schema`] when inference is insufficient). Engines compile
+/// against the declared schema directly and do not re-derive it from the expressions.
+///
+/// [`PlanBuilder::project_with_schema`]:
+///     crate::plans::state_machines::framework::plan_context::PlanBuilder::project_with_schema
 #[derive(Debug, Clone)]
 pub struct ProjectNode {
     pub named_exprs: Vec<(String, Arc<Expression>)>,
     pub output_schema: SchemaRef,
 }
 
-/// Payload of [`NodeKind::Filter`](super::plan::NodeKind::Filter).
+/// Payload of `NodeKind::Filter`.
 ///
 /// Keeps input rows where `predicate` evaluates true (SQL null semantics).
 /// Output schema is the input schema unchanged.
@@ -95,7 +99,7 @@ pub struct FilterNode {
     pub predicate: Arc<Predicate>,
 }
 
-/// Payload of [`NodeKind::Union`](super::plan::NodeKind::Union).
+/// Payload of `NodeKind::Union`.
 ///
 /// Concatenates N inputs (`inputs.len() >= 1`). All input schemas must agree.
 /// `ordered=true` preserves child order; `ordered=false` permits reordering.
@@ -104,7 +108,7 @@ pub struct UnionNode {
     pub ordered: bool,
 }
 
-/// Payload of [`NodeKind::Load`](super::plan::NodeKind::Load).
+/// Payload of `NodeKind::Load`.
 ///
 /// File-reader transform. Each input row carries a path (under `file_meta.path`); the
 /// engine opens the resolved file as `file_type`, reads `file_schema` columns, and
@@ -121,7 +125,7 @@ pub struct LoadNode {
     pub dv_ref: Option<DvRef>,
 }
 
-/// Payload of [`NodeKind::MaxByVersion`](super::plan::NodeKind::MaxByVersion).
+/// Payload of `NodeKind::MaxByVersion`.
 ///
 /// "Top 1 per group, ordered by version desc" -- a specialized aggregate. Output
 /// schema is `group_by` exprs (with inferred types) followed by the named
@@ -133,7 +137,7 @@ pub struct MaxByVersionNode {
     pub value_columns: Vec<String>,
 }
 
-/// Payload of [`NodeKind::EquiJoin`](super::plan::NodeKind::EquiJoin).
+/// Payload of `NodeKind::EquiJoin`.
 ///
 /// Equi-join two inputs (`inputs.len() == 2`, convention `[left, right]`).
 #[derive(Debug, Clone)]
@@ -166,8 +170,9 @@ pub struct ScanFileColumns {
 /// Deletion-vector reference attached to a [`LoadNode`]. Rows present in the referenced
 /// DV are skipped from the file read.
 ///
-/// `column` is a [`crate::actions::deletion_vector::DeletionVectorDescriptor`] struct
-/// column on the upstream relation.
+/// `column` is a [`DeletionVectorDescriptor`] struct column on the upstream relation.
+///
+/// [`DeletionVectorDescriptor`]: crate::actions::deletion_vector::DeletionVectorDescriptor
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DvRef {
     pub column: ColumnName,
@@ -195,13 +200,15 @@ pub(crate) fn default_scan_file_columns() -> ScanFileColumns {
 // Reducer-drain sink (referenced by `EngineRequest::Reduce`)
 // ============================================================================
 
-/// Template for draining a row stream into a [`KernelReducer`] via
-/// [`EngineRequest::Reduce`](crate::plans::state_machines::framework::step::EngineRequest::Reduce).
+/// Template for draining a row stream into a [`KernelReducer`] via [`EngineRequest::Reduce`].
 ///
 /// - `initial_state`: cloned per partition via [`DynClone`](dyn_clone::DynClone) into a
 ///   [`ReducerHandle`].
 /// - `token`: keys the finished handle returned from the executor and validated at decode time by
-///   the paired [`Extractor`](crate::plans::kernel_reducers::Extractor).
+///   the paired [`Extractor`].
+///
+/// [`EngineRequest::Reduce`]: crate::plans::state_machines::framework::state_machine::EngineRequest::Reduce
+/// [`Extractor`]: crate::plans::kernel_reducers::Extractor
 #[derive(Debug, Clone)]
 pub struct ReduceSink {
     pub initial_state: Box<dyn KernelReducer>,

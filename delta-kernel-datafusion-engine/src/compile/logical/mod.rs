@@ -1,7 +1,9 @@
-//! Kernel plan -> DataFusion [`datafusion_expr::LogicalPlan`] lowering.
+//! Kernel plan -> DataFusion [`LogicalPlan`] lowering.
 //!
-//! See [`lower::compile_plan`] for the entry point. The submodules host per-shape lowering
+//! See [`compile_plan`] for the entry point. The submodules host per-shape lowering
 //! helpers (file listings, scans, projections, ordered union, output canonicalization).
+//!
+//! [`LogicalPlan`]: datafusion_expr::LogicalPlan
 
 mod canonicalize;
 mod lower;

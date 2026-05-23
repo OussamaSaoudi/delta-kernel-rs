@@ -1,9 +1,14 @@
-//! Kernel plan -> DataFusion [`datafusion_expr::LogicalPlan`] compilation.
+//! Kernel plan -> DataFusion [`LogicalPlan`] compilation.
+//!
+//! [`LogicalPlan`]: datafusion_expr::LogicalPlan
 
 use std::sync::Arc;
 
 use datafusion_common::error::DataFusionError;
+use delta_kernel::expressions::Expression;
 use delta_kernel::Engine;
+
+use crate::error::plan_compilation;
 
 pub mod expr_translator;
 mod json_parse;
@@ -14,11 +19,13 @@ pub use logical::compile_plan;
 
 /// Context shared by the compiler for leaf nodes that need runtime side state.
 ///
-/// Carries only static / shared bits -- there is no per-phase mutable accumulator
+/// Carries only static / shared bits -- there is no per-step mutable accumulator
 /// here. Drained reducer state for `Reduce` steps flows directly out of
-/// [`DataFusionExecutor::run_phase`](crate::executor::DataFusionExecutor) as a
-/// [`EngineResponse::Reducer`](delta_kernel::plans::state_machines::framework::step_payload::EngineResponse::Reducer)
-/// after the executor finishes the sink locally.
+/// [`DataFusionExecutor::execute_step`] as an [`EngineResponse::Reducer`] after the
+/// executor finishes the sink locally.
+///
+/// [`DataFusionExecutor::execute_step`]: crate::executor::DataFusionExecutor::execute_step
+/// [`EngineResponse::Reducer`]: delta_kernel::plans::state_machines::framework::state_machine::EngineResponse::Reducer
 #[derive(Clone)]
 pub struct CompileContext {
     /// Kernel [`Engine`] for sinks that delegate IO to parquet/json handlers
@@ -35,26 +42,27 @@ impl CompileContext {
 }
 
 pub(super) fn expand_projection_columns(
-    columns: &[Arc<delta_kernel::expressions::Expression>],
+    columns: &[Arc<Expression>],
     expected_output_fields: usize,
-) -> Result<Vec<Arc<delta_kernel::expressions::Expression>>, DataFusionError> {
+) -> Result<Vec<Arc<Expression>>, DataFusionError> {
     let mut expanded = Vec::new();
     for (idx, expr) in columns.iter().enumerate() {
         let remaining_output = expected_output_fields
             .checked_sub(expanded.len())
-            .ok_or_else(|| crate::error::plan_compilation("Projection expansion overflow"))?;
+            .ok_or_else(|| plan_compilation("Projection expansion overflow"))?;
         let remaining_expr = columns.len() - idx;
         let extra_needed = remaining_output
             .checked_sub(remaining_expr)
             .ok_or_else(|| {
-                crate::error::plan_compilation(format!(
-                    "Projection has too many expressions: expected {expected_output_fields} output fields, got at least {}",
+                plan_compilation(format!(
+                    "Projection has too many expressions: expected \
+                     {expected_output_fields} output fields, got at least {}",
                     expanded.len() + remaining_expr
                 ))
             })?;
 
         match expr.as_ref() {
-            delta_kernel::expressions::Expression::Struct(children, _) => {
+            Expression::Struct(children, _) => {
                 let spread_extra = children.len().saturating_sub(1);
                 if spread_extra > 0 && spread_extra <= extra_needed {
                     expanded.extend(children.iter().cloned());
@@ -67,7 +75,7 @@ pub(super) fn expand_projection_columns(
     }
 
     if expanded.len() != expected_output_fields {
-        return Err(crate::error::plan_compilation(format!(
+        return Err(plan_compilation(format!(
             "Projection output schema has {} fields but expanded to {} expressions",
             expected_output_fields,
             expanded.len()

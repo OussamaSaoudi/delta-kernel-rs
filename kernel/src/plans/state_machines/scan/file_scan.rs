@@ -12,7 +12,7 @@ use crate::delta_error;
 use crate::expressions::{col, Expression, Transform};
 use crate::plans::errors::{DeltaError, DeltaErrorCode};
 use crate::plans::ir::plan::ResultPlan;
-use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
+use crate::plans::state_machines::framework::coroutine::CoroutineSM;
 use crate::plans::state_machines::framework::plan_context::Context;
 use crate::scan::log_replay::FILE_CONSTANT_VALUES_NAME;
 use crate::scan::state_info::StateInfo;
@@ -73,8 +73,8 @@ impl Scan {
 ///   declared output schema.
 ///
 /// Returns [`DeltaErrorCode::DeltaCommandInvariantViolation`] for shapes the SM data stage
-/// doesn't (yet) support: [`FieldTransformSpec::DynamicColumn`] (CDF-only),
-/// [`MetadataColumnSpec::FilePath`] (no DF synthesizer yet), and
+/// does not support: [`FieldTransformSpec::DynamicColumn`] (CDF-only),
+/// [`MetadataColumnSpec::FilePath`] (no DF synthesizer), and
 /// [`MetadataColumnSpec::RowCommitVersion`] (rejected at `StateInfo::try_new`).
 pub(super) fn scan_data_projection(
     state_info: &StateInfo,
@@ -85,7 +85,7 @@ pub(super) fn scan_data_projection(
     // Index the spec once for O(1) per-field dispatch. Partition columns are keyed by
     // `field_index`; the at-most-one `GenerateRowId` entry feeds the `RowId` arm.
     // `StaticInsert` / `StaticDrop` don't affect the logical projection (the scan classifier
-    // emits neither today, and `StaticDrop` targets columns this projection doesn't read).
+    // emits neither, and `StaticDrop` targets columns this projection doesn't read).
     let mut partition_indices: HashSet<usize> = HashSet::new();
     let mut row_id_spec: Option<&FieldTransformSpec> = None;
     if let Some(spec) = state_info.transform_spec.as_deref() {
@@ -171,13 +171,13 @@ fn row_id_expr(
     ))
 }
 
-/// Typed error for metadata-column specs the scan SM data stage doesn't (yet) support; see
+/// Typed error for metadata-column specs the scan SM data stage does not support; see
 /// [`scan_data_projection`]'s doc for the full rationale.
 fn unsupported_metadata_column(field: &StructField, spec: MetadataColumnSpec) -> DeltaError {
     delta_error!(
         DeltaErrorCode::DeltaCommandInvariantViolation,
         "fsr::scan_data_projection: metadata column `{}` ({:?}) is not supported in the \
-         scan data stage yet",
+         scan data stage",
         field.name(),
         spec,
     )
@@ -247,10 +247,10 @@ mod tests {
     /// - Struct fields: an identity [`Expression::Transform`] rooted at the physical column.
     #[rstest::rstest]
     #[case::primitive(DataType::LONG, false)]
-    #[case::nested_struct(DataType::Struct(Box::new(StructType::try_new(vec![
+    #[case::nested_struct(StructType::try_new(vec![
         annotated_field("inner1", "phys-inner1", 91, DataType::STRING, true),
         annotated_field("inner2", "phys-inner2", 92, DataType::INTEGER, true),
-    ]).unwrap())), true)]
+    ]).unwrap().into(), true)]
     fn scan_data_projection_emits_expected_shape(
         #[case] data_type: DataType,
         #[case] expect_transform: bool,
@@ -307,7 +307,7 @@ mod tests {
         )
         .unwrap();
         let err = scan_data_projection(&state_info)
-            .expect_err("FilePath metadata column should not be projected today");
+            .expect_err("FilePath metadata column should not be projected");
         assert_eq!(err.code, DeltaErrorCode::DeltaCommandInvariantViolation);
         assert!(
             err.message.contains("metadata column `my_path` (FilePath)"),
@@ -316,8 +316,7 @@ mod tests {
         );
     }
 
-    /// Regression test: the previous implementation always emitted `col(["_metadata.row_index"])`
-    /// regardless of the metadata column's actual name.
+    /// Regression: row index must use the user-supplied field name, not `_metadata.row_index`.
     #[test]
     fn scan_data_projection_user_named_row_index() {
         let schema = Arc::new(
@@ -338,10 +337,8 @@ mod tests {
         assert_eq!(exprs[1].as_ref(), &col(["my_row_idx"]));
     }
 
-    /// Regression test: the previous implementation emitted `baseRowId +
-    /// col("_metadata.row_index")` and ignored the materialized row-id column. Asserts the
-    /// `coalesce(materialized, baseRowId + row_index)` form, with the classifier-synthesized
-    /// row-index column name from the spec.
+    /// Regression: `RowId` must use `coalesce(materialized, baseRowId + row_index)` with the
+    /// classifier-synthesized row-index column name from the spec.
     #[test]
     fn scan_data_projection_row_id_synthesized_index() {
         let schema = Arc::new(
@@ -371,8 +368,7 @@ mod tests {
     }
 
     /// `RowId` reuses the user's `RowIndex` column when both are requested -- the
-    /// `GenerateRowId` spec carries the same `row_index_field_name`. Previously both branches
-    /// hardcoded the kernel default `_metadata.row_index`.
+    /// `GenerateRowId` spec carries the same `row_index_field_name`.
     #[test]
     fn scan_data_projection_row_id_with_explicit_index() {
         let schema = Arc::new(

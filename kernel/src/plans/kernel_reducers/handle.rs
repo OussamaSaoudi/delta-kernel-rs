@@ -3,8 +3,7 @@
 //! [`ReducerHandle`] is the executor's working buffer for one [`ReduceSink`]: created when a
 //! phase starts, fed batches via [`ReducerHandle::apply`], finalized via
 //! [`ReducerHandle::finish`] when the child is exhausted. Type-erased into [`FinishedHandle`]
-//! and returned to the state machine as
-//! [`EngineResponse::Reducer`](crate::plans::state_machines::framework::step_payload::EngineResponse::Reducer).
+//! and returned to the state machine as `EngineResponse::Reducer`.
 //!
 //! Handles dispatch in-process and never cross a serialization boundary.
 //!
@@ -19,8 +18,6 @@ use super::reducer::{KdfControl, KernelReducer, KernelReducerOutput, KernelReduc
 use crate::plans::errors::{DeltaError, DeltaErrorCode};
 use crate::plans::state_machines::framework::engine_error::EngineError;
 use crate::{delta_error, DeltaResult, EngineData};
-
-// === Runtime handle ===
 
 /// Runtime state carrier. Holds the mutable reducer working buffer and the token that joins
 /// its eventual finalized state back to the plan-tree node.
@@ -76,11 +73,12 @@ pub struct FinishedHandle {
 /// A typed adapter for pulling the typed output of a single reduce sink
 /// out of a [`FinishedHandle`].
 ///
-/// SM bodies build an `Extractor` while planting a [`EngineRequest::Reduce`] (via
-/// [`PlanBuilder::reduce`](crate::plans::state_machines::framework::plan_context::Context::reduce))
-/// and feed the engine's [`FinishedHandle`] back through [`Self::extract`] on resume.
+/// SM bodies build an `Extractor` while planting an [`EngineRequest::Reduce`] (via
+/// [`Context::reduce`]) and feed the engine's [`FinishedHandle`] back through
+/// [`Self::extract`] on resume.
 ///
-/// [`EngineRequest::Reduce`]: crate::plans::state_machines::framework::step::EngineRequest::Reduce
+/// [`EngineRequest::Reduce`]: crate::plans::state_machines::framework::state_machine::EngineRequest::Reduce
+/// [`Context::reduce`]: crate::plans::state_machines::framework::plan_context::Context::reduce
 pub struct Extractor<O> {
     token: KernelReducerToken,
     extract: fn(Box<dyn Any + Send>) -> Result<O, DeltaError>,

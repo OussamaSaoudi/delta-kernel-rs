@@ -1,9 +1,8 @@
 //! Shared FSR / Scan reconciliation pipeline.
 //!
 //! Builds the canonical *window-on-commits + anti-join-on-checkpoint* pipeline against the
-//! [`super::super::framework::plan_context`] (`Context` / `PlanBuilder`) API and the kernel
-//! plan IR. Consumed by [`super::full_state::FullState::state_machine`] and
-//! [`super::scan_plan::build_scan_plan`].
+//! [`Context`] / [`PlanBuilder`] API and the kernel plan IR. Consumed by
+//! [`super::full_state::FullState::state_machine`] and [`super::scan_plan::build_scan_plan`].
 //!
 //! Pipeline shape:
 //!
@@ -29,6 +28,7 @@ use std::sync::{Arc, LazyLock};
 
 use url::Url;
 
+use super::shape::{CheckpointShape, ScanShape, StatsInfo};
 use crate::action_reconciliation::{
     calculate_transaction_expiration_timestamp, deleted_file_retention_timestamp_with_time,
 };
@@ -40,17 +40,17 @@ use crate::actions::{
 use crate::expressions::{
     col, column_expr, ColumnName, Expression, ExpressionRef, Predicate, PredicateRef, Scalar,
 };
-use crate::log_segment::LogSegment;
 use crate::path::ParsedLogPath;
-use crate::plans::errors::{DeltaError, DeltaErrorCode, DeltaResultExt, KernelErrAsDelta};
-use crate::plans::ir::nodes::{default_scan_file_columns, FileFormat, FileType, ScanFileColumns};
-use crate::plans::kernel_reducers::SidecarCollector;
-use crate::plans::state_machines::framework::coroutine::context::Engine;
-use crate::plans::state_machines::framework::plan_context::{Context, LoadSpec, PlanBuilder};
+use crate::plans::errors::{DeltaError, DeltaErrorCode, KernelErrAsDelta};
+use crate::plans::ir::nodes::{
+    default_scan_file_columns, FileFormat, FileType, LoadNode, ScanFileColumns,
+};
+use crate::plans::state_machines::framework::coroutine::Engine;
+use crate::plans::state_machines::framework::plan_context::{Context, PlanBuilder};
 use crate::schema::{arc_schema, ArrayType, DataType, SchemaRef, StructField, ToSchema};
 use crate::snapshot::Snapshot;
 use crate::utils::current_time_duration;
-use crate::{delta_error, FileMeta, Version};
+use crate::{delta_error, FileMeta};
 
 // ============================================================================
 // Pipeline base schemas
@@ -88,10 +88,7 @@ pub(super) const FSR_JOIN_KEY_COL: &str = "__fsr_join_k";
 /// Typed `StructField` for [`FSR_JOIN_KEY_COL`], appended before windowing and re-projected
 /// through the antijoin.
 static JOIN_KEY_FIELD: LazyLock<StructField> = LazyLock::new(|| {
-    StructField::nullable(
-        FSR_JOIN_KEY_COL,
-        DataType::Array(Box::new(ArrayType::new(DataType::STRING, true))),
-    )
+    StructField::nullable(FSR_JOIN_KEY_COL, ArrayType::new(DataType::STRING, true))
 });
 
 // ============================================================================
@@ -118,10 +115,7 @@ fn file_field(suffix: &[&str]) -> Expression {
 /// `Array<String?>?` NULL -- the fallback returned by both dedup-key `CASE` expressions when
 /// no arm matches.
 fn null_string_array() -> Expression {
-    Expression::literal(Scalar::Null(DataType::Array(Box::new(ArrayType::new(
-        DataType::STRING,
-        true,
-    )))))
+    Expression::null_literal(ArrayType::new(DataType::STRING, true).into())
 }
 
 /// Predicate that selects rows whose `add.path` OR `remove.path` is non-null.
@@ -146,41 +140,40 @@ fn file_arm() -> Expression {
 /// NULL on rows that match no known slot so `dedup_key IS NOT NULL` doubles as the identity
 /// filter.
 pub(super) fn fsr_dedup_key() -> Expression {
-    let null_str = || Expression::literal(Scalar::Null(DataType::STRING));
-    let arm = |kind: &str, id1: Expression, id2: Expression, id3: Expression| {
-        Expression::array(vec![Expression::literal(kind), id1, id2, id3])
+    // Every arm produces a 4-element array `[kind, primary_id, dv_storage, dv_inline_dv]`,
+    // matching `file_arm` -- the widest arm. The DV slots are only populated by file rows
+    // (`add`/`remove`); non-file actions null them. `singleton` is for actions with no
+    // per-row id (protocol, metaData); `single_id` is for actions keyed by one id field
+    // (domainMetadata.domain, txn.appId).
+    let null_str = || Expression::null_literal(DataType::STRING);
+    let singleton = |kind: &str| {
+        Expression::array(vec![
+            Expression::literal(kind),
+            null_str(), // primary_id (none for singleton actions)
+            null_str(), // dv_storage (file-row only)
+            null_str(), // dv_inline_dv (file-row only)
+        ])
+    };
+    let single_id = |kind: &str, id: Expression| {
+        Expression::array(vec![
+            Expression::literal(kind),
+            id,
+            null_str(), // dv_storage (file-row only)
+            null_str(), // dv_inline_dv (file-row only)
+        ])
     };
     Expression::case_when(
         vec![
             (is_file_row(), file_arm()),
-            (
-                col(["protocol"]).is_not_null(),
-                arm(PROTOCOL_NAME, null_str(), null_str(), null_str()),
-            ),
-            // Metadata is a singleton table state action: latest row wins regardless of prior id.
-            (
-                col(METADATA_ID).is_not_null(),
-                arm("metadata", null_str(), null_str(), null_str()),
-            ),
-            // Domain metadata is keyed by domain; newer rows replace older configs for that
-            // domain.
+            (col(["protocol"]).is_not_null(), singleton(PROTOCOL_NAME)),
+            (col(METADATA_ID).is_not_null(), singleton("metadata")),
             (
                 col(["domainMetadata"]).is_not_null(),
-                arm(
-                    DOMAIN_METADATA_NAME,
-                    col(["domainMetadata", "domain"]),
-                    null_str(),
-                    null_str(),
-                ),
+                single_id(DOMAIN_METADATA_NAME, col(["domainMetadata", "domain"])),
             ),
             (
                 col(["txn"]).is_not_null(),
-                arm(
-                    SET_TRANSACTION_NAME,
-                    col(["txn", "appId"]),
-                    null_str(),
-                    null_str(),
-                ),
+                single_id(SET_TRANSACTION_NAME, col(["txn", "appId"])),
             ),
         ],
         null_string_array(),
@@ -205,8 +198,11 @@ const REMOVE_DELETION_TIMESTAMP: &[&str] = &["remove", "deletionTimestamp"];
 const TXN_LAST_UPDATED: &[&str] = &["txn", "lastUpdated"];
 
 /// Tombstone / txn expiration predicate aligned with
-/// [`crate::action_reconciliation::log_replay::ActionReconciliationVisitor::is_expired_tombstone`]
-/// and txn retention checks in the same visitor (`kernel/src/action_reconciliation/log_replay.rs`).
+/// [`ActionReconciliationVisitor::is_expired_tombstone`] and txn retention checks in the same
+/// visitor (`kernel/src/action_reconciliation/log_replay.rs`).
+///
+/// [`ActionReconciliationVisitor::is_expired_tombstone`]:
+///     crate::action_reconciliation::log_replay::ActionReconciliationVisitor::is_expired_tombstone
 ///
 /// `txn_expiry` is `None` when `delta.setTransactionRetentionDuration` is unset -- txn rows
 /// are not filtered by age.
@@ -229,169 +225,6 @@ fn retention_filter(min_file_ts: i64, txn_expiry: Option<i64>) -> Predicate {
 }
 
 // ============================================================================
-// Shape resolution
-// ============================================================================
-
-/// Topology of a snapshot's checkpoint(s).
-///
-/// All variants are `pub(super)` only; this is a local IR for the reconciliation pipeline.
-#[derive(Clone, Debug)]
-pub(super) enum CheckpointShape {
-    /// No checkpoint files: reconciliation degenerates to commit-only replay.
-    None,
-    /// Classic checkpoint with `add`/`remove` rows inline. The reconciliation re-scans
-    /// `files` directly.
-    Inline {
-        files: Vec<FileMeta>,
-        file_format: FileFormat,
-    },
-    /// V2 multipart manifest: `files` are the manifest parts. The reconciliation
-    /// re-scans them, filters down to sidecar pointer rows, and lazily loads the
-    /// referenced sidecar parquet files via `NodeKind::Load`.
-    Manifest {
-        files: Vec<FileMeta>,
-        file_format: FileFormat,
-    },
-}
-
-/// Configured reconciliation shape: checkpoint topology + stats + partitioning.
-#[derive(Clone, Debug)]
-pub(super) struct ScanShape {
-    pub(super) checkpoint: CheckpointShape,
-    /// Stats wiring. `None` means the caller didn't request stats. `Some` carries the
-    /// projected stats schema along with the on-disk layout the snapshot's checkpoint
-    /// uses for column stats.
-    pub(super) stats: Option<StatsInfo>,
-    pub(super) partition_schema: Option<SchemaRef>,
-}
-
-/// Stats wiring: the projected stats schema plus the on-disk layout the snapshot's
-/// checkpoint files use for column stats.
-#[derive(Clone, Debug)]
-pub(super) struct StatsInfo {
-    pub(super) schema: SchemaRef,
-    pub(super) checkpoint_layout: CheckpointStatsLayout,
-}
-
-/// How the snapshot's checkpoint files store column stats. The variant names mirror the
-/// protocol's column names (`add.stats_parsed` for the parsed struct, `add.stats` for the
-/// JSON-string form).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CheckpointStatsLayout {
-    /// Parsed struct (parquet `add.stats_parsed`).
-    StatsParsed,
-    /// JSON string (parquet/JSON `add.stats`).
-    StatsJson,
-}
-
-/// Resolve the scan shape via a sequence of `EngineRequest::Reduce` (sidecar URL extraction)
-/// and `EngineRequest::SchemaQuery` (layout / stats probes) yields against `engine`.
-///
-/// Yields through the plan-construction dispatch surface
-/// ([`Context::reduce`](crate::plans::state_machines::framework::plan_context::Context::reduce) /
-/// [`Context::schema_query`](crate::plans::state_machines::framework::plan_context::Context::schema_query)).
-/// At most one top-level `SchemaQuery`, one `Reduce` (V2 manifest sidecar URL extraction),
-/// and one sidecar `SchemaQuery` are emitted.
-pub(super) async fn resolve_shape(
-    ctx: &Context,
-    engine: &mut Engine,
-    snapshot: &Snapshot,
-    stats_schema: Option<&SchemaRef>,
-    partition_schema: Option<SchemaRef>,
-) -> Result<ScanShape, DeltaError> {
-    let seg = snapshot.log_segment();
-    let checkpoint_parts = &seg.listed.checkpoint_parts;
-
-    let make_info = |checkpoint, has_parsed_stats| ScanShape {
-        checkpoint,
-        stats: stats_schema.cloned().map(|schema| StatsInfo {
-            schema,
-            checkpoint_layout: if has_parsed_stats {
-                CheckpointStatsLayout::StatsParsed
-            } else {
-                CheckpointStatsLayout::StatsJson
-            },
-        }),
-        partition_schema: partition_schema.clone(),
-    };
-
-    if checkpoint_parts.is_empty() {
-        return Ok(make_info(CheckpointShape::None, false));
-    }
-
-    let file_format = checkpoint_format_from_path(&checkpoint_parts[0]);
-    let files: Vec<FileMeta> = checkpoint_parts
-        .iter()
-        .map(|p| p.location.clone())
-        .collect();
-
-    // Hint probe is authoritative -- `_last_checkpoint` describes the leaf file.
-    let mut parsed_stats: Option<bool> =
-        stats_probe(seg.checkpoint_schema().as_ref(), stats_schema);
-
-    let is_manifest = match file_format {
-        FileFormat::Parquet => {
-            let url = checkpoint_parts[0].location.location.as_str().to_string();
-            let cp_schema = ctx
-                .schema_query(engine, url, "ScanShape::resolve::checkpoint_schema")
-                .await?;
-            let is_mfst = cp_schema.contains(SIDECAR_NAME);
-            if !is_mfst && parsed_stats.is_none() {
-                parsed_stats = stats_probe(Some(&cp_schema), stats_schema);
-            }
-            is_mfst
-        }
-        FileFormat::Json => true,
-    };
-
-    if !is_manifest {
-        return Ok(make_info(
-            CheckpointShape::Inline { files, file_format },
-            parsed_stats.unwrap_or(false),
-        ));
-    }
-
-    // V2 manifest: drain a `SidecarCollector` over (manifest_scan -> filter SIDECAR not null)
-    // to recover sidecar URLs. The manifest is re-scanned in the build phase; this scan is
-    // for the sidecar SchemaQuery probe only.
-    let manifest_chain = match file_format {
-        FileFormat::Parquet => ctx.scan_parquet(files.clone(), manifest_probe_schema())?,
-        FileFormat::Json => ctx.scan_json(files.clone(), manifest_probe_schema())?,
-    };
-    let sidecar_chain = manifest_chain.filter(col([SIDECAR_NAME]).is_not_null())?;
-    let sidecar_files = ctx
-        .reduce(
-            engine,
-            sidecar_chain,
-            SidecarCollector::new(snapshot.log_segment().log_root.clone()),
-            "ScanShape::resolve::sidecar_extract",
-        )
-        .await?;
-
-    // Sidecar SchemaQuery probe (only if stats are requested AND hint didn't already answer).
-    if parsed_stats.is_none() {
-        if let (Some(reqd), Some(first)) = (stats_schema, sidecar_files.first()) {
-            let side_schema = ctx
-                .schema_query(
-                    engine,
-                    first.location.as_str().to_string(),
-                    "ScanShape::resolve::sidecar_schema",
-                )
-                .await?;
-            parsed_stats = Some(LogSegment::schema_has_compatible_stats_parsed(
-                side_schema.as_ref(),
-                reqd.as_ref(),
-            ));
-        }
-    }
-
-    Ok(make_info(
-        CheckpointShape::Manifest { files, file_format },
-        parsed_stats.unwrap_or(false),
-    ))
-}
-
-// ============================================================================
 // Reconciliation builder
 // ============================================================================
 
@@ -409,26 +242,17 @@ pub(super) fn build_reconciliation(
     let parts = shape.partition_schema.as_ref();
     let identity_not_null: PredicateRef = Arc::new(dedup_key.as_ref().clone().is_not_null());
 
-    let commits = commit_cover_rows(snapshot.log_segment())?;
-    let log_root = snapshot.log_segment().log_root.clone();
+    let seg = snapshot.log_segment();
+    let log_root = seg.log_root.clone();
     let (min_file_ts, txn_expiry) = retention_timestamps(snapshot)?;
 
     // === Stage 1: commit_load ===========================================================
     // VALUES(commits) -> Load(JSON) broadcasts the per-commit `version` column onto every
     // emitted action row.
-    let commit_rows: Vec<Vec<Scalar>> = commits
-        .iter()
-        .map(|c| {
-            vec![
-                Scalar::String(c.path.clone()),
-                Scalar::Long(c.size),
-                Scalar::Long(c.version as i64),
-            ]
-        })
-        .collect();
+    let commit_rows = log_files_to_rows(&log_root, seg.find_commit_cover())?;
     let commit_raw = ctx
         .values(commit_load_schema(), commit_rows)?
-        .load(LoadSpec {
+        .load(LoadNode {
             file_schema: Arc::clone(base),
             file_type: FileType::Json,
             base_url: Some(log_root.clone()),
@@ -464,7 +288,7 @@ pub(super) fn build_reconciliation(
     // for the antijoin's union arm), or `None` when the snapshot has no checkpoint at all.
     let checkpoint_view: Option<PlanBuilder> = match &shape.checkpoint {
         CheckpointShape::None => None,
-        CheckpointShape::Inline { files, file_format } => Some(load_checkpoint_files(
+        CheckpointShape::Leaf { files, file_format } => Some(load_checkpoint_files(
             ctx,
             base,
             shape,
@@ -498,7 +322,7 @@ pub(super) fn build_reconciliation(
                     ("path", col([SIDECAR_NAME, "path"])),
                     ("sizeInBytes", col([SIDECAR_NAME, "sizeInBytes"])),
                 ])?
-                .load(LoadSpec {
+                .load(LoadNode {
                     file_schema: sidecar_file_schema(base, shape.stats.as_ref())?,
                     file_type: FileType::Parquet,
                     base_url: Some(sidecar_base),
@@ -511,9 +335,7 @@ pub(super) fn build_reconciliation(
                     dv_ref: None,
                 })?;
             let sidecar_aligned = match shape.stats.as_ref() {
-                Some(s) if s.checkpoint_layout == CheckpointStatsLayout::StatsParsed => {
-                    sidecar_load.with_partitions_parsed(parts)?
-                }
+                Some(s) if s.has_parsed_stats => sidecar_load.with_partitions_parsed(parts)?,
                 _ => sidecar_load
                     .with_json_stats_parsed(stats)?
                     .with_partitions_parsed(parts)?,
@@ -561,14 +383,14 @@ pub(super) async fn execute_reconciliation(
     parts: Option<SchemaRef>,
     dedup_key: ExpressionRef,
 ) -> Result<PlanBuilder, DeltaError> {
-    let shape = resolve_shape(ctx, engine, snapshot, stats.as_ref(), parts).await?;
+    let shape = ScanShape::resolve(ctx, engine, snapshot, stats.as_ref(), parts).await?;
     build_reconciliation(ctx, snapshot, &shape, base, dedup_key)
 }
 
-/// Helper: scan an inline checkpoint and align it to the expected post-checkpoint shape.
-/// `Some(StatsParsed)` declares `add.stats_parsed` directly in the scan schema (parquet
-/// surfaces the parsed struct natively); `Some(StatsJson)` and `None` scan with `base` and
-/// JSON-parse stats post-Load.
+/// Helper: scan a leaf checkpoint and align it to the expected post-checkpoint shape.
+/// `Some(StatsInfo { has_parsed_stats: true, .. })` declares `add.stats_parsed` directly in
+/// the scan schema (parquet surfaces the parsed struct natively); the JSON-string and
+/// no-stats arms scan with `base` and JSON-parse stats post-Load.
 fn load_checkpoint_files(
     ctx: &Context,
     base: &SchemaRef,
@@ -579,7 +401,7 @@ fn load_checkpoint_files(
     let parts = shape.partition_schema.as_ref();
     let stats = shape.stats.as_ref().map(|s| &s.schema);
     let scan = match shape.stats.as_ref() {
-        Some(s) if s.checkpoint_layout == CheckpointStatsLayout::StatsParsed => {
+        Some(s) if s.has_parsed_stats => {
             let scan_schema = stats_parsed_file_schema(base, &s.schema)?;
             match file_format {
                 FileFormat::Parquet => ctx.scan_parquet(files, scan_schema)?,
@@ -640,30 +462,6 @@ impl ReconciliationPlanBuilder for PlanBuilder {
 // Helpers
 // ============================================================================
 
-fn checkpoint_format_from_path(cp: &ParsedLogPath<FileMeta>) -> FileFormat {
-    if cp.extension == "json" {
-        FileFormat::Json
-    } else {
-        FileFormat::Parquet
-    }
-}
-
-fn stats_probe(leaf: Option<&SchemaRef>, requested: Option<&SchemaRef>) -> Option<bool> {
-    let (l, r) = (leaf?, requested?);
-    Some(LogSegment::schema_has_compatible_stats_parsed(
-        l.as_ref(),
-        r.as_ref(),
-    ))
-}
-
-/// Manifest scan schema for the V2-multipart `is_manifest` probe in
-/// [`resolve_shape`]. Only the `sidecar` column is consumed downstream
-/// (`SidecarCollector` reads `sidecar.path` / `sidecar.sizeInBytes`); narrowing the scan
-/// to that one column avoids paying the read cost for the action columns.
-fn manifest_probe_schema() -> SchemaRef {
-    arc_schema([StructField::nullable(SIDECAR_NAME, Sidecar::to_schema())])
-}
-
 /// Manifest scan schema used by [`build_reconciliation`]: `base + sidecar`.
 ///
 /// Building the schema from `base` (rather than the full action schema) lets the caller
@@ -683,9 +481,7 @@ fn sidecar_file_schema(
     stats: Option<&StatsInfo>,
 ) -> Result<SchemaRef, DeltaError> {
     match stats {
-        Some(s) if s.checkpoint_layout == CheckpointStatsLayout::StatsParsed => {
-            stats_parsed_file_schema(base, &s.schema)
-        }
+        Some(s) if s.has_parsed_stats => stats_parsed_file_schema(base, &s.schema),
         _ => Ok(Arc::clone(base)),
     }
 }
@@ -702,7 +498,13 @@ fn stats_parsed_file_schema(
         .with_struct_at(&[ADD_NAME], |add| {
             add.with_field_replaced("stats", new_field)
         })
-        .or_delta(DeltaErrorCode::DeltaCommandInvariantViolation)?;
+        .map_err(|source| {
+            delta_error!(
+                DeltaErrorCode::DeltaCommandInvariantViolation,
+                source = source,
+                "base schema must place `add` as a struct slot at index 0",
+            )
+        })?;
     Ok(Arc::new(new_struct))
 }
 
@@ -719,15 +521,6 @@ fn commit_load_schema() -> SchemaRef {
 // Shared scan-pipeline helpers
 // ============================================================================
 
-/// One literal row describing a Delta JSON commit file. Public so external tools that
-/// consume the FSR commit file row layout can refer to it by name.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CommitFileMeta {
-    pub path: String,
-    pub size: i64,
-    pub version: Version,
-}
-
 /// Resolve the (deleted-file retention, txn expiry) timestamps for `snapshot`.
 fn retention_timestamps(snapshot: &Snapshot) -> Result<(i64, Option<i64>), DeltaError> {
     let now = current_time_duration().map_err(|e| e.into_delta_default())?;
@@ -741,12 +534,11 @@ fn retention_timestamps(snapshot: &Snapshot) -> Result<(i64, Option<i64>), Delta
     Ok((min_file_ts, txn_expiry))
 }
 
-/// Materialize the minimal set of commit / compaction file rows that cover the log segment,
-/// preferring compactions over the commits they subsume. Delegates the cover-selection logic
-/// to [`crate::log_segment::LogSegment::find_commit_cover`] and re-parses each file's
-/// [`ParsedLogPath`] to recover the version.
-fn commit_cover_rows(seg: &LogSegment) -> Result<Vec<CommitFileMeta>, DeltaError> {
-    seg.find_commit_cover()
+/// Convert Delta-log files (commit/compaction JSON) under `log_root` into Values rows
+/// aligned to [`commit_load_schema`]: `{path, size, version}`. `path` is resolved relative
+/// to `log_root`; `version` is recovered via [`ParsedLogPath`].
+fn log_files_to_rows(log_root: &Url, files: Vec<FileMeta>) -> Result<Vec<Vec<Scalar>>, DeltaError> {
+    files
         .into_iter()
         .map(|file| {
             let version = ParsedLogPath::try_from(file.clone())
@@ -754,16 +546,16 @@ fn commit_cover_rows(seg: &LogSegment) -> Result<Vec<CommitFileMeta>, DeltaError
                 .ok_or_else(|| {
                     delta_error!(
                         DeltaErrorCode::DeltaStateRecoverError,
-                        "commit_cover_rows: cover yielded a non-log-path file: {}",
+                        "log_files_to_rows: file is not a log path: {}",
                         file.location,
                     )
                 })?
                 .version;
-            Ok(CommitFileMeta {
-                path: path_under_log_root(&seg.log_root, &file.location)?,
-                size: file.size as i64,
-                version,
-            })
+            Ok(vec![
+                Scalar::String(path_under_log_root(log_root, &file.location)?),
+                Scalar::Long(file.size as i64),
+                Scalar::Long(version as i64),
+            ])
         })
         .collect()
 }
@@ -847,7 +639,7 @@ mod tests {
         let stringy_concat = DeletionVectorDescriptor::unique_id_from_parts("u", "dvpath", Some(7));
         assert!(
             !s.contains(&stringy_concat),
-            "json contains the legacy concat form `{stringy_concat}` -- dv_unique_id must use \
+            "json contains the Plus-as-concat form `{stringy_concat}` -- dv_unique_id must use \
              ToJson(Array(...)), not Plus-as-string-concat: json={s}"
         );
     }
@@ -891,12 +683,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fsr_dedup_key_is_null_for_unknown_rows() {
-        // The pipeline's identity filter is `dedup_key IS NOT NULL`, so the dedup-key MUST
-        // evaluate to NULL on rows that match no known slot. This is the load-bearing
-        // contract.
-        let rows = StringArray::from(vec![
+    fn dedup_key_fixture_rows() -> StringArray {
+        StringArray::from(vec![
             r#"{"add":{"path":"a.parquet","partitionValues":{},"size":1,"modificationTime":1,"dataChange":true}}"#,
             r#"{"remove":{"path":"r.parquet","deletionTimestamp":1,"dataChange":true,"partitionValues":{}}}"#,
             r#"{"protocol":{"minReaderVersion":1,"minWriterVersion":2}}"#,
@@ -904,67 +692,29 @@ mod tests {
             r#"{"domainMetadata":{"domain":"d1","configuration":"cfg","removed":false}}"#,
             r#"{"txn":{"appId":"app-1","version":7,"lastUpdated":100}}"#,
             r#"{}"#,
-        ]);
-        let batch = parse_json_to_record_batch(rows, FSR_BASE.clone());
-        let out = evaluate_expression(
-            &fsr_dedup_key().is_not_null().into(),
-            &batch,
-            Some(&DataType::BOOLEAN),
-        )
-        .unwrap();
-        let b = out.as_boolean();
-        assert!(b.value(0), "add row should produce non-NULL dedup key");
-        assert!(b.value(1), "remove row should produce non-NULL dedup key");
-        assert!(b.value(2), "protocol row should produce non-NULL dedup key");
-        assert!(b.value(3), "metaData row should produce non-NULL dedup key");
-        assert!(
-            b.value(4),
-            "domainMetadata row should produce non-NULL dedup key"
-        );
-        assert!(b.value(5), "txn row should produce non-NULL dedup key");
-        assert!(!b.value(6), "empty row should produce NULL dedup key");
+        ])
     }
 
-    #[test]
-    fn scan_file_dedup_key_is_null_for_non_file_rows() {
-        // The scan pipeline only cares about add/remove rows; everything else should be
-        // filtered out via `dedup_key IS NOT NULL`.
-        let rows = StringArray::from(vec![
-            r#"{"add":{"path":"a.parquet","partitionValues":{},"size":1,"modificationTime":1,"dataChange":true}}"#,
-            r#"{"remove":{"path":"r.parquet","deletionTimestamp":1,"dataChange":true,"partitionValues":{}}}"#,
-            r#"{"protocol":{"minReaderVersion":1,"minWriterVersion":2}}"#,
-            r#"{"metaData":{"id":"mid-1","name":null,"description":null,"format":{"provider":"parquet","options":{}},"schemaString":"{}","partitionColumns":[],"configuration":{},"createdTime":null}}"#,
-            r#"{"domainMetadata":{"domain":"d1","configuration":"cfg","removed":false}}"#,
-            r#"{"txn":{"appId":"app-1","version":7,"lastUpdated":100}}"#,
-            r#"{}"#,
-        ]);
-        let batch = parse_json_to_record_batch(rows, FSR_BASE.clone());
+    #[rstest::rstest]
+    #[case::fsr(fsr_dedup_key(), [true, true, true, true, true, true, false])]
+    #[case::scan_file(
+        scan_file_dedup_key(),
+        [true, true, false, false, false, false, false]
+    )]
+    fn dedup_key_null_mask(#[case] key_expr: Expression, #[case] expected: [bool; 7]) {
+        // The pipeline's identity filter is `dedup_key IS NOT NULL`; rows outside the keyed
+        // action set must evaluate to NULL.
+        let batch = parse_json_to_record_batch(dedup_key_fixture_rows(), FSR_BASE.clone());
         let out = evaluate_expression(
-            &scan_file_dedup_key().is_not_null().into(),
+            &key_expr.is_not_null().into(),
             &batch,
             Some(&DataType::BOOLEAN),
         )
         .unwrap();
         let b = out.as_boolean();
-        assert!(b.value(0), "add row should produce non-NULL scan dedup key");
-        assert!(
-            b.value(1),
-            "remove row should produce non-NULL scan dedup key"
-        );
-        assert!(
-            !b.value(2),
-            "protocol row should produce NULL scan dedup key"
-        );
-        assert!(
-            !b.value(3),
-            "metaData row should produce NULL scan dedup key"
-        );
-        assert!(
-            !b.value(4),
-            "domainMetadata row should produce NULL scan dedup key"
-        );
-        assert!(!b.value(5), "txn row should produce NULL scan dedup key");
-        assert!(!b.value(6), "empty row should produce NULL scan dedup key");
+        for (i, &want) in expected.iter().enumerate() {
+            assert_eq!(b.value(i), want, "row {i} dedup-key null mask mismatch");
+        }
     }
 
     // === Retention tests ==================================================================
