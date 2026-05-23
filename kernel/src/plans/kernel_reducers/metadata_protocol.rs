@@ -1,4 +1,4 @@
-//! `MetadataProtocolReader` — consumer KDF that extracts the table's
+//! `MetadataProtocolReader` — reducer KDF that extracts the table's
 //! [`Protocol`] and [`Metadata`] actions from a log / checkpoint scan.
 //!
 //! Uses the existing [`Protocol::try_new_from_data`] and
@@ -12,8 +12,8 @@
 
 use crate::actions::{Metadata, Protocol};
 use crate::plans::errors::{DeltaError, DeltaErrorCode};
-use crate::plans::kernel_consumers::{
-    KdfControl, KernelConsumer, KernelConsumerKind, KernelConsumerOutput,
+use crate::plans::kernel_reducers::{
+    KdfControl, KernelReducer, KernelReducerKind, KernelReducerOutput,
 };
 use crate::{delta_error, DeltaResult, EngineData};
 
@@ -25,9 +25,9 @@ pub struct MetadataProtocolReader {
     metadata: Option<Metadata>,
 }
 
-impl KernelConsumer for MetadataProtocolReader {
-    fn kind(&self) -> KernelConsumerKind {
-        KernelConsumerKind::MetadataProtocol
+impl KernelReducer for MetadataProtocolReader {
+    fn kind(&self) -> KernelReducerKind {
+        KernelReducerKind::MetadataProtocol
     }
 
     fn finish(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
@@ -53,7 +53,7 @@ impl KernelConsumer for MetadataProtocolReader {
     }
 }
 
-impl KernelConsumerOutput for MetadataProtocolReader {
+impl KernelReducerOutput for MetadataProtocolReader {
     type Output = (Protocol, Metadata);
 
     fn into_output(self) -> Result<Self::Output, DeltaError> {
@@ -77,8 +77,8 @@ mod tests {
     fn kind_is_stable() {
         let r = MetadataProtocolReader::default();
         assert_eq!(
-            crate::plans::kernel_consumers::KernelConsumer::kind(&r),
-            KernelConsumerKind::MetadataProtocol
+            crate::plans::kernel_reducers::KernelReducer::kind(&r),
+            KernelReducerKind::MetadataProtocol
         );
     }
 

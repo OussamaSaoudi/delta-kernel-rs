@@ -44,7 +44,7 @@ use crate::log_segment::LogSegment;
 use crate::path::ParsedLogPath;
 use crate::plans::errors::{DeltaError, DeltaErrorCode, KernelErrAsDelta};
 use crate::plans::ir::nodes::{default_scan_file_columns, FileFormat, FileType, ScanFileColumns};
-use crate::plans::kernel_consumers::SidecarCollector;
+use crate::plans::kernel_reducers::SidecarCollector;
 use crate::plans::state_machines::framework::coroutine::context::Engine;
 use crate::plans::state_machines::framework::plan_context::{Context, LoadSpec, PlanBuilder};
 use crate::schema::{
@@ -286,13 +286,13 @@ pub(super) enum CheckpointStatsLayout {
     StatsJson,
 }
 
-/// Resolve the scan shape via a sequence of `EngineRequest::Consume` (sidecar URL extraction)
+/// Resolve the scan shape via a sequence of `EngineRequest::Reduce` (sidecar URL extraction)
 /// and `EngineRequest::SchemaQuery` (layout / stats probes) yields against `engine`.
 ///
 /// Yields through the plan-construction dispatch surface
-/// ([`Context::consume`](crate::plans::state_machines::framework::plan_context::Context::consume) /
+/// ([`Context::reduce`](crate::plans::state_machines::framework::plan_context::Context::reduce) /
 /// [`Context::schema_query`](crate::plans::state_machines::framework::plan_context::Context::schema_query)).
-/// At most one top-level `SchemaQuery`, one `Consume` (V2 manifest sidecar URL extraction),
+/// At most one top-level `SchemaQuery`, one `Reduce` (V2 manifest sidecar URL extraction),
 /// and one sidecar `SchemaQuery` are emitted.
 pub(super) async fn resolve_shape(
     ctx: &Context,
@@ -362,7 +362,7 @@ pub(super) async fn resolve_shape(
     };
     let sidecar_chain = manifest_chain.filter(col([SIDECAR_NAME]).is_not_null())?;
     let sidecar_files = ctx
-        .consume(
+        .reduce(
             engine,
             sidecar_chain,
             SidecarCollector::new(snapshot.log_segment().log_root.clone()),
@@ -552,7 +552,7 @@ pub(super) fn build_reconciliation(
         .drop_col(FSR_JOIN_KEY_COL)
 }
 
-/// Async wrapper: resolve the scan shape (yielding `SchemaQuery` / `Consume` phases as
+/// Async wrapper: resolve the scan shape (yielding `SchemaQuery` / `Reduce` phases as
 /// needed) and then delegate to [`build_reconciliation`].
 pub(super) async fn execute_reconciliation(
     ctx: &Context,

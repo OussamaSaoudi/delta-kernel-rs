@@ -19,5 +19,5 @@
 
 pub mod errors;
 pub mod ir;
-pub mod kernel_consumers;
+pub mod kernel_reducers;
 pub mod state_machines;

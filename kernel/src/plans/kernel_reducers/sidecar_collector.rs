@@ -1,19 +1,19 @@
-//! `SidecarCollector` — consumer KDF that collects sidecar file references
+//! `SidecarCollector` — reducer KDF that collects sidecar file references
 //! from a V2 checkpoint manifest scan.
 //!
 //! Delegates row visiting to the existing
 //! [`SidecarVisitor`](crate::actions::visitors::SidecarVisitor) and
 //! resolves the captured sidecars against `log_root` into `Vec<FileMeta>`
 //! via [`Sidecar::to_filemeta`](crate::actions::Sidecar::to_filemeta) in
-//! [`KernelConsumerOutput::into_output`].
+//! [`KernelReducerOutput::into_output`].
 
 use url::Url;
 
 use crate::actions::visitors::SidecarVisitor;
 use crate::engine_data::RowVisitor;
 use crate::plans::errors::{DeltaError, DeltaErrorCode};
-use crate::plans::kernel_consumers::{
-    KdfControl, KernelConsumer, KernelConsumerKind, KernelConsumerOutput,
+use crate::plans::kernel_reducers::{
+    KdfControl, KernelReducer, KernelReducerKind, KernelReducerOutput,
 };
 use crate::{delta_error, DeltaResult, EngineData, FileMeta};
 
@@ -33,9 +33,9 @@ impl SidecarCollector {
     }
 }
 
-impl KernelConsumer for SidecarCollector {
-    fn kind(&self) -> KernelConsumerKind {
-        KernelConsumerKind::SidecarCollector
+impl KernelReducer for SidecarCollector {
+    fn kind(&self) -> KernelReducerKind {
+        KernelReducerKind::SidecarCollector
     }
 
     fn finish(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
@@ -48,7 +48,7 @@ impl KernelConsumer for SidecarCollector {
     }
 }
 
-impl KernelConsumerOutput for SidecarCollector {
+impl KernelReducerOutput for SidecarCollector {
     type Output = Vec<FileMeta>;
 
     fn into_output(self) -> Result<Self::Output, DeltaError> {
@@ -81,8 +81,8 @@ mod tests {
     fn kind_is_stable() {
         let s = SidecarCollector::new(log_root());
         assert_eq!(
-            crate::plans::kernel_consumers::KernelConsumer::kind(&s),
-            KernelConsumerKind::SidecarCollector
+            crate::plans::kernel_reducers::KernelReducer::kind(&s),
+            KernelReducerKind::SidecarCollector
         );
     }
 

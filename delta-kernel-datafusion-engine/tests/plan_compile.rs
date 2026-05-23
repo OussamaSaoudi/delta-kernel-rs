@@ -8,14 +8,14 @@ mod common;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use common::SumRowsConsumer;
+use common::SumRowsReducer;
 use delta_kernel::arrow::array::{AsArray, RecordBatch};
 use delta_kernel::arrow::compute::concat_batches;
 use delta_kernel::arrow::datatypes::Int64Type;
 use delta_kernel::expressions::{
     ColumnName, Expression, ExpressionRef, Predicate, PredicateRef, Scalar,
 };
-use delta_kernel::plans::ir::nodes::{ConsumeSink, FileType, ScanFileColumns};
+use delta_kernel::plans::ir::nodes::{FileType, ReduceSink, ScanFileColumns};
 use delta_kernel::plans::ir::plan::ResultPlan;
 use delta_kernel::plans::state_machines::framework::plan_context::{Context, LoadSpec};
 use delta_kernel::plans::state_machines::framework::step::EngineRequest;
@@ -181,11 +181,11 @@ fn left_anti_join_drops_matched_left_rows() {
     assert_eq!(kept, HashSet::from([1, 3]));
 }
 
-/// `EngineRequest::Consume` drains a plan dataflow into a [`KernelConsumer`]
-/// (`KernelConsumer::finish` -> `usize` row count) and the executor returns the finalized
-/// handle as `EngineResponse::Consumer`, keyed by the sink's token.
+/// `EngineRequest::Reduce` drains a plan dataflow into a [`KernelReducer`]
+/// (`KernelReducer::finish` -> `usize` row count) and the executor returns the finalized
+/// handle as `EngineResponse::Reducer`, keyed by the sink's token.
 #[tokio::test]
-async fn step_consume_drains_plan_into_consumer_handle() {
+async fn step_reduce_drains_plan_into_reducer_handle() {
     let ctx = Context::new();
     let src = ctx
         .values(
@@ -207,22 +207,22 @@ async fn step_consume_drains_plan_into_consumer_handle() {
     let terminal = rp.result;
     let stmts = rp.plan.stmts;
 
-    let sink = ConsumeSink::new_consumer(SumRowsConsumer::new("plan.consume_test"));
+    let sink = ReduceSink::new_reducer(SumRowsReducer::new("plan.reduce_test"));
     let token = sink.token.clone();
 
     let executor = DataFusionExecutor::try_new().unwrap();
     let payload = executor
-        .execute_step(EngineRequest::Consume {
+        .execute_step(EngineRequest::Reduce {
             stmts,
             terminal,
             sink,
         })
         .await
-        .expect("EngineRequest::Consume execution");
+        .expect("EngineRequest::Reduce execution");
 
     let handle = match payload {
-        EngineResponse::Consumer(h) => h,
-        other => panic!("expected EngineResponse::Consumer, got {other:?}"),
+        EngineResponse::Reducer(h) => h,
+        other => panic!("expected EngineResponse::Reducer, got {other:?}"),
     };
     assert_eq!(
         handle.token, token,
@@ -231,7 +231,7 @@ async fn step_consume_drains_plan_into_consumer_handle() {
     let total = *handle
         .erased
         .downcast::<usize>()
-        .expect("SumRowsConsumer finishes with usize");
+        .expect("SumRowsReducer finishes with usize");
     assert_eq!(total, 2, "filter keeps rows with v > 2 (i.e., 3 and 4)");
 }
 

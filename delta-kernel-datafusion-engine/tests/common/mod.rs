@@ -9,28 +9,28 @@
 use std::any::Any;
 
 use delta_kernel::engine::arrow_data::ArrowEngineData;
-use delta_kernel::plans::kernel_consumers::{KdfControl, KernelConsumer, KernelConsumerKind};
+use delta_kernel::plans::kernel_reducers::{KdfControl, KernelReducer, KernelReducerKind};
 use delta_kernel::{DeltaResult, EngineData};
 
-/// Consumer KDF that accumulates the total number of rows seen across all batches and finishes
+/// Reducer KDF that accumulates the total number of rows seen across all batches and finishes
 /// with the count as a `usize`. Used by tests that verify KDF wiring end-to-end.
 ///
-/// Token identity is by-UUID, so the [`KernelConsumerKind`] tag is incidental for test wiring; we
-/// reuse [`KernelConsumerKind::CheckpointHint`] as a stable placeholder.
+/// Token identity is by-UUID, so the [`KernelReducerKind`] tag is incidental for test wiring; we
+/// reuse [`KernelReducerKind::CheckpointHint`] as a stable placeholder.
 #[derive(Debug, Clone, Default)]
-pub struct SumRowsConsumer {
+pub struct SumRowsReducer {
     pub total: usize,
 }
 
-impl SumRowsConsumer {
+impl SumRowsReducer {
     pub fn new(_kind_label: &'static str) -> Self {
         Self::default()
     }
 }
 
-impl KernelConsumer for SumRowsConsumer {
-    fn kind(&self) -> KernelConsumerKind {
-        KernelConsumerKind::CheckpointHint
+impl KernelReducer for SumRowsReducer {
+    fn kind(&self) -> KernelReducerKind {
+        KernelReducerKind::CheckpointHint
     }
 
     fn finish(self: Box<Self>) -> Box<dyn Any + Send> {

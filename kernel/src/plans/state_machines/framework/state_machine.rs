@@ -64,7 +64,7 @@ pub trait StateMachine {
     /// Receive the step outcome from the driver.
     ///
     /// - `Ok(EngineResponse)` — the executor ran the step and produced its single typed payload (a
-    ///   finished consumer handle, a schema, or
+    ///   finished reducer handle, a schema, or
     ///   [`EngineResponse::Empty`](super::step_payload::EngineResponse::Empty) for the
     ///   driver-internal priming case). The SM body destructures the variant matching its preceding
     ///   yield; any other variant is an executor bug surfaced as an internal error.

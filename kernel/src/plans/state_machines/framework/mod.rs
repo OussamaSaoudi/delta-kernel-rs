@@ -5,8 +5,8 @@
 //! - [`step`] — the typed "unit of work" ([`EngineRequest`](step::EngineRequest)) handed from SM to
 //!   executor each step.
 //! - [`step_payload`] — typed success payload the executor returns from one phase
-//!   ([`EngineResponse::Consumer`](step_payload::EngineResponse::Consumer) for drained
-//!   [`KernelConsumer`](crate::plans::kernel_consumers::KernelConsumer) handles,
+//!   ([`EngineResponse::Reducer`](step_payload::EngineResponse::Reducer) for drained
+//!   [`KernelReducer`](crate::plans::kernel_reducers::KernelReducer) handles,
 //!   [`EngineResponse::Schema`](step_payload::EngineResponse::Schema) for schema-query results) and
 //!   that the SM consumes on `submit`.
 //! - [`engine_error`] — [`EngineError`](engine_error::EngineError), the typed failure the engine

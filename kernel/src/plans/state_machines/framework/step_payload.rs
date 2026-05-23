@@ -3,7 +3,7 @@
 //! Each [`EngineRequest`](super::step::EngineRequest) yielded by an SM produces at most one payload
 //! of one of two shapes:
 //!
-//! - [`EngineRequest::Consume`](super::step::EngineRequest::Consume) -> drain produces one
+//! - [`EngineRequest::Reduce`](super::step::EngineRequest::Reduce) -> drain produces one
 //!   [`FinishedHandle`].
 //! - [`EngineRequest::SchemaQuery`](super::step::EngineRequest::SchemaQuery) -> footer read
 //!   produces one [`SchemaRef`].
@@ -13,7 +13,7 @@
 //! slot) is gone -- nothing in the protocol can produce more than one payload per yield,
 //! so the indirection bought nothing.
 
-use crate::plans::kernel_consumers::FinishedHandle;
+use crate::plans::kernel_reducers::FinishedHandle;
 use crate::schema::SchemaRef;
 
 /// Engine -> SM success payload for a single phase yield.
@@ -24,9 +24,9 @@ use crate::schema::SchemaRef;
 /// [`Context`](super::plan_context::Context) dispatch helpers.
 #[derive(Debug)]
 pub enum EngineResponse {
-    /// A [`EngineRequest::Consume`](super::step::EngineRequest::Consume) finished and is handing
-    /// back its drained consumer state.
-    Consumer(FinishedHandle),
+    /// A [`EngineRequest::Reduce`](super::step::EngineRequest::Reduce) finished and is handing
+    /// back its drained reducer state.
+    Reducer(FinishedHandle),
     /// A [`EngineRequest::SchemaQuery`](super::step::EngineRequest::SchemaQuery) finished and is
     /// handing back the resolved schema.
     Schema(SchemaRef),

@@ -5,7 +5,7 @@
 //! Each yield carries a single [`StepYield`] (operation + static phase name + an optional
 //! debug-only live-relation snapshot), and the driver resumes the body with a [`StepResume`]
 //! wrapping the engine outcome. SM bodies emit yields through the plan-construction `Context`'s
-//! `execute` / `execute_consume` helpers; this module only defines the protocol types and
+//! `reduce` / `schema_query` helpers; this module only defines the protocol types and
 //! the underlying [`Engine`] alias.
 //!
 //! # Naming note

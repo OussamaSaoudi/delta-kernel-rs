@@ -14,7 +14,7 @@
 //! # Stale-builder protection
 //!
 //! Each builder captures the context's `session_id` at mint time. Dispatch methods
-//! ([`Context::consume`], [`Context::schema_query`]) bump the id to invalidate cursors
+//! ([`Context::reduce`], [`Context::schema_query`]) bump the id to invalidate cursors
 //! held across yields; [`Context::into_result_plan`] consumes `self`, which moots the
 //! concern for terminal dispatch.
 //!
@@ -39,13 +39,12 @@ use crate::expressions::{
 };
 use crate::plans::errors::{DeltaError, DeltaErrorCode, DeltaResultExt};
 use crate::plans::ir::nodes::{
-    ConsumeSink, DvRef, EquiJoinNode, FileType, FilterNode, ListFilesNode, LoadNode,
-    MaxByVersionNode, ProjectNode, ScanFileColumns, ScanJsonNode, ScanParquetNode, UnionNode,
-    ValuesNode,
+    DvRef, EquiJoinNode, FileType, FilterNode, ListFilesNode, LoadNode, MaxByVersionNode,
+    ProjectNode, ReduceSink, ScanFileColumns, ScanJsonNode, ScanParquetNode, UnionNode, ValuesNode,
 };
 use crate::plans::ir::plan::{JoinKind, NodeKind, Plan, PlanNode, Ref, ResultPlan};
 use crate::plans::ir::schema_inference::infer_expression_type;
-use crate::plans::kernel_consumers::{Extractor, KernelConsumer, KernelConsumerOutput};
+use crate::plans::kernel_reducers::{Extractor, KernelReducer, KernelReducerOutput};
 use crate::plans::state_machines::framework::coroutine::context::{Engine, StepResume, StepYield};
 use crate::plans::state_machines::framework::step::{EngineRequest, SchemaQuery};
 use crate::plans::state_machines::framework::step_payload::EngineResponse;
@@ -65,7 +64,7 @@ struct ContextState {
     /// minted sequentially by `mint_ref`).
     ref_schemas: Vec<SchemaRef>,
     /// Next Ref id to mint. Owned by Context (not Plan) so the IR stays a pure
-    /// data container. Reset to 0 by `consume` when the in-flight plan is taken.
+    /// data container. Reset to 0 by `reduce` when the in-flight plan is taken.
     next_ref: u32,
     /// Bumped by dispatch methods to invalidate cursors held across yields.
     session_id: u32,
@@ -95,7 +94,7 @@ impl ContextState {
 /// Plan-construction context.
 ///
 /// Source methods mint root [`PlanBuilder`]s, dispatch methods
-/// ([`Self::consume`] / [`Self::schema_query`]) yield steps through a coroutine, and
+/// ([`Self::reduce`] / [`Self::schema_query`]) yield steps through a coroutine, and
 /// [`Self::into_result_plan`] is the terminal sync drain (backward-reachability DCE).
 pub struct Context {
     state: Rc<RefCell<ContextState>>,
@@ -183,8 +182,8 @@ impl Context {
         )
     }
 
-    /// Drain the accumulator into a [`EngineRequest::Consume`] yielded through `engine` and recover
-    /// the consumer's typed output via [`Extractor`].
+    /// Drain the accumulator into a [`EngineRequest::Reduce`] yielded through `engine` and recover
+    /// the reducer's typed output via [`Extractor`].
     ///
     /// Backward-reachability DCE narrows the plan to stmts transitively reachable
     /// from `builder`. After the yield resumes, the accumulator is reset (empty plan +
@@ -195,18 +194,18 @@ impl Context {
     /// before the awaited yield, so the await never holds a [`RefMut`](std::cell::RefMut).
     // Currently exercised only by tests; PR6 wires it into FSR.
     #[allow(dead_code)]
-    pub(crate) async fn consume<S>(
+    pub(crate) async fn reduce<S>(
         &self,
         engine: &mut Engine,
         builder: PlanBuilder,
-        consumer: S,
+        reducer: S,
         step_name: &'static str,
     ) -> Result<S::Output, DeltaError>
     where
-        S: KernelConsumer + KernelConsumerOutput + 'static,
+        S: KernelReducer + KernelReducerOutput + 'static,
     {
-        let sink = ConsumeSink::new_consumer(consumer);
-        let extractor = Extractor::for_consumer::<S>(sink.token.clone());
+        let sink = ReduceSink::new_reducer(reducer);
+        let extractor = Extractor::for_reducer::<S>(sink.token.clone());
         let terminal = builder.ref_id;
         let stmts: Vec<crate::plans::ir::plan::PlanNode> = {
             let mut s = self.state.borrow_mut();
@@ -214,7 +213,7 @@ impl Context {
             let plan = std::mem::take(&mut s.plan);
             s.ref_schemas.clear();
             // Reset the Ref counter alongside the plan/schema reset: no Refs
-            // survive the consume boundary (the plan ships to the engine and the
+            // survive the reduce boundary (the plan ships to the engine and the
             // session id bump invalidates any held PlanBuilders), so restarting
             // from 0 is safe and keeps subsequent Refs compact.
             s.next_ref = 0;
@@ -226,7 +225,7 @@ impl Context {
 
         let StepResume(result) = engine
             .yield_(StepYield {
-                operation: EngineRequest::Consume {
+                operation: EngineRequest::Reduce {
                     stmts,
                     terminal,
                     sink,
@@ -235,11 +234,11 @@ impl Context {
             })
             .await;
         let payload = result.map_err(|e| e.into_delta_typed())?;
-        let EngineResponse::Consumer(handle) = payload else {
+        let EngineResponse::Reducer(handle) = payload else {
             return Err(delta_error!(
                 DeltaErrorCode::DeltaCommandInvariantViolation,
-                "consume: executor returned non-Consumer payload `{payload:?}` for \
-                 EngineRequest::Consume",
+                "reduce: executor returned non-Reducer payload `{payload:?}` for \
+                 EngineRequest::Reduce",
             ));
         };
         extractor.extract(handle).map_err(|e| e.into_delta_typed())
@@ -250,7 +249,7 @@ impl Context {
     /// Bumps `session_id` so any cursors held across the boundary fail at runtime.
     /// The accumulator is preserved -- callers typically use the returned schema to
     /// build fresh sources, and old refs become unreachable from new cursors (the next
-    /// `consume`'s DCE prunes them).
+    /// `reduce`'s DCE prunes them).
     // Currently exercised only by tests; PR6 wires it into FSR.
     #[allow(dead_code)]
     pub(crate) async fn schema_query(
@@ -1065,8 +1064,8 @@ mod tests {
     use super::*;
     use crate::expressions::{col, Predicate};
     use crate::plans::ir::plan::JoinKind;
-    use crate::plans::kernel_consumers::{
-        FinishedHandle, KdfControl, KernelConsumerKind, KernelConsumerOutput,
+    use crate::plans::kernel_reducers::{
+        FinishedHandle, KdfControl, KernelReducerKind, KernelReducerOutput,
     };
     use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
     use crate::plans::state_machines::framework::state_machine::{NextStep, StateMachine};
@@ -1454,15 +1453,15 @@ mod tests {
 
     // === CoroutineSM dispatch tests ============================================
 
-    /// Test KernelConsumer that echoes its constructor input as the output value.
+    /// Test KernelReducer that echoes its constructor input as the output value.
     #[derive(Debug, Clone)]
-    struct EchoConsumer {
+    struct EchoReducer {
         value: i64,
     }
 
-    impl KernelConsumer for EchoConsumer {
-        fn kind(&self) -> KernelConsumerKind {
-            KernelConsumerKind::CheckpointHint
+    impl KernelReducer for EchoReducer {
+        fn kind(&self) -> KernelReducerKind {
+            KernelReducerKind::CheckpointHint
         }
         fn finish(self: Box<Self>) -> Box<dyn Any + Send> {
             Box::new(*self)
@@ -1472,18 +1471,18 @@ mod tests {
         }
     }
 
-    impl KernelConsumerOutput for EchoConsumer {
+    impl KernelReducerOutput for EchoReducer {
         type Output = i64;
         fn into_output(self) -> Result<i64, DeltaError> {
             Ok(self.value)
         }
     }
 
-    /// `consume` yields a `EngineRequest::Consume` with the DCE'd stmts and the builder's terminal
-    /// Ref, the engine resumes with the consumer's finished handle, and the SM body
+    /// `reduce` yields a `EngineRequest::Reduce` with the DCE'd stmts and the builder's terminal
+    /// Ref, the engine resumes with the reducer's finished handle, and the SM body
     /// recovers the typed output.
     #[test]
-    fn consume_yields_step_consume_and_recovers_typed_output() {
+    fn reduce_yields_step_reduce_and_recovers_typed_output() {
         let mut sm = CoroutineSM::<i64>::new("test", |mut engine, _sm_id| async move {
             let ctx = Context::new();
             let _dead = ctx.values(id_ts_schema(), vec![]).unwrap();
@@ -1492,15 +1491,15 @@ mod tests {
                 .unwrap()
                 .filter(Arc::new(col("id").is_not_null()))
                 .unwrap();
-            ctx.consume(&mut engine, builder, EchoConsumer { value: 7 }, "drain")
+            ctx.reduce(&mut engine, builder, EchoReducer { value: 7 }, "drain")
                 .await
         })
         .unwrap();
 
-        // First yielded step is the Consume.
+        // First yielded step is the Reduce.
         assert_eq!(sm.step_name(), "drain");
         let token = match sm.get_step().unwrap() {
-            EngineRequest::Consume {
+            EngineRequest::Reduce {
                 stmts,
                 terminal,
                 sink,
@@ -1511,13 +1510,13 @@ mod tests {
                 assert_eq!(terminal, Ref(2));
                 sink.token.clone()
             }
-            other => panic!("expected EngineRequest::Consume, got {other:?}"),
+            other => panic!("expected EngineRequest::Reduce, got {other:?}"),
         };
 
         // Engine drains the sink and resumes with a finished handle.
-        let payload = EngineResponse::Consumer(FinishedHandle {
+        let payload = EngineResponse::Reducer(FinishedHandle {
             token,
-            erased: Box::new(EchoConsumer { value: 7 }),
+            erased: Box::new(EchoReducer { value: 7 }),
         });
         let next = sm.submit(Ok(payload)).unwrap();
         match next {
@@ -1527,19 +1526,19 @@ mod tests {
         assert!(sm.is_done());
     }
 
-    /// `Context::consume` resets the Ref counter so the next source minted after
-    /// the consume boundary starts at `Ref(0)` again. The full plan ships to the
+    /// `Context::reduce` resets the Ref counter so the next source minted after
+    /// the reduce boundary starts at `Ref(0)` again. The full plan ships to the
     /// engine and the session-id bump invalidates any held cursors, so reusing
-    /// Ref ids across the boundary is safe and keeps post-consume Refs compact.
+    /// Ref ids across the boundary is safe and keeps post-reduce Refs compact.
     #[test]
-    fn consume_resets_ref_counter() {
+    fn reduce_resets_ref_counter() {
         let mut sm = CoroutineSM::<u32>::new("test", |mut engine, _sm_id| async move {
             let ctx = Context::new();
             let v0 = ctx.values(id_ts_schema(), vec![]).unwrap();
             let v1 = v0.filter(Arc::new(col("id").is_not_null())).unwrap();
             assert_eq!(v1.ref_id(), Ref(1));
             let _: i64 = ctx
-                .consume(&mut engine, v1, EchoConsumer { value: 0 }, "drain")
+                .reduce(&mut engine, v1, EchoReducer { value: 0 }, "drain")
                 .await?;
             let post = ctx.values(id_ts_schema(), vec![]).unwrap();
             Ok(post.ref_id().0)
@@ -1547,27 +1546,27 @@ mod tests {
         .unwrap();
 
         let token = match sm.get_step().unwrap() {
-            EngineRequest::Consume { sink, .. } => sink.token.clone(),
-            other => panic!("expected EngineRequest::Consume, got {other:?}"),
+            EngineRequest::Reduce { sink, .. } => sink.token.clone(),
+            other => panic!("expected EngineRequest::Reduce, got {other:?}"),
         };
-        let payload = EngineResponse::Consumer(FinishedHandle {
+        let payload = EngineResponse::Reducer(FinishedHandle {
             token,
-            erased: Box::new(EchoConsumer { value: 0 }),
+            erased: Box::new(EchoReducer { value: 0 }),
         });
         match sm.submit(Ok(payload)).unwrap() {
-            NextStep::Done(v) => assert_eq!(v, 0, "post-consume Ref must be 0"),
+            NextStep::Done(v) => assert_eq!(v, 0, "post-reduce Ref must be 0"),
             other => panic!("expected Done, got {other:?}"),
         }
     }
 
-    /// Resuming a `EngineRequest::Consume` with a non-Consumer payload surfaces an internal
+    /// Resuming a `EngineRequest::Reduce` with a non-Reducer payload surfaces an internal
     /// error -- the executor produced a payload that doesn't match the yielded step.
     #[test]
-    fn consume_resume_with_wrong_payload_variant_errors() {
+    fn reduce_resume_with_wrong_payload_variant_errors() {
         let mut sm = CoroutineSM::<i64>::new("test", |mut engine, _sm_id| async move {
             let ctx = Context::new();
             let builder = ctx.values(id_ts_schema(), vec![]).unwrap();
-            ctx.consume(&mut engine, builder, EchoConsumer { value: 1 }, "drain")
+            ctx.reduce(&mut engine, builder, EchoReducer { value: 1 }, "drain")
                 .await
         })
         .unwrap();
@@ -1576,7 +1575,7 @@ mod tests {
             .submit(Ok(EngineResponse::Schema(id_ts_schema())))
             .unwrap_err();
         assert!(
-            err.to_string().contains("non-Consumer payload"),
+            err.to_string().contains("non-Reducer payload"),
             "got: {err}",
         );
     }

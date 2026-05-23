@@ -2,10 +2,10 @@
 //! payloads to DataFusion plans.
 //!
 //! Every step the SM yields is either a `EngineRequest::SchemaQuery` (parquet footer read) or a
-//! `EngineRequest::Consume` (a plan dataflow drained into a [`ConsumeSink`]). Terminal
+//! `EngineRequest::Reduce` (a plan dataflow drained into a [`ReduceSink`]). Terminal
 //! `ResultPlan`s describe a single self-contained dataflow DAG that compiles to a `LogicalPlan`.
 //!
-//! [`ConsumeSink`]: delta_kernel::plans::ir::nodes::ConsumeSink
+//! [`ReduceSink`]: delta_kernel::plans::ir::nodes::ReduceSink
 
 use std::sync::Arc;
 
@@ -19,8 +19,8 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::DefaultEngineBuilder;
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::plans::errors::DeltaError;
-use delta_kernel::plans::ir::nodes::ConsumeSink;
-use delta_kernel::plans::kernel_consumers::{FinishedHandle, KdfControl};
+use delta_kernel::plans::ir::nodes::ReduceSink;
+use delta_kernel::plans::kernel_reducers::{FinishedHandle, KdfControl};
 use delta_kernel::plans::state_machines::framework::coroutine::driver::CoroutineSM;
 use delta_kernel::plans::state_machines::framework::engine_error::{EngineError, EngineErrorKind};
 use delta_kernel::plans::state_machines::framework::state_machine::{NextStep, StateMachine};
@@ -214,27 +214,27 @@ impl DataFusionExecutor {
     async fn run_phase(&self, op: EngineRequest) -> Result<EngineResponse, EngineError> {
         match op {
             EngineRequest::SchemaQuery(node) => execute_schema_query_phase(&self.engine, node),
-            EngineRequest::Consume {
+            EngineRequest::Reduce {
                 stmts,
                 terminal,
                 sink,
             } => {
                 let finished = self
-                    .run_consume(&stmts, terminal, &sink)
+                    .run_reduce(&stmts, terminal, &sink)
                     .await
                     .map_err(EngineError::internal)?;
-                Ok(EngineResponse::Consumer(finished))
+                Ok(EngineResponse::Reducer(finished))
             }
         }
     }
 
-    /// Compile a [`EngineRequest::Consume`] into a DataFusion physical plan, drain it through
-    /// the consume sink, and return the finalized handle.
-    async fn run_consume(
+    /// Compile a [`EngineRequest::Reduce`] into a DataFusion physical plan, drain it through
+    /// the reduce sink, and return the finalized handle.
+    async fn run_reduce(
         &self,
         stmts: &[delta_kernel::plans::ir::plan::PlanNode],
         terminal: delta_kernel::plans::ir::plan::Ref,
-        sink: &ConsumeSink,
+        sink: &ReduceSink,
     ) -> Result<FinishedHandle, DataFusionError> {
         let ctx = CompileContext {
             engine: Arc::clone(&self.engine),
@@ -244,19 +244,19 @@ impl DataFusionExecutor {
         let physical = df_state
             .create_physical_plan(&df_state.optimize(&logical)?)
             .await?;
-        self.drain_consume_sink(physical, sink).await
+        self.drain_reduce_sink(physical, sink).await
     }
 
     /// Drain `physical` through a
-    /// [`KernelConsumer`](delta_kernel::plans::kernel_consumers::KernelConsumer) handle
+    /// [`KernelReducer`](delta_kernel::plans::kernel_reducers::KernelReducer) handle
     /// minted from `sink` and return the finalized handle.
-    async fn drain_consume_sink(
+    async fn drain_reduce_sink(
         &self,
         physical: Arc<dyn ExecutionPlan>,
-        sink: &ConsumeSink,
+        sink: &ReduceSink,
     ) -> Result<FinishedHandle, DataFusionError> {
         let mut handle = sink.new_handle();
-        // Consume sinks are single-partition by construction; read partition 0 directly without
+        // Reduce sinks are single-partition by construction; read partition 0 directly without
         // coalesce.
         let mut stream = physical.execute(0, Arc::clone(&self.task_ctx))?;
         while let Some(batch) = stream.try_next().await? {

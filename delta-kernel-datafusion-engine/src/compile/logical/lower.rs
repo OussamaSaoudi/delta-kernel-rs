@@ -64,10 +64,10 @@ use crate::exec::LoadTableProvider;
 /// [`Plan::reachable_from`](delta_kernel::plans::ir::plan::Plan::reachable_from) before passing
 /// the stmts in. Taking `&[PlanNode]` rather than `&Plan` avoids needing a `Plan::from_stmts`
 /// constructor; both the [`ResultPlan`](delta_kernel::plans::ir::plan::ResultPlan)-returning
-/// drive path (where the caller already has a `Plan`) and the [`EngineRequest::Consume`] dispatch
+/// drive path (where the caller already has a `Plan`) and the [`EngineRequest::Reduce`] dispatch
 /// (where the executor only sees raw stmts) share this entry point.
 ///
-/// [`EngineRequest::Consume`]: delta_kernel::plans::state_machines::framework::step::EngineRequest::Consume
+/// [`EngineRequest::Reduce`]: delta_kernel::plans::state_machines::framework::step::EngineRequest::Reduce
 pub fn compile_plan(
     stmts: &[PlanNode],
     terminal: Ref,

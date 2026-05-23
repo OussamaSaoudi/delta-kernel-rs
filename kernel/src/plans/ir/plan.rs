@@ -4,7 +4,7 @@
 //! A [`Plan`] is an ordered vector of [`PlanNode`]s forming a DAG via these Ref edges.
 //! All [`NodeKind`]s are pure compute -- no sinks, no named relations, no engine-side
 //! side effects. Cross-step data flow happens through state machine bodies (kernel
-//! consumer outputs and schema queries), never through the IR.
+//! reducer outputs and schema queries), never through the IR.
 //!
 //! The IR is in SSA form: each [`Ref`] is bound exactly once -- by the [`PlanNode`] whose
 //! `output` field names it -- and is referenced read-only thereafter. Compiler-IR readers

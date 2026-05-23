@@ -1,4 +1,4 @@
-//! `CheckpointHintReader` -- consumer KDF that reads a `_last_checkpoint`
+//! `CheckpointHintReader` -- reducer KDF that reads a `_last_checkpoint`
 //! JSON scan and extracts the hint record.
 //!
 //! The file contains a single row. The reader captures it on the first
@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::plans::errors::DeltaError;
-use crate::plans::kernel_consumers::{
-    KdfControl, KernelConsumer, KernelConsumerKind, KernelConsumerOutput,
+use crate::plans::kernel_reducers::{
+    KdfControl, KernelReducer, KernelReducerKind, KernelReducerOutput,
 };
 use crate::schema::{ColumnName, ColumnNamesAndTypes, DataType, ToSchema};
 use crate::{DeltaResult, EngineData};
@@ -43,9 +43,9 @@ pub struct CheckpointHintReader {
     record: Option<CheckpointHintRecord>,
 }
 
-impl KernelConsumer for CheckpointHintReader {
-    fn kind(&self) -> KernelConsumerKind {
-        KernelConsumerKind::CheckpointHint
+impl KernelReducer for CheckpointHintReader {
+    fn kind(&self) -> KernelReducerKind {
+        KernelReducerKind::CheckpointHint
     }
 
     fn finish(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
@@ -65,7 +65,7 @@ impl KernelConsumer for CheckpointHintReader {
     }
 }
 
-impl KernelConsumerOutput for CheckpointHintReader {
+impl KernelReducerOutput for CheckpointHintReader {
     type Output = Option<CheckpointHintRecord>;
 
     fn into_output(self) -> Result<Self::Output, DeltaError> {

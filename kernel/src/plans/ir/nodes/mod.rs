@@ -10,7 +10,7 @@ use url::Url;
 
 use super::plan::JoinKind;
 use crate::expressions::{ColumnName, Expression, Predicate, Scalar};
-use crate::plans::kernel_consumers::{ConsumerHandle, KernelConsumer, KernelConsumerToken};
+use crate::plans::kernel_reducers::{KernelReducer, KernelReducerToken, ReducerHandle};
 use crate::schema::SchemaRef;
 use crate::FileMeta;
 
@@ -192,46 +192,46 @@ pub(crate) fn default_scan_file_columns() -> ScanFileColumns {
 }
 
 // ============================================================================
-// Consumer-drain sink (referenced by `EngineRequest::Consume`)
+// Reducer-drain sink (referenced by `EngineRequest::Reduce`)
 // ============================================================================
 
-/// Template for draining a row stream into a [`KernelConsumer`] via
-/// [`EngineRequest::Consume`](crate::plans::state_machines::framework::step::EngineRequest::Consume).
+/// Template for draining a row stream into a [`KernelReducer`] via
+/// [`EngineRequest::Reduce`](crate::plans::state_machines::framework::step::EngineRequest::Reduce).
 ///
 /// - `initial_state`: cloned per partition via [`DynClone`](dyn_clone::DynClone) into a
-///   [`ConsumerHandle`].
+///   [`ReducerHandle`].
 /// - `token`: keys the finished handle returned from the executor and validated at decode time by
-///   the paired [`Extractor`](crate::plans::kernel_consumers::Extractor).
+///   the paired [`Extractor`](crate::plans::kernel_reducers::Extractor).
 #[derive(Debug, Clone)]
-pub struct ConsumeSink {
-    pub initial_state: Box<dyn KernelConsumer>,
-    pub token: KernelConsumerToken,
+pub struct ReduceSink {
+    pub initial_state: Box<dyn KernelReducer>,
+    pub token: KernelReducerToken,
 }
 
-impl ConsumeSink {
-    /// Construct from a concrete consumer and mint a fresh token from its `kind`.
-    pub fn new_consumer<C: KernelConsumer + 'static>(state: C) -> Self {
-        let token = KernelConsumerToken::new(state.kind());
+impl ReduceSink {
+    /// Construct from a concrete reducer and mint a fresh token from its `kind`.
+    pub fn new_reducer<R: KernelReducer + 'static>(state: R) -> Self {
+        let token = KernelReducerToken::new(state.kind());
         Self {
             initial_state: Box::new(state),
             token,
         }
     }
 
-    /// Mint a runtime [`ConsumerHandle`] for this sink template by cloning the initial state.
-    pub fn new_handle(&self) -> ConsumerHandle {
-        ConsumerHandle::new(self.token.clone(), self.initial_state.clone())
+    /// Mint a runtime [`ReducerHandle`] for this sink template by cloning the initial state.
+    pub fn new_handle(&self) -> ReducerHandle {
+        ReducerHandle::new(self.token.clone(), self.initial_state.clone())
     }
 }
 
 // Token identity drives equality: tokens are process-unique by id, and the
-// `initial_state` trait object (`Box<dyn KernelConsumer>`) is not `Eq`-able. Two
+// `initial_state` trait object (`Box<dyn KernelReducer>`) is not `Eq`-able. Two
 // sinks sharing a token were constructed from the same plan node and therefore
-// describe the same consumer.
-impl PartialEq for ConsumeSink {
+// describe the same reducer.
+impl PartialEq for ReduceSink {
     fn eq(&self, other: &Self) -> bool {
         self.token == other.token
     }
 }
 
-impl Eq for ConsumeSink {}
+impl Eq for ReduceSink {}

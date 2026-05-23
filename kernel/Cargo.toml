@@ -61,7 +61,7 @@ z85 = "3.0.6"
 
 # optional deps
 futures = { version = "0.3", optional = true }
-# dyn-clone: `Clone` for `Box<dyn KernelConsumer>` trait objects via the
+# dyn-clone: `Clone` for `Box<dyn KernelReducer>` trait objects via the
 # `DynClone` supertrait. Blanket impl covers any `Clone` KDF state, so
 # concrete KDFs don't write their own `clone_boxed`.
 dyn-clone = { version = "1.0", optional = true }
@@ -130,7 +130,7 @@ schema-diff = []
 #   - `internal-api` — because the declarative IR uses kernel-internal
 #     types (most notably `schema::ToSchema`) hidden under `#[internal_api]`.
 #   - `arrow` — the executor works in Arrow types throughout, and KDF
-#     consumer impls return Arrow-typed views over each batch.
+#     reducer impls return Arrow-typed views over each batch.
 declarative-plans = ["internal-api", "arrow", "dep:dyn-clone"]
 
 # this is an 'internal' feature flag which has all the shared bits from default-engine-native-tls

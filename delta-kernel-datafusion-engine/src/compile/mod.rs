@@ -15,9 +15,9 @@ pub use logical::compile_plan;
 /// Context shared by the compiler for leaf nodes that need runtime side state.
 ///
 /// Carries only static / shared bits -- there is no per-phase mutable accumulator
-/// here. Drained consumer state for `Consume` steps flows directly out of
+/// here. Drained reducer state for `Reduce` steps flows directly out of
 /// [`DataFusionExecutor::run_phase`](crate::executor::DataFusionExecutor) as a
-/// [`EngineResponse::Consumer`](delta_kernel::plans::state_machines::framework::step_payload::EngineResponse::Consumer)
+/// [`EngineResponse::Reducer`](delta_kernel::plans::state_machines::framework::step_payload::EngineResponse::Reducer)
 /// after the executor finishes the sink locally.
 #[derive(Clone)]
 pub struct CompileContext {
