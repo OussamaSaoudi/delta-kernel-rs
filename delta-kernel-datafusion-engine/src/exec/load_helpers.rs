@@ -266,18 +266,27 @@ pub(crate) fn build_file_source(
     include_row_number: bool,
 ) -> DfResult<Arc<dyn FileSource>> {
     let (file_fields, passthrough_fields) = full_schema.fields().split_at(file_field_count);
-    let file_arrow_schema: ArrowSchemaRef = Arc::new(
-        ArrowSchema::new(file_fields.to_vec()).with_metadata(full_schema.metadata().clone()),
-    );
-    // Partition-col broadcast (`replace_columns_with_literals` / `ProjectionOpener`) synthesizes
-    // each output array's `data_type` from the upstream-extracted `ScalarValue`, which never
-    // carries kernel's `delta.columnMapping.*` / `PARQUET:field_id` metadata; we strip it here
-    // and reapply per-batch in the metadata stamper.
-    let stripped_passthrough_fields: Vec<FieldRef> = passthrough_fields
+    // File fields: strip NESTED metadata so the opener's declared schema matches the
+    // parquet decoder's bare nested output (Arrow's `RecordBatch::try_new` does full
+    // `DataType` equality including metadata embedded in `Struct`/`List` child fields).
+    // Top-level metadata stays so [`super::field_id_adapter::FieldIdPhysicalExprAdapter`]
+    // can match by `PARQUET:field_id` / `delta.columnMapping.*` (required for ID-mode CM).
+    // [`super::super::compile::stamp_udf::StampFieldUdf`] re-stamps logical nested metadata
+    // at the SSA `Project` boundary.
+    //
+    // Passthrough fields: pass through verbatim. The partition-col broadcast inherits
+    // metadata from the upstream `ScalarValue`'s `data_type`, which in turn matches the
+    // kernel-compiled Project's emitted schema -- so the field already carries the same
+    // metadata the kernel declared (e.g. `partitionValues_parsed.year` retains its
+    // `delta.generationExpression`).
+    let stripped_file_fields: Vec<FieldRef> = file_fields
         .iter()
-        .map(|f| Arc::new(strip_field_metadata_recursive(f.as_ref())))
+        .map(|f| Arc::new(strip_nested_metadata_only(f.as_ref())))
         .collect();
-    let mut table_schema = TableSchema::new(file_arrow_schema, stripped_passthrough_fields);
+    let file_arrow_schema: ArrowSchemaRef = Arc::new(
+        ArrowSchema::new(stripped_file_fields).with_metadata(full_schema.metadata().clone()),
+    );
+    let mut table_schema = TableSchema::new(file_arrow_schema, passthrough_fields.to_vec());
     if include_row_number && matches!(file_type, FileType::Parquet) {
         let virt_field: FieldRef = Arc::new(
             ArrowField::new(ROW_NUMBER_COL, ArrowDataType::Int64, false)
@@ -314,22 +323,53 @@ pub(crate) fn build_file_source(
     Ok(Arc::clone(projected_config.file_source()))
 }
 
-/// Recursively strip per-field metadata so the resulting field's `data_type` matches what
-/// DataFusion's partition-col broadcast produces at runtime.
+/// Strip a field's own metadata + all metadata embedded in its nested children. Internal
+/// helper for the [`strip_nested_metadata_dt`] recursion only; callers that need to
+/// preserve the top-level field's metadata should use [`strip_nested_metadata_only`].
 fn strip_field_metadata_recursive(
     field: &delta_kernel::arrow::datatypes::Field,
 ) -> delta_kernel::arrow::datatypes::Field {
-    use delta_kernel::arrow::datatypes::{DataType, Field, Fields};
-    let strip_inner = |f: &Arc<Field>| Arc::new(strip_field_metadata_recursive(f.as_ref()));
-    let stripped_dt = match field.data_type() {
+    use delta_kernel::arrow::datatypes::Field;
+    let stripped_dt = strip_nested_metadata_dt(field.data_type());
+    Field::new(field.name(), stripped_dt, field.is_nullable())
+}
+
+/// Strip metadata from child fields embedded inside `Struct` / `List` / `Map` etc., but
+/// PRESERVE the top-level field's name + metadata + nullability. Arrow's
+/// `RecordBatch::try_new` does full `DataType` equality including metadata baked into nested
+/// child fields, but the top-level field's own metadata is part of the `Field`, not the
+/// `DataType`, and is not subject to that equality check. So we only need to strip the
+/// child metadata to satisfy `RecordBatch::try_new`, while keeping top-level keys like
+/// `PARQUET:field_id` and `delta.columnMapping.*` so that
+/// [`super::field_id_adapter::FieldIdPhysicalExprAdapter`] can still match columns by id
+/// (critical for ID-mode column mapping where logical names don't uniquely identify the
+/// physical column).
+pub(crate) fn strip_nested_metadata_only(
+    field: &delta_kernel::arrow::datatypes::Field,
+) -> delta_kernel::arrow::datatypes::Field {
+    use delta_kernel::arrow::datatypes::Field;
+    let stripped_dt = strip_nested_metadata_dt(field.data_type());
+    Field::new(field.name(), stripped_dt, field.is_nullable())
+        .with_metadata(field.metadata().clone())
+}
+
+/// Helper: strip metadata recursively inside a `DataType`'s nested children (full strip --
+/// child field metadata, grandchild metadata, etc.). Non-nested types pass through.
+fn strip_nested_metadata_dt(
+    dt: &delta_kernel::arrow::datatypes::DataType,
+) -> delta_kernel::arrow::datatypes::DataType {
+    use delta_kernel::arrow::datatypes::{DataType, Fields};
+    let strip_inner = |f: &Arc<delta_kernel::arrow::datatypes::Field>| {
+        Arc::new(strip_field_metadata_recursive(f))
+    };
+    match dt {
         DataType::Struct(fs) => DataType::Struct(Fields::from_iter(fs.iter().map(strip_inner))),
         DataType::List(inner) => DataType::List(strip_inner(inner)),
         DataType::LargeList(inner) => DataType::LargeList(strip_inner(inner)),
         DataType::FixedSizeList(inner, n) => DataType::FixedSizeList(strip_inner(inner), *n),
         DataType::Map(entry, sorted) => DataType::Map(strip_inner(entry), *sorted),
         other => other.clone(),
-    };
-    Field::new(field.name(), stripped_dt, field.is_nullable())
+    }
 }
 
 /// Parquet decoding uses field-id/column-mapping aware adaptation; JSON keeps DataFusion's

@@ -5,16 +5,18 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use datafusion_common::arrow::datatypes::Schema as ArrowSchema;
+use datafusion_common::arrow::datatypes::{FieldRef, Schema as ArrowSchema};
 use datafusion_common::error::DataFusionError;
 use datafusion_common::Column;
 use datafusion_expr::logical_plan::LogicalPlan;
-use datafusion_expr::{Expr, LogicalPlanBuilder};
+use datafusion_expr::{Expr, ExprSchemable, LogicalPlanBuilder};
+use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::expressions::{ColumnName, Expression};
 use delta_kernel::plans::ir::nodes::ProjectNode;
 use delta_kernel::transforms::ExpressionTransform;
 
 use crate::compile::expr_translator::{kernel_expr_to_df, TranslationContext};
+use crate::compile::stamp_udf::StampFieldUdf;
 
 /// Walk every kernel projection expression and collect the set of unique top-level column
 /// roots (the first segment of any [`ColumnName`] reference). Detects potential collisions
@@ -158,14 +160,41 @@ pub(super) fn compile_project_node(
         };
 
     let working_arrow_schema: ArrowSchema = working_plan.schema().as_arrow().clone();
+    let working_dfschema = working_plan.schema().clone();
+    // For each output column, conditionally wrap the translated expression in
+    // `StampFieldUdf`. The stamp re-installs the kernel's logical field metadata --
+    // `delta.columnMapping.*` / `PARQUET:field_id` -- on every nested struct/list level
+    // for downstream consumers. We only apply it when the kernel's target arrow data type
+    // *differs* from what DataFusion's expression would naturally produce against the
+    // input schema. This avoids re-stamping pass-through projections (where the input
+    // schema already matches the kernel's declaration, e.g. reconciliation projects whose
+    // child types flow through unchanged), which can otherwise interact badly with
+    // intermediate operators that snapshot the upstream schema.
     let projection: Vec<Expr> = rewritten_columns
         .iter()
         .zip(node.output_schema.fields())
         .map(|(kernel_expr, field)| {
             let cx = TranslationContext::typed(field, &working_arrow_schema);
-            Ok::<Expr, DataFusionError>(
-                kernel_expr_to_df(kernel_expr.as_ref(), &cx)?.alias(field.name().to_string()),
-            )
+            let df_expr = kernel_expr_to_df(kernel_expr.as_ref(), &cx)?;
+            let target_field: FieldRef = Arc::new(field.try_into_arrow().map_err(|e| {
+                DataFusionError::Plan(format!(
+                    "compile_project_node: build stamp field for `{}`: {e}",
+                    field.name()
+                ))
+            })?);
+            let natural_dt: Option<_> = df_expr
+                .to_field(working_dfschema.as_ref())
+                .ok()
+                .map(|(_, f): (_, FieldRef)| f.data_type().clone());
+            let needs_stamp = natural_dt
+                .as_ref()
+                .is_none_or(|dt| dt != target_field.data_type());
+            let expr = if needs_stamp {
+                StampFieldUdf::new(target_field).call(df_expr)
+            } else {
+                df_expr
+            };
+            Ok::<Expr, DataFusionError>(expr.alias(field.name().to_string()))
         })
         .collect::<Result<Vec<_>, DataFusionError>>()?;
     LogicalPlanBuilder::from(working_plan)

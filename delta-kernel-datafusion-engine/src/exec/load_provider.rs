@@ -13,12 +13,13 @@ use datafusion_common::Result as DfResult;
 use datafusion_expr::logical_plan::LogicalPlan;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion_physical_plan::ExecutionPlan;
-use delta_kernel::arrow::datatypes::SchemaRef as ArrowSchemaRef;
+use delta_kernel::arrow::datatypes::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::plans::ir::nodes::LoadNode;
 use delta_kernel::schema::SchemaRef;
 use delta_kernel::Engine;
 
+use crate::exec::load_helpers::strip_nested_metadata_only;
 use crate::exec::LoadExec;
 
 pub struct LoadTableProvider {
@@ -40,13 +41,31 @@ impl LoadTableProvider {
         engine: Arc<dyn Engine>,
         output_kernel_schema: SchemaRef,
     ) -> Result<Self, DataFusionError> {
+        // Mirror the per-field metadata policy in [`super::LoadExec`]'s TableSchema (see
+        // [`crate::exec::load_helpers::build_file_source`] for the rationale): file fields
+        // strip nested metadata to match the parquet decoder's bare output; passthrough
+        // fields pass through verbatim to match the partition-col broadcast.
+        let file_field_count = node.file_schema.fields().len();
+        let kernel_arrow_schema: ArrowSchema = output_kernel_schema
+            .as_ref()
+            .try_into_arrow()
+            .map_err(|e| {
+                crate::error::plan_compilation(format!("LoadTableProvider output schema: {e}"))
+            })?;
+        let adjusted_fields: Vec<_> = kernel_arrow_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                if i < file_field_count {
+                    Arc::new(strip_nested_metadata_only(f.as_ref()))
+                } else {
+                    Arc::clone(f)
+                }
+            })
+            .collect();
         let output_schema: ArrowSchemaRef = Arc::new(
-            output_kernel_schema
-                .as_ref()
-                .try_into_arrow()
-                .map_err(|e| {
-                    crate::error::plan_compilation(format!("LoadTableProvider output schema: {e}"))
-                })?,
+            ArrowSchema::new(adjusted_fields).with_metadata(kernel_arrow_schema.metadata().clone()),
         );
         Ok(Self {
             upstream_logical,
