@@ -25,16 +25,6 @@ pub struct MetadataProtocolReader {
     metadata: Option<Metadata>,
 }
 
-impl MetadataProtocolReader {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn is_complete(&self) -> bool {
-        self.protocol.is_some() && self.metadata.is_some()
-    }
-}
-
 impl KernelConsumer for MetadataProtocolReader {
     fn kind(&self) -> KernelConsumerKind {
         KernelConsumerKind::MetadataProtocol
@@ -55,7 +45,7 @@ impl KernelConsumer for MetadataProtocolReader {
                 self.metadata = Some(m);
             }
         }
-        if self.is_complete() {
+        if self.protocol.is_some() && self.metadata.is_some() {
             Ok(KdfControl::Break)
         } else {
             Ok(KdfControl::Continue)
@@ -85,7 +75,7 @@ mod tests {
 
     #[test]
     fn kind_is_stable() {
-        let r = MetadataProtocolReader::new();
+        let r = MetadataProtocolReader::default();
         assert_eq!(
             crate::plans::kernel_consumers::KernelConsumer::kind(&r),
             KernelConsumerKind::MetadataProtocol
@@ -94,7 +84,7 @@ mod tests {
 
     #[test]
     fn missing_protocol_errors() {
-        let r = MetadataProtocolReader::new();
+        let r = MetadataProtocolReader::default();
         let err = r.into_output().unwrap_err();
         assert!(format!("{err}").contains("missing protocol"), "got: {err}");
     }

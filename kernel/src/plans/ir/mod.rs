@@ -1,8 +1,8 @@
 //! Plan intermediate representation.
 //!
 //! - [`nodes`] — per-variant payload structs that the [`plan::NodeKind`] enum wraps
-//!   ([`nodes::LoadNode`], [`nodes::ScanNode`], [`nodes::ProjectNode`], etc.) plus the shared
-//!   [`nodes::ConsumeSink`] referenced by
+//!   ([`nodes::LoadNode`], [`nodes::ScanParquetNode`], [`nodes::ScanJsonNode`],
+//!   [`nodes::ProjectNode`], etc.) plus the shared [`nodes::ConsumeSink`] referenced by
 //!   [`EngineRequest::Consume`](crate::plans::state_machines::framework::step::EngineRequest::Consume).
 //! - [`plan`] — typed [`plan::Plan`] / [`plan::PlanNode`] / [`plan::NodeKind`] / [`plan::Ref`] /
 //!   [`plan::ResultPlan`]. Pure compute; no sinks, no named relations, no engine state side

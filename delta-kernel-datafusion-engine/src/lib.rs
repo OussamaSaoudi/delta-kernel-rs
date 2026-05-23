@@ -1,4 +1,4 @@
-//! DataFusion execution scaffold for kernel SSA plans. See [`DataFusionExecutor`] and
+//! DataFusion execution scaffold for kernel plans. See [`DataFusionExecutor`] and
 //! [`exec`] / [`compile`] modules.
 
 pub mod compile;

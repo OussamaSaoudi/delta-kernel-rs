@@ -1,19 +1,19 @@
-//! Scan-time SSA state machines and the shared data-phase projection helper.
+//! Scan-time state machines and the shared data-phase projection helper.
 //!
-//! Hosts the `impl Scan { ... }` block that exposes the SSA-flavored coroutine state
-//! machines for metadata-only and combined metadata + data scans. The actual SSA plan
-//! body is built by [`super::ssa_scan::build_scan_ssa`].
+//! Hosts the `impl Scan { ... }` block that exposes the coroutine state machines for
+//! metadata-only and combined metadata + data scans. The actual scan plan body is built
+//! by [`super::scan_plan::build_scan_plan`].
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::ssa_scan::build_scan_ssa;
+use super::scan_plan::build_scan_plan;
 use crate::delta_error;
 use crate::expressions::{col, Expression, Transform};
 use crate::plans::errors::{DeltaError, DeltaErrorCode};
 use crate::plans::ir::plan::ResultPlan;
 use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
-use crate::plans::state_machines::framework::plan_context::Context as SsaContext;
+use crate::plans::state_machines::framework::plan_context::Context;
 use crate::scan::log_replay::FILE_CONSTANT_VALUES_NAME;
 use crate::scan::state_info::StateInfo;
 use crate::scan::transform_spec::{row_id_coalesce_expr, FieldTransformSpec};
@@ -26,14 +26,14 @@ impl Scan {
     /// CoroutineSM SM for metadata-only scan execution.
     ///
     /// Builds the canonical scan pipeline (FSR reconciliation + flat `scan_file_row`
-    /// projection) as a single SSA program against the builder API and yields a single
-    /// [`ResultPlan`]. Engines drive this through `drive_ssa_to_dataframe`.
+    /// projection) as a single plan against the builder API and yields a single
+    /// [`ResultPlan`]. Engines drive this through `drive_to_dataframe`.
     pub fn scan_metadata_state_machine(&self) -> Result<CoroutineSM<ResultPlan>, DeltaError> {
         let scan = self.clone();
-        CoroutineSM::new("scan_metadata_ssa", move |mut engine, _sm_id| async move {
-            let ctx = SsaContext::new();
+        CoroutineSM::new("scan_metadata", move |mut engine, _sm_id| async move {
+            let ctx = Context::new();
             let live_actions =
-                build_scan_ssa(&ctx, &mut engine, &scan, /* with_data= */ false).await?;
+                build_scan_plan(&ctx, &mut engine, &scan, /* with_data= */ false).await?;
             ctx.into_result_plan(live_actions)
         })
     }
@@ -41,13 +41,12 @@ impl Scan {
     /// CoroutineSM SM for combined metadata + data scan execution.
     ///
     /// Pipeline: shape-resolution yields, then reconciliation + flat scan-file
-    /// projection + per-file Load + logical projection are appended into a single
-    /// SSA program.
+    /// projection + per-file Load + logical projection are appended into a single plan.
     pub fn scan_state_machine(&self) -> Result<CoroutineSM<ResultPlan>, DeltaError> {
         let scan = self.clone();
-        CoroutineSM::new("scan_ssa", move |mut engine, _sm_id| async move {
-            let ctx = SsaContext::new();
-            let data = build_scan_ssa(&ctx, &mut engine, &scan, /* with_data= */ true).await?;
+        CoroutineSM::new("scan", move |mut engine, _sm_id| async move {
+            let ctx = Context::new();
+            let data = build_scan_plan(&ctx, &mut engine, &scan, /* with_data= */ true).await?;
             ctx.into_result_plan(data)
         })
     }

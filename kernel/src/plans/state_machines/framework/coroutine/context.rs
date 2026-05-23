@@ -1,9 +1,10 @@
 //! CoroutineSM yield/resume protocol shared by the [`CoroutineSM`](super::driver::CoroutineSM)
-//! driver and the SSA [`crate::plans::state_machines::framework::plan_context::Context`].
+//! driver and the plan-construction
+//! [`crate::plans::state_machines::framework::plan_context::Context`].
 //!
 //! Each yield carries a single [`StepYield`] (operation + static phase name + an optional
 //! debug-only live-relation snapshot), and the driver resumes the body with a [`StepResume`]
-//! wrapping the engine outcome. SM bodies emit yields through the SSA `Context`'s
+//! wrapping the engine outcome. SM bodies emit yields through the plan-construction `Context`'s
 //! `execute` / `execute_consume` helpers; this module only defines the protocol types and
 //! the underlying [`Engine`] alias.
 //!

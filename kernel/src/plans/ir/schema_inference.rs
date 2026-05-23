@@ -1,6 +1,6 @@
 //! Narrow expression-type inference for builder schema derivation.
 //!
-//! Used by the SSA plan builder ([`super::plan`] consumers) to derive a [`DataType`] for
+//! Used by the plan builder ([`super::plan`] consumers) to derive a [`DataType`] for
 //! each named expression in a `Project` so the plan builder knows the output schema without the
 //! caller spelling it out. Coverage is intentionally minimal -- the variants exercised by
 //! the FSR / Scan / CDF builders today (`Literal`, `Column`, `Predicate`, `Variadic::Array`,

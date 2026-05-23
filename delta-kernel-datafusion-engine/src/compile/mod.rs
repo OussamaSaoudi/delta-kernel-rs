@@ -1,17 +1,16 @@
-//! Kernel SSA plan -> DataFusion [`datafusion_expr::LogicalPlan`] compilation.
+//! Kernel plan -> DataFusion [`datafusion_expr::LogicalPlan`] compilation.
 
 use std::sync::Arc;
 
 use datafusion_common::error::DataFusionError;
 use delta_kernel::Engine;
-use uuid::Uuid;
 
 pub mod expr_translator;
 mod json_parse;
 pub mod logical;
 pub mod stamp_udf;
 
-pub use logical::compile_ssa;
+pub use logical::compile_plan;
 
 /// Context shared by the compiler for leaf nodes that need runtime side state.
 ///
@@ -25,24 +24,13 @@ pub struct CompileContext {
     /// Kernel [`Engine`] for sinks that delegate IO to parquet/json handlers
     /// (`NodeKind::Load`).
     pub engine: Arc<dyn Engine>,
-    /// Owning state machine's identity. Stamped onto any `Consume` handle drained during the
-    /// phase. Synthesized to `("standalone", "execute")` with a fresh `sm_id` for tests and
-    /// SM-less entry points.
-    pub sm_id: Uuid,
-    pub sm_kind: &'static str,
-    pub step_name: &'static str,
 }
 
 impl CompileContext {
     /// Build a context for SM-less inspection / standalone driving (benchmark plan printers,
     /// integration tests that lower a `ResultPlan` directly).
     pub fn new(engine: Arc<dyn Engine>) -> Self {
-        Self {
-            engine,
-            sm_id: Uuid::new_v4(),
-            sm_kind: "standalone",
-            step_name: "execute",
-        }
+        Self { engine }
     }
 }
 

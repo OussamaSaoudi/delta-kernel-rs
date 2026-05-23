@@ -1,6 +1,6 @@
-//! Round-trip integration tests for the SSA `compile_ssa` lowering. Each test builds a
-//! [`Plan`](delta_kernel::plans::ir::plan::Plan) via the SSA [`Context`] builder, wraps it in
-//! a [`ResultPlan`], and runs it through [`DataFusionExecutor::ssa_result_to_dataframe`] --
+//! Round-trip integration tests for the `compile_plan` lowering. Each test builds a
+//! [`Plan`](delta_kernel::plans::ir::plan::Plan) via the [`Context`] builder, wraps it in
+//! a [`ResultPlan`], and runs it through [`DataFusionExecutor::result_plan_to_dataframe`] --
 //! exercising the per-`NodeKind` lowerings without requiring a state machine.
 
 mod common;
@@ -30,7 +30,7 @@ fn run_to_one_batch(rp: ResultPlan) -> RecordBatch {
         .build()
         .expect("tokio runtime");
     let batches = runtime
-        .block_on(testing::collect_ssa_result(&exec, rp))
+        .block_on(testing::collect_result_plan(&exec, rp))
         .expect("collect");
     assert!(!batches.is_empty(), "expected at least one batch");
     let schema = batches[0].schema();
@@ -152,52 +152,6 @@ fn ordered_union_preserves_input_order() {
     assert_eq!(long_col(&batch, "v"), vec![1, 2, 3, 4]);
 }
 
-/// `EquiJoin { kind: Inner }` emits matching `(left, right)` rows.
-#[test]
-fn inner_equi_join_emits_matching_rows() {
-    let ctx = Context::new();
-    let left = ctx
-        .values(
-            long_schema(&["k", "v_left"]),
-            vec![
-                vec![Scalar::Long(1), Scalar::Long(10)],
-                vec![Scalar::Long(2), Scalar::Long(20)],
-                vec![Scalar::Long(3), Scalar::Long(30)],
-            ],
-        )
-        .unwrap();
-    let right = ctx
-        .values(
-            long_schema(&["rk", "v_right"]),
-            vec![
-                vec![Scalar::Long(2), Scalar::Long(200)],
-                vec![Scalar::Long(3), Scalar::Long(300)],
-                vec![Scalar::Long(4), Scalar::Long(400)],
-            ],
-        )
-        .unwrap();
-    let keys: Vec<(ExpressionRef, ExpressionRef)> = vec![(
-        Arc::new(Expression::column(["k"])),
-        Arc::new(Expression::column(["rk"])),
-    )];
-    let builder = left.inner_join(right, keys).unwrap();
-    let rp = ctx.into_result_plan(builder).unwrap();
-
-    let batch = run_to_one_batch(rp);
-    let mut tuples: Vec<(i64, i64, i64, i64)> = (0..batch.num_rows())
-        .map(|i| {
-            (
-                long_col(&batch, "k")[i],
-                long_col(&batch, "v_left")[i],
-                long_col(&batch, "rk")[i],
-                long_col(&batch, "v_right")[i],
-            )
-        })
-        .collect();
-    tuples.sort();
-    assert_eq!(tuples, vec![(2, 20, 2, 200), (3, 30, 3, 300)]);
-}
-
 /// `EquiJoin { kind: LeftAnti }` emits each left row whose key matches no right row.
 #[test]
 fn left_anti_join_drops_matched_left_rows() {
@@ -227,11 +181,11 @@ fn left_anti_join_drops_matched_left_rows() {
     assert_eq!(kept, HashSet::from([1, 3]));
 }
 
-/// `EngineRequest::Consume` drains an SSA dataflow into a [`KernelConsumer`]
+/// `EngineRequest::Consume` drains a plan dataflow into a [`KernelConsumer`]
 /// (`KernelConsumer::finish` -> `usize` row count) and the executor returns the finalized
 /// handle as `EngineResponse::Consumer`, keyed by the sink's token.
 #[tokio::test]
-async fn step_consume_drains_ssa_into_consumer_handle() {
+async fn step_consume_drains_plan_into_consumer_handle() {
     let ctx = Context::new();
     let src = ctx
         .values(
@@ -253,7 +207,7 @@ async fn step_consume_drains_ssa_into_consumer_handle() {
     let terminal = rp.result;
     let stmts = rp.plan.stmts;
 
-    let sink = ConsumeSink::new_consumer(SumRowsConsumer::new("ssa.consume_test"));
+    let sink = ConsumeSink::new_consumer(SumRowsConsumer::new("plan.consume_test"));
     let token = sink.token.clone();
 
     let executor = DataFusionExecutor::try_new().unwrap();
@@ -342,7 +296,7 @@ async fn load_node_reads_files_and_broadcasts_passthrough() {
     let rp = ctx.into_result_plan(builder).unwrap();
 
     let exec = DataFusionExecutor::try_new().unwrap();
-    let batches = testing::collect_ssa_result(&exec, rp).await.unwrap();
+    let batches = testing::collect_result_plan(&exec, rp).await.unwrap();
     assert!(!batches.is_empty(), "expected at least one batch");
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     // Two upstream rows, each broadcasting onto two file rows -> 4 emitted rows.

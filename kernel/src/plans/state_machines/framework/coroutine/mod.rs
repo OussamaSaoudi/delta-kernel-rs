@@ -1,7 +1,7 @@
 //! CoroutineSM-backed [`StateMachine`](super::state_machine::StateMachine) implementation.
 //!
 //! - [`context`] -- the [`StepYield`](context::StepYield) / [`StepResume`](context::StepResume)
-//!   yield/resume protocol shared by the [`driver`] and the SSA
+//!   yield/resume protocol shared by the [`driver`] and the plan-construction
 //!   [`Context`](super::plan_context::Context).
 //! - [`driver`] — the [`CoroutineSM<R>`](driver::CoroutineSM) driver that compiles
 //!   [`StepYield`](context::StepYield) sequences into the
@@ -9,7 +9,7 @@
 //!
 //! The underlying stackless-coroutine machinery comes from the
 //! [`genawaiter2`] crate. See [`driver`] for the no-panic policy
-//! discussion (genawaiter2 panics on protocol misuse; the SSA
+//! discussion (genawaiter2 panics on protocol misuse; the plan-construction
 //! [`Context`](super::plan_context::Context) dispatch helpers rule out those paths by
 //! construction).
 

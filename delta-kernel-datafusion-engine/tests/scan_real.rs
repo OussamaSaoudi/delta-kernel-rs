@@ -1,12 +1,11 @@
 //! Smoke tests for [`DataFusionExecutor::scan_metadata`] / [`DataFusionExecutor::scan_data`]
-//! routed through the SSA scan SMs.
+//! routed through the scan state machines.
 //!
-//! Cross-checks the SSA scan path's `scan_metadata` row count against the kernel
-//! default-engine reference (`Scan::scan_metadata` add-path set, the same source of
-//! truth used by the FSR golden tests). `scan_data` is asserted to drive without
-//! error and produce some rows; the per-row data correctness is implicitly covered
-//! by parity with the metadata add-path set + the engine-level scan-correctness
-//! tests in `scan_correctness.rs`.
+//! Cross-checks the scan path's `scan_metadata` row count against the kernel default-engine
+//! reference (`Scan::scan_metadata` add-path set, the same source of truth used by the FSR
+//! golden tests). `scan_data` is asserted to drive without error and produce some rows; the
+//! per-row data correctness is implicitly covered by parity with the metadata add-path set +
+//! the engine-level scan-correctness tests in `scan_correctness.rs`.
 
 mod common;
 
@@ -79,10 +78,10 @@ fn kernel_reference_live_file_count(scan: &Scan, engine: &dyn KernelEngine) -> u
     total
 }
 
-/// SSA `scan_metadata` row count matches the kernel default-engine reference live-file
-/// count across the FSR golden fixtures. Mirrors the fixture set used by `fsr_real.rs`
-/// so any disagreement points at the scan-specific terminal (action_pair -> flat
-/// scan_file_row), not the shared reconciliation.
+/// `scan_metadata` row count matches the kernel default-engine reference live-file count
+/// across the FSR golden fixtures. Mirrors the fixture set used by `fsr_real.rs` so any
+/// disagreement points at the scan-specific terminal (action_pair -> flat scan_file_row),
+/// not the shared reconciliation.
 #[rstest]
 #[case::commit_only("app-txn-no-checkpoint")]
 #[case::v1_checkpoint("app-txn-checkpoint")]
@@ -92,38 +91,35 @@ fn kernel_reference_live_file_count(scan: &Scan, engine: &dyn KernelEngine) -> u
 #[case::v2_json_sidecars("v2-json-sidecars-struct-stats-only")]
 #[case::v2_parquet_sidecars("v2-parquet-sidecars-struct-stats-only")]
 #[tokio::test]
-async fn scan_metadata_ssa_row_count_matches_kernel_reference(#[case] fixture: &str) {
+async fn scan_metadata_row_count_matches_kernel_reference(#[case] fixture: &str) {
     let (engine, scan) = open_scan(fixture);
     let expected = kernel_reference_live_file_count(&scan, engine.as_ref());
 
     let executor = DataFusionExecutor::try_new_with_engine(engine).expect("executor");
     let df = executor.scan_metadata(&scan).await.expect("scan_metadata");
     let batches = df.collect().await.expect("collect scan_metadata");
-    let ssa_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(
-        ssa_rows, expected,
-        "SSA scan_metadata row count vs kernel reference for {fixture}"
+        rows, expected,
+        "scan_metadata row count vs kernel reference for {fixture}"
     );
 }
 
-/// SSA `scan_data` drives end-to-end without error and produces at least one row.
-/// The detailed per-row data correctness is covered by `scan_correctness.rs` plus
-/// kernel parity in the metadata test above; this case asserts the full data-stage
-/// pipeline (Load + logical projection on top of reconciliation) wires up.
+/// `scan_data` drives end-to-end without error and produces at least one row. The detailed
+/// per-row data correctness is covered by `scan_correctness.rs` plus kernel parity in the
+/// metadata test above; this case asserts the full data-stage pipeline (Load + logical
+/// projection on top of reconciliation) wires up.
 #[rstest]
 #[case::commit_only("app-txn-no-checkpoint")]
 #[case::v1_checkpoint("app-txn-checkpoint")]
 #[case::dv_small("table-with-dv-small")]
 #[case::no_dv_small("table-without-dv-small")]
 #[tokio::test]
-async fn scan_data_ssa_drives_without_error(#[case] fixture: &str) {
+async fn scan_data_drives_without_error(#[case] fixture: &str) {
     let (engine, scan) = open_scan(fixture);
     let executor = DataFusionExecutor::try_new_with_engine(engine).expect("executor");
     let df = executor.scan_data(&scan).await.expect("scan_data");
     let batches = df.collect().await.expect("collect scan_data");
     let row_total: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert!(
-        row_total > 0,
-        "SSA scan_data produced zero rows for {fixture}"
-    );
+    assert!(row_total > 0, "scan_data produced zero rows for {fixture}");
 }

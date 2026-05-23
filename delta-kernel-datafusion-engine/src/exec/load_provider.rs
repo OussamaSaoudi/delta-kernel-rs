@@ -30,8 +30,8 @@ pub struct LoadTableProvider {
 }
 
 impl LoadTableProvider {
-    /// Construct from the SSA `NodeKind::Load` payload plus the precomputed kernel-typed
-    /// output schema. The caller (SSA `lower_load`) computes `output_kernel_schema` by
+    /// Construct from the `NodeKind::Load` payload plus the precomputed kernel-typed
+    /// output schema. The caller (`lower_load`) computes `output_kernel_schema` by
     /// composing the load's `file_schema` with the per-passthrough-column types resolved
     /// against the upstream's kernel schema; this provider just converts it to arrow.
     pub fn try_new(

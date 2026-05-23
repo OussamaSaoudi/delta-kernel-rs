@@ -913,7 +913,7 @@ pub trait ParquetHandler: AsAny {
 ///
 /// # Naming note
 ///
-/// The SSA plans/state-machines subsystem reuses the name `Engine` for an unrelated coroutine
+/// The plans / state-machines subsystem reuses the name `Engine` for an unrelated coroutine
 /// handle (see
 /// [`plans::state_machines::framework::coroutine::context::Engine`](crate::plans::state_machines::framework::coroutine::context::Engine)).
 /// That handle is the SM-internal `yield` channel; this `Engine` trait is the connector-facing

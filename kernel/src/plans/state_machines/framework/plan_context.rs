@@ -1,6 +1,6 @@
-//! Plan-construction context and builder (SSA builder).
+//! Plan-construction context and builder.
 //!
-//! [`Context`] owns the in-flight SSA program and a per-Ref schema table. [`PlanBuilder`] is a
+//! [`Context`] owns the in-flight plan and a per-Ref schema table. [`PlanBuilder`] is a
 //! shared handle to a specific [`Ref`] in that program; builder methods append new
 //! [`PlanNode`]s and return new [`PlanBuilder`]s threading the freshly minted Refs. Cursors are
 //! [`Clone`] (cheap `Rc` clone) so branching is explicit.
@@ -40,7 +40,8 @@ use crate::expressions::{
 use crate::plans::errors::{DeltaError, DeltaErrorCode, DeltaResultExt};
 use crate::plans::ir::nodes::{
     ConsumeSink, DvRef, EquiJoinNode, FileType, FilterNode, ListFilesNode, LoadNode,
-    MaxByVersionNode, ProjectNode, ScanFileColumns, ScanNode, UnionNode, ValuesNode,
+    MaxByVersionNode, ProjectNode, ScanFileColumns, ScanJsonNode, ScanParquetNode, UnionNode,
+    ValuesNode,
 };
 use crate::plans::ir::plan::{JoinKind, NodeKind, Plan, PlanNode, Ref, ResultPlan};
 use crate::plans::ir::schema_inference::infer_expression_type;
@@ -55,7 +56,7 @@ use crate::{delta_error, FileMeta};
 // Shared state
 // ============================================================================
 
-/// In-flight SSA being built, the per-Ref schema table, the Ref counter, and a
+/// In-flight plan being built, the per-Ref schema table, the Ref counter, and a
 /// session counter.
 #[derive(Debug)]
 struct ContextState {
@@ -127,29 +128,42 @@ impl Context {
         start_from: Url,
         listing_schema: SchemaRef,
     ) -> Result<PlanBuilder, DeltaError> {
-        push_source(
+        push_node(
             &self.state,
             NodeKind::ListFiles(ListFilesNode { start_from }),
+            &[],
             listing_schema,
         )
     }
 
-    /// Append a [`NodeKind::Scan`] source over `files` of the given [`FileType`]. Output schema
+    /// Append a [`NodeKind::ScanParquet`] source over Parquet `files`. Output schema
     /// is the caller-declared `schema`.
-    pub fn scan(
+    pub fn scan_parquet(
         &self,
-        file_type: FileType,
         files: Vec<FileMeta>,
         schema: SchemaRef,
     ) -> Result<PlanBuilder, DeltaError> {
         let s = Arc::clone(&schema);
-        push_source(
+        push_node(
             &self.state,
-            NodeKind::Scan(ScanNode {
-                file_type,
-                files,
-                schema,
-            }),
+            NodeKind::ScanParquet(ScanParquetNode { files, schema }),
+            &[],
+            s,
+        )
+    }
+
+    /// Append a [`NodeKind::ScanJson`] source over newline-delimited JSON `files`. Output
+    /// schema is the caller-declared `schema`.
+    pub fn scan_json(
+        &self,
+        files: Vec<FileMeta>,
+        schema: SchemaRef,
+    ) -> Result<PlanBuilder, DeltaError> {
+        let s = Arc::clone(&schema);
+        push_node(
+            &self.state,
+            NodeKind::ScanJson(ScanJsonNode { files, schema }),
+            &[],
             s,
         )
     }
@@ -161,9 +175,10 @@ impl Context {
         rows: Vec<Vec<Scalar>>,
     ) -> Result<PlanBuilder, DeltaError> {
         let s = Arc::clone(&schema);
-        push_source(
+        push_node(
             &self.state,
             NodeKind::Values(ValuesNode { schema, rows }),
+            &[],
             s,
         )
     }
@@ -171,7 +186,7 @@ impl Context {
     /// Drain the accumulator into a [`EngineRequest::Consume`] yielded through `engine` and recover
     /// the consumer's typed output via [`Extractor`].
     ///
-    /// Backward-reachability DCE narrows the SSA program to stmts transitively reachable
+    /// Backward-reachability DCE narrows the plan to stmts transitively reachable
     /// from `builder`. After the yield resumes, the accumulator is reset (empty plan +
     /// empty schema table) and `session_id` is bumped so any cursors held across the
     /// boundary fail at runtime.
@@ -194,7 +209,7 @@ impl Context {
         let extractor = Extractor::for_consumer::<S>(sink.token.clone());
         let terminal = builder.ref_id;
         let stmts: Vec<crate::plans::ir::plan::PlanNode> = {
-            let mut s = borrow_state_mut(&self.state);
+            let mut s = self.state.borrow_mut();
             ensure_fresh(&s, &builder)?;
             let plan = std::mem::take(&mut s.plan);
             s.ref_schemas.clear();
@@ -220,15 +235,12 @@ impl Context {
             })
             .await;
         let payload = result.map_err(|e| e.into_delta_typed())?;
-        let handle = match payload {
-            EngineResponse::Consumer(h) => h,
-            other => {
-                return Err(delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    "consume: executor returned non-Consumer payload `{other:?}` for \
-                     EngineRequest::Consume",
-                ));
-            }
+        let EngineResponse::Consumer(handle) = payload else {
+            return Err(delta_error!(
+                DeltaErrorCode::DeltaCommandInvariantViolation,
+                "consume: executor returned non-Consumer payload `{payload:?}` for \
+                 EngineRequest::Consume",
+            ));
         };
         extractor.extract(handle).map_err(|e| e.into_delta_typed())
     }
@@ -248,7 +260,7 @@ impl Context {
         step_name: &'static str,
     ) -> Result<SchemaRef, DeltaError> {
         {
-            let mut s = borrow_state_mut(&self.state);
+            let mut s = self.state.borrow_mut();
             s.session_id = s.session_id.wrapping_add(1);
         }
         let StepResume(result) = engine
@@ -258,14 +270,14 @@ impl Context {
             })
             .await;
         let payload = result.map_err(|e| e.into_delta_typed())?;
-        match payload {
-            EngineResponse::Schema(s) => Ok(s),
-            other => Err(delta_error!(
+        let EngineResponse::Schema(schema) = payload else {
+            return Err(delta_error!(
                 DeltaErrorCode::DeltaCommandInvariantViolation,
-                "schema_query: executor returned non-Schema payload `{other:?}` for \
+                "schema_query: executor returned non-Schema payload `{payload:?}` for \
                  EngineRequest::SchemaQuery",
-            )),
-        }
+            ));
+        };
+        Ok(schema)
     }
 
     /// Drain the accumulator into a [`ResultPlan`] keyed at `builder`. Performs
@@ -278,7 +290,7 @@ impl Context {
     pub fn into_result_plan(self, builder: PlanBuilder) -> Result<ResultPlan, DeltaError> {
         // Validate session before tearing down. Drop the borrow before `Rc::try_unwrap`.
         {
-            let s = borrow_state(&self.state);
+            let s = self.state.borrow();
             ensure_fresh(&s, &builder)?;
         }
         // Drop the builder's Rc handle so try_unwrap can succeed.
@@ -302,7 +314,7 @@ impl Context {
 // PlanBuilder
 // ============================================================================
 
-/// Handle to a Ref in the in-flight SSA program. PlanBuilder methods append further
+/// Handle to a Ref in the in-flight plan. PlanBuilder methods append further
 /// stmts and return new Cursors threading the minted Refs.
 #[derive(Clone, Debug)]
 pub struct PlanBuilder {
@@ -312,7 +324,17 @@ pub struct PlanBuilder {
 }
 
 impl PlanBuilder {
-    /// The SSA Ref this builder points at.
+    /// Mint a fresh handle for `ref_id` against `state`. Captures `session_id` so the
+    /// handle can be invalidated by dispatch methods (see module-level docs).
+    fn new(state: &Rc<RefCell<ContextState>>, ref_id: Ref, session_id: u32) -> Self {
+        Self {
+            state: Rc::clone(state),
+            ref_id,
+            session_id,
+        }
+    }
+
+    /// The Ref this builder points at.
     pub fn ref_id(&self) -> Ref {
         self.ref_id
     }
@@ -321,7 +343,7 @@ impl PlanBuilder {
     ///
     /// Returns an error if the builder is stale.
     pub fn schema(&self) -> Result<SchemaRef, DeltaError> {
-        let state = borrow_state(&self.state);
+        let state = self.state.borrow();
         ensure_fresh(&state, self)?;
         state
             .ref_schemas
@@ -342,10 +364,10 @@ impl PlanBuilder {
     pub fn filter(self, predicate: impl Into<PredicateRef>) -> Result<Self, DeltaError> {
         let predicate = predicate.into();
         let schema = self.schema()?;
-        push_unary(
+        push_node(
             &self.state,
-            &self,
             NodeKind::Filter(FilterNode { predicate }),
+            &[&self],
             schema,
         )
     }
@@ -372,13 +394,13 @@ impl PlanBuilder {
             fields.push(StructField::nullable(name.clone(), ty));
         }
         let output_schema: SchemaRef = arc_struct_or_invariant(fields)?;
-        push_unary(
+        push_node(
             &self.state,
-            &self,
             NodeKind::Project(ProjectNode {
                 named_exprs: pairs,
                 output_schema: Arc::clone(&output_schema),
             }),
+            &[&self],
             output_schema,
         )
     }
@@ -406,13 +428,13 @@ impl PlanBuilder {
             .map(|f| f.name().clone())
             .zip(exprs)
             .collect();
-        push_unary(
+        push_node(
             &self.state,
-            &self,
             NodeKind::Project(ProjectNode {
                 named_exprs: pairs,
                 output_schema: Arc::clone(&schema),
             }),
+            &[&self],
             schema,
         )
     }
@@ -423,11 +445,11 @@ impl PlanBuilder {
     /// the input. Validates that each name exists in the input and that types match.
     pub fn select(self, schema: SchemaRef) -> Result<Self, DeltaError> {
         let input_schema = self.schema()?;
-        let pairs: Vec<(String, Arc<Expression>)> = schema
+        let pairs: Vec<(String, ExpressionRef)> = schema
             .fields()
             .map(|f| {
-                let name = f.name().clone();
-                let input_field = input_schema.field(&name).ok_or_else(|| {
+                let name = f.name();
+                let input_field = input_schema.field(name).ok_or_else(|| {
                     delta_error!(
                         DeltaErrorCode::DeltaCommandInvariantViolation,
                         "select: field {name:?} not present in input schema",
@@ -441,65 +463,18 @@ impl PlanBuilder {
                         target = f.data_type(),
                     ));
                 }
-                Ok((name.clone(), Arc::new(Expression::column([&name]))))
+                Ok(identity_named_expr(name.clone()))
             })
             .collect::<Result<_, DeltaError>>()?;
-        push_unary(
+        push_node(
             &self.state,
-            &self,
             NodeKind::Project(ProjectNode {
                 named_exprs: pairs,
                 output_schema: Arc::clone(&schema),
             }),
+            &[&self],
             schema,
         )
-    }
-
-    /// Narrow to a subset of input fields by name. Output schema mirrors input field
-    /// types in the order listed.
-    pub fn select_columns<I, S>(self, names: I) -> Result<Self, DeltaError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let input_schema = self.schema()?;
-        let mut pairs: Vec<(String, Arc<Expression>)> = Vec::new();
-        let mut fields: Vec<StructField> = Vec::new();
-        for name in names {
-            let name = name.as_ref().to_string();
-            let f = input_schema.field(&name).ok_or_else(|| {
-                delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    "select_columns: field {name:?} not in input schema",
-                )
-            })?;
-            fields.push(f.clone());
-            pairs.push((name.clone(), Arc::new(Expression::column([name]))));
-        }
-        let output_schema = arc_struct_or_invariant(fields)?;
-        push_unary(
-            &self.state,
-            &self,
-            NodeKind::Project(ProjectNode {
-                named_exprs: pairs,
-                output_schema: Arc::clone(&output_schema),
-            }),
-            output_schema,
-        )
-    }
-
-    /// Append `(name, expr)` after the existing fields.
-    pub fn append_col(
-        self,
-        name: impl Into<String>,
-        expr: impl Into<ExpressionRef>,
-    ) -> Result<Self, DeltaError> {
-        let name = name.into();
-        let expr = expr.into();
-        let schema = self.schema()?;
-        let mut pairs = identity_named_exprs(&schema);
-        pairs.push((name, expr));
-        self.project(pairs)
     }
 
     /// Append a caller-typed `(field, expr)` after the existing fields. Use when the
@@ -513,46 +488,21 @@ impl PlanBuilder {
         field: StructField,
         expr: impl Into<ExpressionRef>,
     ) -> Result<Self, DeltaError> {
-        let expr = expr.into();
         let input_schema = self.schema()?;
-        let mut named_exprs: Vec<(String, ExpressionRef)> = input_schema
-            .fields()
-            .map(|f| {
-                let name = f.name().clone();
-                (
-                    name.clone(),
-                    Arc::new(Expression::column([name])) as ExpressionRef,
-                )
-            })
-            .collect();
+        let mut named_exprs = identity_named_exprs(&input_schema);
         let mut fields: Vec<StructField> = input_schema.fields().cloned().collect();
-        let new_name = field.name().clone();
-        named_exprs.push((new_name, expr));
+        named_exprs.push((field.name().clone(), expr.into()));
         fields.push(field);
         let output_schema: SchemaRef = arc_struct_or_invariant(fields)?;
-        push_unary(
+        push_node(
             &self.state,
-            &self,
             NodeKind::Project(ProjectNode {
                 named_exprs,
                 output_schema: Arc::clone(&output_schema),
             }),
+            &[&self],
             output_schema,
         )
-    }
-
-    /// Insert `(name, expr)` before all existing fields.
-    pub fn prepend_col(
-        self,
-        name: impl Into<String>,
-        expr: impl Into<ExpressionRef>,
-    ) -> Result<Self, DeltaError> {
-        let name = name.into();
-        let expr = expr.into();
-        let schema = self.schema()?;
-        let mut pairs = vec![(name, expr)];
-        pairs.extend(identity_named_exprs(&schema));
-        self.project(pairs)
     }
 
     /// Insert `leaf` immediately after `sibling`'s position in its parent struct.
@@ -580,19 +530,6 @@ impl PlanBuilder {
         apply_field_op(self, &schema, parent_path, op)
     }
 
-    /// Insert `(name, expr)` immediately before the field named `before`. Top-level only.
-    pub fn insert_col_before(
-        self,
-        before: impl AsRef<str>,
-        name: impl Into<String>,
-        expr: impl Into<ExpressionRef>,
-    ) -> Result<Self, DeltaError> {
-        let before = before.as_ref();
-        let schema = self.schema()?;
-        let pairs = insert_before(&schema, before, name.into(), expr.into())?;
-        self.project(pairs)
-    }
-
     /// Replace the field at `path` with `new_field` (allowing rename + retype) and
     /// substitute `new_expr` in its place.
     ///
@@ -618,36 +555,6 @@ impl PlanBuilder {
         apply_field_op(self, &schema, parent_path, op)
     }
 
-    /// Rename one input field. Output type is unchanged.
-    pub fn rename_col(
-        self,
-        old: impl AsRef<str>,
-        new: impl Into<String>,
-    ) -> Result<Self, DeltaError> {
-        let old = old.as_ref();
-        let new = new.into();
-        let schema = self.schema()?;
-        if schema.field(old).is_none() {
-            return Err(delta_error!(
-                DeltaErrorCode::DeltaCommandInvariantViolation,
-                "rename_col: field {old:?} not in input schema",
-            ));
-        }
-        let pairs: Vec<(String, ExpressionRef)> = schema
-            .fields()
-            .map(|f| {
-                let fname = f.name().clone();
-                let out_name = if fname == old {
-                    new.clone()
-                } else {
-                    fname.clone()
-                };
-                (out_name, Arc::new(Expression::column([&fname])))
-            })
-            .collect();
-        self.project(pairs)
-    }
-
     /// Remove the field at `path` from its parent struct.
     ///
     /// Errors if `path` doesn't resolve or if its parent isn't a struct. `path` accepts
@@ -659,34 +566,6 @@ impl PlanBuilder {
         let (parent_path, target_leaf) = split_parent_leaf(&path, "drop_col")?;
         let op = FieldOp::Drop { target_leaf };
         apply_field_op(self, &schema, parent_path, op)
-    }
-
-    /// Drop several input fields by name.
-    pub fn drop_cols<I, S>(self, names: I) -> Result<Self, DeltaError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let drops: std::collections::HashSet<String> =
-            names.into_iter().map(|n| n.as_ref().to_string()).collect();
-        let schema = self.schema()?;
-        for n in &drops {
-            if schema.field(n).is_none() {
-                return Err(delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    "drop_cols: field {n:?} not in input schema",
-                ));
-            }
-        }
-        let pairs: Vec<(String, ExpressionRef)> = schema
-            .fields()
-            .filter(|f| !drops.contains(f.name()))
-            .map(|f| {
-                let fname = f.name().clone();
-                (fname.clone(), Arc::new(Expression::column([fname])))
-            })
-            .collect();
-        self.project(pairs)
     }
 
     // === Load / aggregate / join / union =====================================
@@ -727,9 +606,8 @@ impl PlanBuilder {
             file_meta,
             dv_ref,
         } = spec;
-        push_unary(
+        push_node(
             &self.state,
-            &self,
             NodeKind::Load(LoadNode {
                 file_schema,
                 file_type,
@@ -738,6 +616,7 @@ impl PlanBuilder {
                 file_meta,
                 dv_ref,
             }),
+            &[&self],
             output_schema,
         )
     }
@@ -783,44 +662,14 @@ impl PlanBuilder {
             fields.push(f.clone());
         }
         let output_schema = arc_struct_or_invariant(fields)?;
-        push_unary(
+        push_node(
             &self.state,
-            &self,
             NodeKind::MaxByVersion(MaxByVersionNode {
                 group_by,
                 version_column,
                 value_columns,
             }),
-            output_schema,
-        )
-    }
-
-    /// Inner join. Output schema is the left fields followed by the right fields.
-    /// Caller is responsible for renaming any name collisions ahead of the join.
-    pub fn inner_join<I, L, R>(self, other: PlanBuilder, key_pairs: I) -> Result<Self, DeltaError>
-    where
-        I: IntoIterator<Item = (L, R)>,
-        L: Into<ExpressionRef>,
-        R: Into<ExpressionRef>,
-    {
-        let key_pairs: Vec<(ExpressionRef, ExpressionRef)> = key_pairs
-            .into_iter()
-            .map(|(l, r)| (l.into(), r.into()))
-            .collect();
-        ensure_same_context(&self, &other)?;
-        let left_schema = self.schema()?;
-        let right_schema = other.schema()?;
-        let mut fields: Vec<StructField> = left_schema.fields().cloned().collect();
-        fields.extend(right_schema.fields().cloned());
-        let output_schema = arc_struct_or_invariant(fields)?;
-        push_binary(
-            &self.state,
-            &self,
-            &other,
-            NodeKind::EquiJoin(EquiJoinNode {
-                kind: JoinKind::Inner,
-                key_pairs,
-            }),
+            &[&self],
             output_schema,
         )
     }
@@ -841,16 +690,15 @@ impl PlanBuilder {
             .into_iter()
             .map(|(l, r)| (l.into(), r.into()))
             .collect();
-        ensure_same_context(&self, &other)?;
+        ensure_same_context(&self.state, &other)?;
         let output_schema = self.schema()?;
-        push_binary(
+        push_node(
             &self.state,
-            &self,
-            &other,
             NodeKind::EquiJoin(EquiJoinNode {
                 kind: JoinKind::LeftAnti,
                 key_pairs,
             }),
+            &[&self, &other],
             output_schema,
         )
     }
@@ -887,14 +735,6 @@ pub struct LoadSpec {
 // Helpers
 // ============================================================================
 
-fn borrow_state(state: &Rc<RefCell<ContextState>>) -> std::cell::Ref<'_, ContextState> {
-    state.borrow()
-}
-
-fn borrow_state_mut(state: &Rc<RefCell<ContextState>>) -> std::cell::RefMut<'_, ContextState> {
-    state.borrow_mut()
-}
-
 fn ensure_fresh(state: &ContextState, builder: &PlanBuilder) -> Result<(), DeltaError> {
     if state.session_id != builder.session_id {
         return Err(delta_error!(
@@ -907,40 +747,11 @@ fn ensure_fresh(state: &ContextState, builder: &PlanBuilder) -> Result<(), Delta
     Ok(())
 }
 
-fn push_source(
-    state: &Rc<RefCell<ContextState>>,
-    kind: NodeKind,
-    schema: SchemaRef,
-) -> Result<PlanBuilder, DeltaError> {
-    let mut s = borrow_state_mut(state);
-    let r = s.push_node(kind, vec![], schema);
-    let session_id = s.session_id;
-    Ok(PlanBuilder {
-        state: Rc::clone(state),
-        ref_id: r,
-        session_id,
-    })
-}
-
-fn push_unary(
+fn ensure_same_context(
     state: &Rc<RefCell<ContextState>>,
     builder: &PlanBuilder,
-    kind: NodeKind,
-    schema: SchemaRef,
-) -> Result<PlanBuilder, DeltaError> {
-    let mut s = borrow_state_mut(state);
-    ensure_fresh(&s, builder)?;
-    let r = s.push_node(kind, vec![builder.ref_id], schema);
-    let session_id = s.session_id;
-    Ok(PlanBuilder {
-        state: Rc::clone(state),
-        ref_id: r,
-        session_id,
-    })
-}
-
-fn ensure_same_context(left: &PlanBuilder, right: &PlanBuilder) -> Result<(), DeltaError> {
-    if !Rc::ptr_eq(&left.state, &right.state) {
+) -> Result<(), DeltaError> {
+    if !Rc::ptr_eq(state, &builder.state) {
         return Err(delta_error!(
             DeltaErrorCode::DeltaCommandInvariantViolation,
             "builder from a different context cannot be combined",
@@ -949,29 +760,26 @@ fn ensure_same_context(left: &PlanBuilder, right: &PlanBuilder) -> Result<(), De
     Ok(())
 }
 
-fn push_binary(
+/// Validate the input builders against `state`, append `kind` (with the inputs' Refs) to
+/// the in-flight plan, record `schema` for the freshly minted Ref, and return a handle
+/// to it. Source nodes pass `inputs: &[]`, unary `&[self]`, binary `&[self, other]`,
+/// and union the full input list.
+fn push_node(
     state: &Rc<RefCell<ContextState>>,
-    left: &PlanBuilder,
-    right: &PlanBuilder,
     kind: NodeKind,
+    inputs: &[&PlanBuilder],
     schema: SchemaRef,
 ) -> Result<PlanBuilder, DeltaError> {
-    if !Rc::ptr_eq(state, &right.state) {
-        return Err(delta_error!(
-            DeltaErrorCode::DeltaCommandInvariantViolation,
-            "builder from a different context cannot be combined",
-        ));
+    for b in inputs {
+        ensure_same_context(state, b)?;
     }
-    let mut s = borrow_state_mut(state);
-    ensure_fresh(&s, left)?;
-    ensure_fresh(&s, right)?;
-    let r = s.push_node(kind, vec![left.ref_id, right.ref_id], schema);
-    let session_id = s.session_id;
-    Ok(PlanBuilder {
-        state: Rc::clone(state),
-        ref_id: r,
-        session_id,
-    })
+    let mut s = state.borrow_mut();
+    for b in inputs {
+        ensure_fresh(&s, b)?;
+    }
+    let input_refs = inputs.iter().map(|b| b.ref_id).collect();
+    let r = s.push_node(kind, input_refs, schema);
+    Ok(PlanBuilder::new(state, r, s.session_id))
 }
 
 fn push_union(
@@ -981,36 +789,23 @@ fn push_union(
     ordered: bool,
 ) -> Result<PlanBuilder, DeltaError> {
     let first_schema = first.schema()?;
-    let mut inputs = Vec::with_capacity(1 + others.len());
-    inputs.push(first.ref_id);
     for o in others {
-        if !Rc::ptr_eq(state, &o.state) {
-            return Err(delta_error!(
-                DeltaErrorCode::DeltaCommandInvariantViolation,
-                "union: builder from a different context cannot be combined",
-            ));
-        }
-        let other_schema = o.schema()?;
-        if other_schema != first_schema {
+        if o.schema()? != first_schema {
             return Err(delta_error!(
                 DeltaErrorCode::DeltaCommandInvariantViolation,
                 "union: input schemas disagree",
             ));
         }
-        inputs.push(o.ref_id);
     }
-    let mut s = borrow_state_mut(state);
-    ensure_fresh(&s, first)?;
-    for o in others {
-        ensure_fresh(&s, o)?;
-    }
-    let r = s.push_node(NodeKind::Union(UnionNode { ordered }), inputs, first_schema);
-    let session_id = s.session_id;
-    Ok(PlanBuilder {
-        state: Rc::clone(state),
-        ref_id: r,
-        session_id,
-    })
+    let mut inputs: Vec<&PlanBuilder> = Vec::with_capacity(1 + others.len());
+    inputs.push(first);
+    inputs.extend(others.iter());
+    push_node(
+        state,
+        NodeKind::Union(UnionNode { ordered }),
+        &inputs,
+        first_schema,
+    )
 }
 
 fn arc_struct_or_invariant(fields: Vec<StructField>) -> Result<SchemaRef, DeltaError> {
@@ -1019,37 +814,19 @@ fn arc_struct_or_invariant(fields: Vec<StructField>) -> Result<SchemaRef, DeltaE
         .or_delta(DeltaErrorCode::DeltaCommandInvariantViolation)
 }
 
+/// `(name, col(name))` -- one identity entry for a top-level projection list.
+fn identity_named_expr(name: impl Into<String>) -> (String, ExpressionRef) {
+    let name = name.into();
+    let expr = Arc::new(Expression::column([&name]));
+    (name, expr)
+}
+
+/// Identity projection list: every field becomes `(name, col(name))`.
 fn identity_named_exprs(schema: &StructType) -> Vec<(String, ExpressionRef)> {
     schema
         .fields()
-        .map(|f| {
-            let fname = f.name().clone();
-            (fname.clone(), Arc::new(Expression::column([fname])))
-        })
+        .map(|f| identity_named_expr(f.name().clone()))
         .collect()
-}
-
-fn insert_before(
-    schema: &StructType,
-    anchor: &str,
-    new_name: String,
-    new_expr: ExpressionRef,
-) -> Result<Vec<(String, ExpressionRef)>, DeltaError> {
-    if schema.field(anchor).is_none() {
-        return Err(delta_error!(
-            DeltaErrorCode::DeltaCommandInvariantViolation,
-            "insert: anchor field {anchor:?} not in input schema",
-        ));
-    }
-    let mut pairs: Vec<(String, ExpressionRef)> = Vec::with_capacity(schema.fields().count() + 1);
-    for f in schema.fields() {
-        let fname = f.name().clone();
-        if fname == anchor {
-            pairs.push((new_name.clone(), Arc::clone(&new_expr)));
-        }
-        pairs.push((fname.clone(), Arc::new(Expression::column([fname.clone()]))));
-    }
-    Ok(pairs)
 }
 
 // === Point-edit primitives over nested paths =================================
@@ -1106,87 +883,30 @@ fn apply_field_op(
 ) -> Result<PlanBuilder, DeltaError> {
     let (named_exprs, fields) = rewrite_at(input_schema, &[], parent_path, &op)?;
     let output_schema = arc_struct_or_invariant(fields)?;
-    push_unary(
+    push_node(
         &builder.state,
-        &builder,
         NodeKind::Project(ProjectNode {
             named_exprs,
             output_schema: Arc::clone(&output_schema),
         }),
+        &[&builder],
         output_schema,
     )
 }
 
-/// Recursive worker for [`apply_field_op`].
-///
-/// `path_so_far` is the absolute path (from the root) of the struct currently being
-/// rebuilt. `remaining` is the path from the current struct down to the parent struct
-/// where the op applies; when it becomes empty, `op` is applied here.
-fn rewrite_at(
-    schema: &StructType,
-    path_so_far: &[String],
-    remaining: &[String],
-    op: &FieldOp,
-) -> Result<RewrittenStruct, DeltaError> {
-    if remaining.is_empty() {
-        return apply_op_in_struct(schema, path_so_far, op);
-    }
-    let target = &remaining[0];
-    let mut named_exprs: Vec<(String, ExpressionRef)> = Vec::with_capacity(schema.fields().count());
-    let mut fields: Vec<StructField> = Vec::with_capacity(schema.fields().count());
-    let mut found = false;
-    for f in schema.fields() {
-        let fname = f.name().clone();
-        if &fname == target {
-            let sub = match f.data_type() {
-                DataType::Struct(s) => s.as_ref(),
-                other => {
-                    return Err(delta_error!(
-                        DeltaErrorCode::DeltaCommandInvariantViolation,
-                        "rewrite_at: field {fname:?} is not a struct (found {other:?})",
-                    ));
-                }
-            };
-            let mut sub_path = path_so_far.to_vec();
-            sub_path.push(fname.clone());
-            let (sub_named, sub_fields) = rewrite_at(sub, &sub_path, &remaining[1..], op)?;
-            let sub_struct = StructType::try_new(sub_fields.clone())
-                .or_delta(DeltaErrorCode::DeltaCommandInvariantViolation)?;
-            fields.push(StructField::new(
-                fname.clone(),
-                DataType::Struct(Box::new(sub_struct)),
-                f.is_nullable(),
-            ));
-            let exprs: Vec<ExpressionRef> = sub_named.into_iter().map(|(_, e)| e).collect();
-            named_exprs.push((fname, Arc::new(Expression::struct_from(exprs))));
-            found = true;
-        } else {
-            named_exprs.push((fname.clone(), col_ref_at(path_so_far, &fname)));
-            fields.push(f.clone());
-        }
-    }
-    if !found {
-        return Err(delta_error!(
-            DeltaErrorCode::DeltaCommandInvariantViolation,
-            "rewrite_at: field {target:?} not found in schema at path {path_so_far:?}",
-        ));
-    }
-    Ok((named_exprs, fields))
-}
-
-/// Apply `op` to the fields of `schema`, treating it as the parent struct at
-/// `path_so_far`. Identity-projects siblings via `col(...)` references (for nested
-/// parents these references include the full prefix from the root).
-fn apply_op_in_struct(
+/// Validate that `op` can be applied at `schema`, the parent struct identified by
+/// `path_so_far`. All existence and collision checks live here, separated from the
+/// per-field iteration in `rewrite_at`.
+fn validate_op(
     schema: &StructType,
     path_so_far: &[String],
     op: &FieldOp,
-) -> Result<RewrittenStruct, DeltaError> {
+) -> Result<(), DeltaError> {
     match op {
         FieldOp::InsertAfter {
             sibling_leaf,
             new_field,
-            new_expr,
+            ..
         } => {
             if schema.field(sibling_leaf).is_none() {
                 return Err(delta_error!(
@@ -1202,24 +922,11 @@ fn apply_op_in_struct(
                     name = new_field.name(),
                 ));
             }
-            let mut named_exprs: Vec<(String, ExpressionRef)> =
-                Vec::with_capacity(schema.fields().count() + 1);
-            let mut fields: Vec<StructField> = Vec::with_capacity(schema.fields().count() + 1);
-            for f in schema.fields() {
-                let fname = f.name().clone();
-                named_exprs.push((fname.clone(), col_ref_at(path_so_far, &fname)));
-                fields.push(f.clone());
-                if &fname == sibling_leaf {
-                    named_exprs.push((new_field.name().clone(), Arc::clone(new_expr)));
-                    fields.push(new_field.clone());
-                }
-            }
-            Ok((named_exprs, fields))
         }
         FieldOp::Replace {
             target_leaf,
             new_field,
-            new_expr,
+            ..
         } => {
             if schema.field(target_leaf).is_none() {
                 return Err(delta_error!(
@@ -1234,20 +941,6 @@ fn apply_op_in_struct(
                     name = new_field.name(),
                 ));
             }
-            let mut named_exprs: Vec<(String, ExpressionRef)> =
-                Vec::with_capacity(schema.fields().count());
-            let mut fields: Vec<StructField> = Vec::with_capacity(schema.fields().count());
-            for f in schema.fields() {
-                let fname = f.name().clone();
-                if &fname == target_leaf {
-                    named_exprs.push((new_field.name().clone(), Arc::clone(new_expr)));
-                    fields.push(new_field.clone());
-                } else {
-                    named_exprs.push((fname.clone(), col_ref_at(path_so_far, &fname)));
-                    fields.push(f.clone());
-                }
-            }
-            Ok((named_exprs, fields))
         }
         FieldOp::Drop { target_leaf } => {
             if schema.field(target_leaf).is_none() {
@@ -1256,19 +949,100 @@ fn apply_op_in_struct(
                     "drop_col: field {target_leaf:?} not found at path {path_so_far:?}",
                 ));
             }
-            let mut named_exprs: Vec<(String, ExpressionRef)> = Vec::new();
-            let mut fields: Vec<StructField> = Vec::new();
-            for f in schema.fields() {
-                let fname = f.name().clone();
-                if &fname == target_leaf {
-                    continue;
-                }
-                named_exprs.push((fname.clone(), col_ref_at(path_so_far, &fname)));
-                fields.push(f.clone());
-            }
-            Ok((named_exprs, fields))
         }
     }
+    Ok(())
+}
+
+/// Walk `schema` along `remaining`, rebuilding each ancestor struct on the way down and
+/// applying `op` once `remaining` is exhausted (the empty-`remaining` boundary identifies
+/// the parent struct the op acts on).
+///
+/// Off-path siblings are identity-projected via `col(...)`; the on-path child is
+/// recursively rebuilt and re-emitted via `Expression::struct_from`. At the leaf level
+/// (`remaining.is_empty()`), per-field op semantics apply: `Drop` skips the target,
+/// `Replace` swaps it, `InsertAfter` pushes the new field after its sibling.
+fn rewrite_at(
+    schema: &StructType,
+    path_so_far: &[String],
+    remaining: &[String],
+    op: &FieldOp,
+) -> Result<RewrittenStruct, DeltaError> {
+    if remaining.is_empty() {
+        validate_op(schema, path_so_far, op)?;
+    } else if schema.field(&remaining[0]).is_none() {
+        return Err(delta_error!(
+            DeltaErrorCode::DeltaCommandInvariantViolation,
+            "rewrite_at: field {target:?} not found in schema at path {path_so_far:?}",
+            target = remaining[0],
+        ));
+    }
+    let cap = schema.fields().count() + 1;
+    let mut named_exprs: Vec<(String, ExpressionRef)> = Vec::with_capacity(cap);
+    let mut fields: Vec<StructField> = Vec::with_capacity(cap);
+    for f in schema.fields() {
+        let fname = f.name();
+        // Recursive case: this field is on the path -- recurse and re-emit.
+        if let Some((target, rest)) = remaining.split_first() {
+            if fname == target {
+                let sub = match f.data_type() {
+                    DataType::Struct(s) => s.as_ref(),
+                    other => {
+                        return Err(delta_error!(
+                            DeltaErrorCode::DeltaCommandInvariantViolation,
+                            "rewrite_at: field {fname:?} is not a struct (found {other:?})",
+                        ));
+                    }
+                };
+                let mut sub_path = path_so_far.to_vec();
+                sub_path.push(fname.clone());
+                let (sub_named, sub_fields) = rewrite_at(sub, &sub_path, rest, op)?;
+                let sub_struct = StructType::try_new(sub_fields.clone())
+                    .or_delta(DeltaErrorCode::DeltaCommandInvariantViolation)?;
+                fields.push(StructField::new(
+                    fname.clone(),
+                    DataType::Struct(Box::new(sub_struct)),
+                    f.is_nullable(),
+                ));
+                let exprs: Vec<ExpressionRef> = sub_named.into_iter().map(|(_, e)| e).collect();
+                named_exprs.push((fname.clone(), Arc::new(Expression::struct_from(exprs))));
+                continue;
+            }
+        } else {
+            // Leaf case: per-field op semantics.
+            match op {
+                FieldOp::Drop { target_leaf } if fname == target_leaf => continue,
+                FieldOp::Replace {
+                    target_leaf,
+                    new_field,
+                    new_expr,
+                } if fname == target_leaf => {
+                    named_exprs.push((new_field.name().clone(), Arc::clone(new_expr)));
+                    fields.push(new_field.clone());
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        // Identity-project this field (off-path sibling, or leaf non-target).
+        named_exprs.push((fname.clone(), col_ref_at(path_so_far, fname)));
+        fields.push(f.clone());
+        // At the leaf level, InsertAfter emits the new field immediately after its sibling.
+        if remaining.is_empty() {
+            if let FieldOp::InsertAfter {
+                sibling_leaf,
+                new_field,
+                new_expr,
+            } = op
+            {
+                if fname == sibling_leaf {
+                    named_exprs.push((new_field.name().clone(), Arc::clone(new_expr)));
+                    fields.push(new_field.clone());
+                }
+            }
+        }
+    }
+    Ok((named_exprs, fields))
 }
 
 /// Build a `col(...)` reference to `leaf` within the struct rooted at `prefix`. When
@@ -1287,8 +1061,6 @@ fn col_ref_at(prefix: &[String], leaf: &str) -> ExpressionRef {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
-
-    use uuid::Uuid;
 
     use super::*;
     use crate::expressions::{col, Predicate};
@@ -1317,8 +1089,8 @@ mod tests {
     fn sources_mint_refs_and_record_schemas() {
         let ctx = Context::new();
         let v = ctx.values(id_ts_schema(), vec![]).unwrap();
-        let j = ctx.scan(FileType::Json, vec![], id_ts_schema()).unwrap();
-        let p = ctx.scan(FileType::Parquet, vec![], id_ts_schema()).unwrap();
+        let j = ctx.scan_json(vec![], id_ts_schema()).unwrap();
+        let p = ctx.scan_parquet(vec![], id_ts_schema()).unwrap();
         assert_eq!(v.ref_id(), Ref(0));
         assert_eq!(j.ref_id(), Ref(1));
         assert_eq!(p.ref_id(), Ref(2));
@@ -1395,56 +1167,6 @@ mod tests {
             err.to_string().contains("expected 1 expressions"),
             "got: {err}"
         );
-    }
-
-    /// Schema-edit sugar (drop/rename/append/replace) compiles and produces the right
-    /// output schema by name and type.
-    #[test]
-    fn schema_edit_sugar_changes_field_layout() {
-        let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
-
-        // append_col + drop_col + rename_col chained
-        let out = src
-            .append_col("ts2", Arc::new(col("ts")) as ExpressionRef)
-            .unwrap()
-            .drop_col("ts")
-            .unwrap()
-            .rename_col("ts2", "version")
-            .unwrap();
-        let schema = out.schema().unwrap();
-        let names: Vec<&str> = schema.fields().map(|f| f.name().as_str()).collect();
-        assert_eq!(names, ["id", "version"]);
-        assert_eq!(
-            schema.field("version").unwrap().data_type(),
-            &DataType::LONG
-        );
-    }
-
-    /// `insert_col_after` and `insert_col_before` produce the right field order.
-    #[test]
-    fn insert_col_positions_field_correctly() {
-        let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
-        let after = src
-            .clone()
-            .insert_col_after(
-                "id",
-                StructField::nullable("mid", DataType::STRING),
-                col("id"),
-            )
-            .unwrap();
-        let before = src
-            .insert_col_before("ts", "early", Arc::new(col("id")) as ExpressionRef)
-            .unwrap();
-
-        let after_schema = after.schema().unwrap();
-        let after_names: Vec<&str> = after_schema.fields().map(|f| f.name().as_str()).collect();
-        assert_eq!(after_names, ["id", "mid", "ts"]);
-
-        let before_schema = before.schema().unwrap();
-        let before_names: Vec<&str> = before_schema.fields().map(|f| f.name().as_str()).collect();
-        assert_eq!(before_names, ["id", "early", "ts"]);
     }
 
     // === Point-edit primitives over nested paths ============================
@@ -1632,9 +1354,9 @@ mod tests {
         assert!(err.to_string().contains("missing"), "got: {err}");
     }
 
-    /// `inner_join` concatenates left and right schemas; `left_anti_join` mirrors left.
+    /// `left_anti_join` output schema mirrors the left input.
     #[test]
-    fn join_variants_pick_correct_output_schema() {
+    fn left_anti_join_output_mirrors_left() {
         let ctx = Context::new();
         let l = ctx.values(id_ts_schema(), vec![]).unwrap();
         let r_schema = Arc::new(
@@ -1644,15 +1366,10 @@ mod tests {
             ])
             .unwrap(),
         );
-        let r = ctx.values(Arc::clone(&r_schema), vec![]).unwrap();
+        let r = ctx.values(r_schema, vec![]).unwrap();
 
         let key: Vec<(ExpressionRef, ExpressionRef)> =
             vec![(Arc::new(col("id")), Arc::new(col("rid")))];
-
-        let inner = l.clone().inner_join(r.clone(), key.clone()).unwrap();
-        let inner_schema = inner.schema().unwrap();
-        let inner_names: Vec<&str> = inner_schema.fields().map(|f| f.name().as_str()).collect();
-        assert_eq!(inner_names, ["id", "ts", "rid", "rts"]);
 
         let anti = l.left_anti_join(r, key).unwrap();
         assert_eq!(*anti.schema().unwrap(), *id_ts_schema());
@@ -1684,7 +1401,7 @@ mod tests {
         let b = ctx_b.values(id_ts_schema(), vec![]).unwrap();
         let key: Vec<(ExpressionRef, ExpressionRef)> =
             vec![(Arc::new(col("id")), Arc::new(col("id")))];
-        let err = a.inner_join(b, key).unwrap_err();
+        let err = a.left_anti_join(b, key).unwrap_err();
         assert!(err.to_string().contains("different context"), "got: {err}");
     }
 
@@ -1800,9 +1517,6 @@ mod tests {
         // Engine drains the sink and resumes with a finished handle.
         let payload = EngineResponse::Consumer(FinishedHandle {
             token,
-            sm_id: Uuid::new_v4(),
-            sm_kind: "test",
-            step_name: "drain",
             erased: Box::new(EchoConsumer { value: 7 }),
         });
         let next = sm.submit(Ok(payload)).unwrap();
@@ -1838,9 +1552,6 @@ mod tests {
         };
         let payload = EngineResponse::Consumer(FinishedHandle {
             token,
-            sm_id: Uuid::new_v4(),
-            sm_kind: "test",
-            step_name: "drain",
             erased: Box::new(EchoConsumer { value: 0 }),
         });
         match sm.submit(Ok(payload)).unwrap() {
@@ -1948,9 +1659,9 @@ mod tests {
         }
     }
 
-    /// SSA stmt for `inner_join` records `[left, right]` as inputs in that order.
+    /// Plan stmt for `left_anti_join` records `[left, right]` as inputs in that order.
     #[test]
-    fn inner_join_records_left_right_inputs() {
+    fn left_anti_join_records_left_right_inputs() {
         let ctx = Context::new();
         let left = ctx.values(id_ts_schema(), vec![]).unwrap();
         let right_schema = Arc::new(
@@ -1965,7 +1676,7 @@ mod tests {
         let right_ref = right.ref_id();
         let key: Vec<(ExpressionRef, ExpressionRef)> =
             vec![(Arc::new(col("id")), Arc::new(col("rid")))];
-        let joined = left.inner_join(right, key).unwrap();
+        let joined = left.left_anti_join(right, key).unwrap();
         let joined_ref = joined.ref_id();
         let plan = ctx.into_result_plan(joined).unwrap();
         let stmt = plan.plan.node(joined_ref).unwrap();
@@ -1973,7 +1684,7 @@ mod tests {
         assert!(matches!(
             stmt.kind,
             NodeKind::EquiJoin(EquiJoinNode {
-                kind: JoinKind::Inner,
+                kind: JoinKind::LeftAnti,
                 ..
             })
         ));

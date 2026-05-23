@@ -6,12 +6,16 @@
 //! side effects. Cross-step data flow happens through state machine bodies (kernel
 //! consumer outputs and schema queries), never through the IR.
 //!
+//! The IR is in SSA form: each [`Ref`] is bound exactly once -- by the [`PlanNode`] whose
+//! `output` field names it -- and is referenced read-only thereafter. Compiler-IR readers
+//! can rely on the standard SSA invariants (no rebinding, single producer per value).
+//!
 //! A [`ResultPlan`] is the state machine's terminal value: the plan plus the Ref
 //! the engine should stream to the caller after the SM completes.
 //!
 //! # Construction
 //!
-//! Plans are built by the SSA construction
+//! Plans are built by the
 //! [`Context`](crate::plans::state_machines::framework::plan_context::Context), which owns the
 //! in-flight [`Plan`] and mints fresh Refs as nodes are appended. [`Plan`] itself is a pure
 //! data container; the engine receives a fully-built plan and treats it as read-only.
@@ -27,24 +31,24 @@
 use std::collections::HashSet;
 
 use super::nodes::{
-    EquiJoinNode, FilterNode, ListFilesNode, LoadNode, MaxByVersionNode, ProjectNode, ScanNode,
-    UnionNode, ValuesNode,
+    EquiJoinNode, FilterNode, ListFilesNode, LoadNode, MaxByVersionNode, ProjectNode, ScanJsonNode,
+    ScanParquetNode, UnionNode, ValuesNode,
 };
 
 // ============================================================================
 // Refs and plan nodes
 // ============================================================================
 
-/// SSA reference. Plan-scoped opaque identifier for a node's output value.
+/// Plan-scoped opaque identifier for a node's output value.
 ///
-/// Refs are minted sequentially by the SSA
+/// Refs are minted sequentially by the
 /// [`Context`](crate::plans::state_machines::framework::plan_context::Context) starting from `0`.
 /// Engines must treat Refs as opaque keys: their numeric value is implementation-defined
 /// and gaps are allowed (e.g. after [`Plan::reachable_from`] prunes nodes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ref(pub u32);
 
-/// One SSA node in a plan: an operator kind, its input Refs, and its output Ref.
+/// One node in a plan: an operator kind, its input Refs, and its output Ref.
 ///
 /// `inputs` order matters and is documented per [`NodeKind`] variant (e.g. for
 /// [`NodeKind::EquiJoin`] the convention is `[left, right]`; for [`NodeKind::Union`]
@@ -60,9 +64,9 @@ pub struct PlanNode {
 // Plans
 // ============================================================================
 
-/// SSA program: ordered nodes forming a DAG via input/output Refs.
+/// Ordered nodes forming a DAG via input/output Refs.
 ///
-/// `Plan` is a pure data container. The SSA
+/// `Plan` is a pure data container. The
 /// [`Context`](crate::plans::state_machines::framework::plan_context::Context) is the sole
 /// authority that builds plans and mints Refs; the engine receives the assembled plan and
 /// compiles it bottom-up via topological walk over the `inputs` edges.
@@ -110,8 +114,7 @@ impl Plan {
     }
 }
 
-/// State machine terminal value: an SSA program plus the Ref the engine should
-/// stream to the caller.
+/// State machine terminal value: a plan plus the Ref the engine should stream to the caller.
 #[derive(Debug, Clone)]
 pub struct ResultPlan {
     pub plan: Plan,
@@ -122,11 +125,9 @@ pub struct ResultPlan {
 // Node operator kinds
 // ============================================================================
 
-/// Equi-join semantics. Only the two kinds the kernel pipelines need.
+/// Equi-join semantics. Only the kinds the kernel pipelines need.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinKind {
-    /// Standard inner join: emit `(left, right)` rows whose keys match.
-    Inner,
     /// Left anti: emit each left row whose key matches no right row.
     LeftAnti,
 }
@@ -136,13 +137,15 @@ pub enum JoinKind {
 /// Each variant wraps a single payload struct defined in [`super::nodes`] that carries
 /// the variant's parameters verbatim. Sources have zero inputs; transforms have one or
 /// more (per-payload doc). Output schemas are stored on the payload structs of variants
-/// where the caller declares them (`Scan`, `Values`, `Load`, `Project`); for the rest
-/// the SSA builder derives the output schema from inputs and parameters.
+/// where the caller declares them (`ScanParquet`, `ScanJson`, `Values`, `Load`,
+/// `Project`); for the rest the builder derives the output schema from inputs and
+/// parameters.
 #[derive(Debug, Clone)]
 pub enum NodeKind {
     // === Sources (0 inputs) ==================================================
     ListFiles(ListFilesNode),
-    Scan(ScanNode),
+    ScanParquet(ScanParquetNode),
+    ScanJson(ScanJsonNode),
     Values(ValuesNode),
 
     // === Transforms (1+ inputs) ==============================================
@@ -231,35 +234,6 @@ mod tests {
         let pruned = plan.reachable_from(kept);
         let outputs: Vec<Ref> = pruned.stmts.iter().map(|n| n.output).collect();
         assert_eq!(outputs, vec![src, kept]);
-    }
-
-    /// Both join inputs are reached and kept.
-    #[test]
-    fn reachable_from_keeps_both_join_inputs() {
-        let left = Ref(0);
-        let right = Ref(1);
-        let joined = Ref(2);
-        let plan = Plan {
-            stmts: vec![
-                values_node(left.0),
-                values_node(right.0),
-                PlanNode {
-                    kind: NodeKind::EquiJoin(EquiJoinNode {
-                        kind: JoinKind::Inner,
-                        key_pairs: vec![(
-                            Arc::new(Expression::column(["x"])),
-                            Arc::new(Expression::column(["x"])),
-                        )],
-                    }),
-                    inputs: vec![left, right],
-                    output: joined,
-                },
-            ],
-        };
-
-        let pruned = plan.reachable_from(joined);
-        let outputs: HashSet<Ref> = pruned.stmts.iter().map(|n| n.output).collect();
-        assert_eq!(outputs, HashSet::from([left, right, joined]));
     }
 
     /// `reachable_from` on an empty plan with an out-of-range Ref returns an

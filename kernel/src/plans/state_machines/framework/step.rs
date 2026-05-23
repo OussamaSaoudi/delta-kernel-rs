@@ -29,8 +29,8 @@ impl SchemaQuery {
 /// Separates the concerns the executor understands:
 ///
 /// - [`SchemaQuery`](Self::SchemaQuery) — metadata-only footer read.
-/// - [`Consume`](Self::Consume) -- SSA dataflow drained into a [`ConsumeSink`]. The engine compiles
-///   `stmts` (a flat SSA program), runs the DAG, and feeds the rows produced at `terminal` into
+/// - [`Consume`](Self::Consume) -- plan dataflow drained into a [`ConsumeSink`]. The engine
+///   compiles `stmts` (a flat plan), runs the DAG, and feeds the rows produced at `terminal` into
 ///   `sink`. The consumer's typed output flows back as
 ///   [`EngineResponse::Consumer`](super::step_payload::EngineResponse::Consumer) carrying the
 ///   [`FinishedHandle`], and the SM body recovers the typed value via the paired [`Extractor`].
@@ -41,7 +41,7 @@ impl SchemaQuery {
 pub enum EngineRequest {
     /// Read a file's schema without reading data.
     SchemaQuery(SchemaQuery),
-    /// SSA dataflow + consumer drain. The engine evaluates `stmts` as a DAG and pipes
+    /// Plan dataflow + consumer drain. The engine evaluates `stmts` as a DAG and pipes
     /// the stream produced at `terminal` into `sink`.
     Consume {
         stmts: Vec<PlanNode>,

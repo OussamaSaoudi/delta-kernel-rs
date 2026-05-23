@@ -1,18 +1,19 @@
-//! SSA-flavored scan plan builder.
+//! Scan plan builder.
 //!
 //! Mirrors [`super::file_scan::Scan::build_plans`] / [`super::file_scan::Scan::do_data_stage`]
-//! but builds against the [`super::super::framework::plan_context`] (`Context` / `PlanBuilder`) API
-//! and the SSA IR. The scan-side terminal projection (reconciled rows -> flat `scan_file_row`)
-//! and the data-phase Load + logical projection are expressed as builder chains; reconciliation
-//! upstream of the terminal is shared with FSR via [`super::ssa_reconciliation`].
+//! but builds against the [`super::super::framework::plan_context`] (`Context` / `PlanBuilder`)
+//! API and the kernel plan IR. The scan-side terminal projection (reconciled rows -> flat
+//! `scan_file_row`) and the data-phase Load + logical projection are expressed as builder
+//! chains; reconciliation upstream of the terminal is shared with FSR via
+//! [`super::reconciliation`].
 //!
 //! After PR8 deletes the legacy registry-based pipeline, the SMs in [`super::file_scan`]
-//! will be retired in favor of the SSA SMs declared on `Scan` here.
+//! will be retired in favor of the plan-construction SMs declared on `Scan` here.
 
 use std::sync::Arc;
 
 use super::file_scan::scan_data_projection;
-use super::ssa_reconciliation::{execute_reconciliation_ssa, scan_file_dedup_key, SCAN_BASE};
+use super::reconciliation::{execute_reconciliation, scan_file_dedup_key, SCAN_BASE};
 use crate::actions::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::ADD_NAME;
 use crate::expressions::{col, ColumnName, Expression};
@@ -25,12 +26,12 @@ use crate::scan::Scan;
 use crate::schema::{DataType, MapType, SchemaRef, StructField, StructType, ToSchema};
 
 // ============================================================================
-// SSA scan builder
+// Scan plan builder
 // ============================================================================
 
-/// Build the SSA scan pipeline against `ctx`. Mirrors [`Scan::build_plans`] -- runs the
-/// shared SSA reconciliation, then projects to the flat scan-file row shape and (when
-/// `with_data`) appends the data phase.
+/// Build the scan plan against `ctx`. Mirrors [`Scan::build_plans`] -- runs the shared
+/// reconciliation, then projects to the flat scan-file row shape and (when `with_data`)
+/// appends the data phase.
 ///
 /// Returns a [`PlanBuilder`] terminating on either:
 /// - the live-actions stream (`with_data == false`), or
@@ -38,7 +39,7 @@ use crate::schema::{DataType, MapType, SchemaRef, StructField, StructType, ToSch
 ///
 /// The caller wraps the returned builder with [`Context::into_result_plan`] to mint the
 /// SM's terminal value.
-pub(super) async fn build_scan_ssa(
+pub(super) async fn build_scan_plan(
     ctx: &Context,
     engine: &mut Engine,
     scan: &Scan,
@@ -55,7 +56,7 @@ pub(super) async fn build_scan_ssa(
     };
 
     // === Stages 1-5: shared reconciliation -> reconciled builder =========================
-    let reconciled = execute_reconciliation_ssa(
+    let reconciled = execute_reconciliation(
         ctx,
         engine,
         scan.snapshot().as_ref(),
@@ -71,13 +72,13 @@ pub(super) async fn build_scan_ssa(
 
     // === Stage 6 (optional): data phase =================================================
     if with_data {
-        do_data_stage_ssa(scan, live_actions)
+        do_data_stage(scan, live_actions)
     } else {
         Ok(live_actions)
     }
 }
 
-/// Append the SSA data stage onto the live-actions builder and return the data-stream
+/// Append the data stage onto the live-actions builder and return the data-stream
 /// builder. Mirrors [`Scan::do_data_stage`].
 ///
 /// Splits per-file: the upstream builder emits one row per surviving file (flat
@@ -85,7 +86,7 @@ pub(super) async fn build_scan_ssa(
 /// per-record stream while broadcasting `path` and the `fileConstantValues` struct via
 /// `passthrough_columns`. The trailing projection translates physical -> logical column
 /// names per the scan's column-mapping mode.
-fn do_data_stage_ssa(scan: &Scan, live_actions: PlanBuilder) -> Result<PlanBuilder, DeltaError> {
+fn do_data_stage(scan: &Scan, live_actions: PlanBuilder) -> Result<PlanBuilder, DeltaError> {
     let logical_schema = scan.logical_schema().clone();
     let logical_projection = scan_data_projection(scan.state_info())?;
 
@@ -115,7 +116,7 @@ fn do_data_stage_ssa(scan: &Scan, live_actions: PlanBuilder) -> Result<PlanBuild
 // ============================================================================
 
 /// Project the reconciled action stream into the flat `scan_file_row` shape consumed by
-/// the SSA scan data stage:
+/// the scan data stage:
 ///
 /// ```text
 /// {
@@ -134,10 +135,10 @@ fn do_data_stage_ssa(scan: &Scan, live_actions: PlanBuilder) -> Result<PlanBuild
 ///
 /// **Invariant:** when `partitions` is `Some(parts)`, the upstream reconciliation pipeline
 /// must have already replaced `add.partitionValues` with `add.partitionValues_parsed`
-/// (see `ssa_reconciliation::ReconciliationPlanBuilder::with_partitions_parsed`). The terminal
+/// (see `reconciliation::ReconciliationPlanBuilder::with_partitions_parsed`). The terminal
 /// reads `col(["add", "partitionValues_parsed"])` directly -- no per-row
 /// `map_to_struct(add.partitionValues)` here. The raw Map form has no downstream consumer
-/// in the SSA path, so it is omitted from `fileConstantValues` entirely (parsing happens
+/// in the scan plan, so it is omitted from `fileConstantValues` entirely (parsing happens
 /// once upstream, not per file row in the data phase).
 fn project_scan_file_row(
     builder: PlanBuilder,

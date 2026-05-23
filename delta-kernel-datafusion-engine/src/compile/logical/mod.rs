@@ -1,13 +1,13 @@
-//! SSA-plan -> DataFusion [`datafusion_expr::LogicalPlan`] lowering.
+//! Kernel plan -> DataFusion [`datafusion_expr::LogicalPlan`] lowering.
 //!
-//! See [`ssa::compile_ssa`] for the entry point. The submodules host per-shape lowering
+//! See [`lower::compile_plan`] for the entry point. The submodules host per-shape lowering
 //! helpers (file listings, scans, projections, ordered union, output canonicalization).
 
 mod canonicalize;
+mod lower;
 mod ordered_union;
 mod project;
 mod providers;
 mod scan;
-mod ssa;
 
-pub use ssa::compile_ssa;
+pub use lower::compile_plan;

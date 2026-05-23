@@ -25,11 +25,11 @@
 
 use std::sync::Arc;
 
-use super::ssa_reconciliation::{execute_reconciliation_ssa, fsr_dedup_key, FSR_BASE};
+use super::reconciliation::{execute_reconciliation, fsr_dedup_key, FSR_BASE};
 use crate::plans::errors::{DeltaError, KernelErrAsDelta};
 use crate::plans::ir::plan::ResultPlan;
 use crate::plans::state_machines::framework::coroutine::driver::CoroutineSM;
-use crate::plans::state_machines::framework::plan_context::Context as SsaContext;
+use crate::plans::state_machines::framework::plan_context::Context;
 use crate::scan::state_info::StateInfo;
 use crate::scan::StatsOutputMode;
 use crate::snapshot::Snapshot;
@@ -65,19 +65,18 @@ impl FullState {
     /// CoroutineSM SM driving the FSR pipeline end-to-end.
     ///
     /// Builds against the [`crate::plans::state_machines::framework::plan_context::Context`]
-    /// (SSA / PlanBuilder API) and yields a single
+    /// (plan-construction / PlanBuilder API) and yields a single
     /// [`ResultPlan`](crate::plans::ir::plan::ResultPlan) containing the entire
-    /// reconciliation as one flat SSA program. Engines drive this through
-    /// `drive_ssa_to_dataframe`.
+    /// reconciliation as one flat plan. Engines drive this through `drive_to_dataframe`.
     pub fn state_machine(&self) -> Result<CoroutineSM<ResultPlan>, DeltaError> {
         let snapshot = self.snapshot.clone();
         let state_info = self.state_info.clone();
-        CoroutineSM::new("fsr_ssa", move |mut engine, _sm_id| async move {
-            let ctx = SsaContext::new();
+        CoroutineSM::new("fsr", move |mut engine, _sm_id| async move {
+            let ctx = Context::new();
             let stats = state_info
                 .as_ref()
                 .and_then(|si| si.physical_stats_schema.clone());
-            let reconciled = execute_reconciliation_ssa(
+            let reconciled = execute_reconciliation(
                 &ctx,
                 &mut engine,
                 snapshot.as_ref(),

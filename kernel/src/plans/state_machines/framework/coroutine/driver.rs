@@ -8,7 +8,7 @@
 //!
 //! Built on [`genawaiter2`], which panics on coroutine protocol misuse (awaiting a non-yield
 //! future, retaining a `Co` after return). The no-panic rule is preserved because the only
-//! path to `Co::yield_` is through the SSA
+//! path to `Co::yield_` is through the plan-construction
 //! [`super::super::plan_context::Context`] dispatch helpers; SM bodies are `pub(crate)`-only
 //! and FFI sees them through `Box<dyn StateMachine>`, so the panic paths are unreachable
 //! externally.

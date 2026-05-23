@@ -4,8 +4,8 @@
 
 mod file_scan;
 pub mod full_state;
-mod ssa_reconciliation;
-mod ssa_scan;
+mod reconciliation;
+mod scan_plan;
 
 pub use full_state::{FullState, FullStateBuilder};
-pub use ssa_reconciliation::CommitFileMeta;
+pub use reconciliation::CommitFileMeta;

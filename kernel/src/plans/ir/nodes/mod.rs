@@ -10,15 +10,15 @@ use url::Url;
 
 use super::plan::JoinKind;
 use crate::expressions::{ColumnName, Expression, Predicate, Scalar};
-use crate::plans::kernel_consumers::{Handle, KernelConsumer, KernelConsumerToken};
+use crate::plans::kernel_consumers::{ConsumerHandle, KernelConsumer, KernelConsumerToken};
 use crate::schema::SchemaRef;
 use crate::FileMeta;
 
 // ============================================================================
-// File-format selector (shared by `ScanNode` and `LoadNode`)
+// File-format selector (used by `LoadNode`)
 // ============================================================================
 
-/// File formats supported by [`ScanNode`] and [`LoadNode`].
+/// File formats supported by [`LoadNode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
     Parquet,
@@ -41,12 +41,20 @@ pub struct ListFilesNode {
     pub start_from: Url,
 }
 
-/// Payload of [`NodeKind::Scan`](super::plan::NodeKind::Scan).
+/// Payload of [`NodeKind::ScanParquet`](super::plan::NodeKind::ScanParquet).
 ///
-/// Reads `files` of the given [`FileType`] into row batches matching `schema`.
+/// Reads Parquet `files` into row batches matching `schema`.
 #[derive(Debug, Clone)]
-pub struct ScanNode {
-    pub file_type: FileType,
+pub struct ScanParquetNode {
+    pub files: Vec<FileMeta>,
+    pub schema: SchemaRef,
+}
+
+/// Payload of [`NodeKind::ScanJson`](super::plan::NodeKind::ScanJson).
+///
+/// Reads newline-delimited JSON `files` into row batches matching `schema`.
+#[derive(Debug, Clone)]
+pub struct ScanJsonNode {
     pub files: Vec<FileMeta>,
     pub schema: SchemaRef,
 }
@@ -67,7 +75,7 @@ pub struct ValuesNode {
 /// Payload of [`NodeKind::Project`](super::plan::NodeKind::Project).
 ///
 /// Projects the single input through `named_exprs`, producing rows of `output_schema`.
-/// The schema is supplied by the SSA builder (either inferred for narrow projections
+/// The schema is supplied by the builder (either inferred for narrow projections
 /// via the kernel's expression-type inference, or declared explicitly via
 /// [`PlanBuilder::project_with_schema`](crate::plans::state_machines::framework::plan_context::PlanBuilder::project_with_schema)
 /// when inference is insufficient). Engines compile against the declared schema
@@ -191,7 +199,7 @@ pub(crate) fn default_scan_file_columns() -> ScanFileColumns {
 /// [`EngineRequest::Consume`](crate::plans::state_machines::framework::step::EngineRequest::Consume).
 ///
 /// - `initial_state`: cloned per partition via [`DynClone`](dyn_clone::DynClone) into a
-///   [`Handle`](crate::plans::kernel_consumers::Handle).
+///   [`ConsumerHandle`].
 /// - `token`: keys the finished handle returned from the executor and validated at decode time by
 ///   the paired [`Extractor`](crate::plans::kernel_consumers::Extractor).
 #[derive(Debug, Clone)]
@@ -210,21 +218,9 @@ impl ConsumeSink {
         }
     }
 
-    /// Mint a runtime [`Handle`] for this sink template, stamped with the owning state machine's
-    /// identity tuple.
-    pub fn new_handle(
-        &self,
-        sm_id: uuid::Uuid,
-        sm_kind: &'static str,
-        step_name: &'static str,
-    ) -> Handle<dyn KernelConsumer> {
-        Handle::new(
-            self.token.clone(),
-            sm_id,
-            sm_kind,
-            step_name,
-            self.initial_state.clone(),
-        )
+    /// Mint a runtime [`ConsumerHandle`] for this sink template by cloning the initial state.
+    pub fn new_handle(&self) -> ConsumerHandle {
+        ConsumerHandle::new(self.token.clone(), self.initial_state.clone())
     }
 }
 

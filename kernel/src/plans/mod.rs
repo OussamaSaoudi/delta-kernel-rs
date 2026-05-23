@@ -1,14 +1,14 @@
-//! SSA plan IR and execution framework.
+//! Plan IR and execution framework.
 //!
 //! The `plans` module defines an engine-agnostic intermediate representation for the work an
 //! engine must perform on behalf of the kernel (scan files, apply filters, project columns,
 //! collect results) along with the state-machine framework that drives execution.
 //!
 //! Entry points:
-//! - [`crate::plans::ir::plan`] -- SSA `Plan` / `PlanNode` / `NodeKind` / `Ref` and the terminal
+//! - [`crate::plans::ir::plan`] -- `Plan` / `PlanNode` / `NodeKind` / `Ref` and the terminal
 //!   `ResultPlan` the engine compiles to a single dataflow DAG.
-//! - [`crate::plans::state_machines::framework::plan_context`] -- the SSA `Context` / `PlanBuilder`
-//!   API SM bodies use to construct plans.
+//! - [`crate::plans::state_machines::framework::plan_context`] -- the `Context` / `PlanBuilder` API
+//!   SM bodies use to construct plans.
 //! - [`crate::plans::state_machines::framework::coroutine`] -- coroutine-backed `StateMachine`
 //!   implementation.
 //!

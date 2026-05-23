@@ -16,7 +16,7 @@
 //!   `StateMachine` impl. Wraps `genawaiter2::sync::GenBoxed` to translate the typed
 //!   [`StepYield`](coroutine::context::StepYield) / [`StepResume`](coroutine::context::StepResume)
 //!   protocol into the [`StateMachine`](state_machine::StateMachine) trait the executor drives.
-//! - [`plan_context`] — SSA plan-construction [`Context`](plan_context::Context) and
+//! - [`plan_context`] — plan-construction [`Context`](plan_context::Context) and
 //!   [`PlanBuilder`](plan_context::PlanBuilder). Standalone in PR4; wired into the coroutine
 //!   step-protocol in PR5.
 

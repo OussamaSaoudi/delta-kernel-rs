@@ -1,29 +1,29 @@
-//! Kernel-Defined Functions (KDFs) — stateful per-row logic the kernel owns.
+//! Kernel-Defined Functions (KDFs) -- stateful per-row logic the kernel owns.
 //!
 //! KDFs encapsulate Delta-specific per-row work (checkpoint hint extraction,
 //! protocol/metadata harvesting, sidecar collection) that engines can't interpret.
 //!
-//! The IR exposes one KDF shape: [`traits::KernelConsumer`], an observer over batches
+//! The IR exposes one KDF shape: [`KernelConsumer`], an observer over batches
 //! returning `Continue` / `Break`. It's wired into a plan via
-//! [`EngineRequest::Consume`](crate::plans::state_machines::framework::step::EngineRequest::Consume); the consumer drains
-//! the terminal row stream and accumulates finalized state for the engine to harvest.
+//! [`EngineRequest::Consume`](crate::plans::state_machines::framework::step::EngineRequest::Consume);
+//! the consumer drains the terminal row stream and accumulates finalized state for the engine
+//! to harvest.
 //!
 //! KDFs dispatch in-process and never cross a serialization boundary.
 //!
-//! Each [`handle::Handle`] carries two identity tuples: [`token::KernelConsumerToken`]
-//! (`{ kind, id }`, stamped at plan-build time, keys the executor's state table) and
-//! `(sm_id, sm_kind, step_name)` (the owning SM, stamped at phase-execute time).
+//! Each [`ConsumerHandle`] carries a [`KernelConsumerToken`] (`{ kind, id }`, stamped at
+//! plan-build time, keys the executor's state table and the paired [`Extractor`]).
 
+pub mod checkpoint_hint;
+pub mod consumer;
 pub mod handle;
-pub mod state;
-pub mod token;
-pub mod traits;
-pub mod typed;
+pub mod metadata_protocol;
+pub mod sidecar_collector;
 
-pub use handle::{FinishedHandle, Handle};
-pub use state::consumer::{
-    CheckpointHintReader, CheckpointHintRecord, MetadataProtocolReader, SidecarCollector,
+pub use checkpoint_hint::{CheckpointHintReader, CheckpointHintRecord};
+pub use consumer::{
+    KdfControl, KernelConsumer, KernelConsumerKind, KernelConsumerOutput, KernelConsumerToken,
 };
-pub use token::{KernelConsumerKind, KernelConsumerToken};
-pub use traits::{KdfControl, KernelConsumer};
-pub use typed::{Extractor, KernelConsumerOutput};
+pub use handle::{ConsumerHandle, Extractor, FinishedHandle};
+pub use metadata_protocol::MetadataProtocolReader;
+pub use sidecar_collector::SidecarCollector;

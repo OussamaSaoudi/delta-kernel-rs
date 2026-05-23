@@ -1,9 +1,9 @@
-//! `CheckpointHintReader` — consumer KDF that reads a `_last_checkpoint`
+//! `CheckpointHintReader` -- consumer KDF that reads a `_last_checkpoint`
 //! JSON scan and extracts the hint record.
 //!
 //! The file contains a single row. The reader captures it on the first
 //! batch, returns [`KdfControl::Break`] to stop further input, and reduces
-//! to `Option<CheckpointHintRecord>` — `None` when the file was absent (zero
+//! to `Option<CheckpointHintRecord>` -- `None` when the file was absent (zero
 //! rows), `Some` when the hint was extracted.
 
 use std::sync::LazyLock;
@@ -36,18 +36,11 @@ pub struct CheckpointHintRecord {
     pub num_of_add_files: Option<i64>,
 }
 
-/// Reader state: holds the extracted record (or `None` if no row has been
-/// seen yet) plus a flag to short-circuit subsequent batches.
+/// Reader state: holds the extracted record. `record.is_some()` doubles as the
+/// "already processed" flag to short-circuit subsequent batches.
 #[derive(Debug, Clone, Default)]
 pub struct CheckpointHintReader {
     record: Option<CheckpointHintRecord>,
-    processed: bool,
-}
-
-impl CheckpointHintReader {
-    pub fn new() -> Self {
-        Self::default()
-    }
 }
 
 impl KernelConsumer for CheckpointHintReader {
@@ -60,11 +53,11 @@ impl KernelConsumer for CheckpointHintReader {
     }
 
     fn apply(&mut self, batch: &dyn EngineData) -> DeltaResult<KdfControl> {
-        if self.processed {
+        if self.record.is_some() {
             return Ok(KdfControl::Break);
         }
         self.visit_rows_of(batch)?;
-        if self.processed {
+        if self.record.is_some() {
             Ok(KdfControl::Break)
         } else {
             Ok(KdfControl::Continue)
@@ -75,8 +68,8 @@ impl KernelConsumer for CheckpointHintReader {
 impl KernelConsumerOutput for CheckpointHintReader {
     type Output = Option<CheckpointHintRecord>;
 
-    fn into_output(mut self) -> Result<Self::Output, DeltaError> {
-        Ok(self.record.take())
+    fn into_output(self) -> Result<Self::Output, DeltaError> {
+        Ok(self.record)
     }
 }
 
@@ -88,7 +81,7 @@ impl RowVisitor for CheckpointHintReader {
     }
 
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        if self.processed || row_count == 0 {
+        if self.record.is_some() || row_count == 0 {
             return Ok(());
         }
         // The `_last_checkpoint` file is a single row; column order matches
@@ -100,7 +93,6 @@ impl RowVisitor for CheckpointHintReader {
             size_in_bytes: getters[3].get_opt(0, "sizeInBytes")?,
             num_of_add_files: getters[4].get_opt(0, "numOfAddFiles")?,
         });
-        self.processed = true;
         Ok(())
     }
 }

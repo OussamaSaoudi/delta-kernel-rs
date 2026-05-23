@@ -2,7 +2,7 @@
 //! metadata + nested struct/list/map field names + per-level metadata) onto a single
 //! input column.
 //!
-//! Sits at the top of the SSA scan compile path's stamping projection: at runtime it casts
+//! Sits at the top of the scan compile path's stamping projection: at runtime it casts
 //! the input array to the target arrow `DataType` via `arrow::compute::cast` (positional,
 //! metadata-preserving -- the same primitive the historical `stamp_batch_metadata` used
 //! post-collect); at plan time `return_field_from_args` declares the target `FieldRef`

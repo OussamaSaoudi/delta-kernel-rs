@@ -97,7 +97,7 @@ pub fn build_scan_for_spec(
 /// metadata isn't consistent across the parquet-read and partition-broadcast paths
 /// (see `partitionValues_parsed.col-<uuid>`); pushing a filter into the DataFusion
 /// plan triggers an arrow-side `coalesce_batches` assertion when these mixed-metadata
-/// batches need to be combined. The outer projection installed by the SSA scan compile
+/// batches need to be combined. The outer projection installed by the scan compile
 /// path makes the *output* schema consistent (logical names + Delta metadata everywhere),
 /// but the *input-side* coalesce inside the scan plan still sees the unstamped variants.
 /// Until those upstream operators stamp consistent metadata too, predicate pushdown stays
