@@ -17,14 +17,26 @@ delta_kernel = { path = "../kernel", default-features = false, features = [
     "arrow",
 ] }
 
-# DataFusion 53 surface used by the current compile / error layer. Subsequent PRs add
-# the physical-plan/datasource crates as the executor and `LoadExec` land.
+# DataFusion 53 surface used by the compile / lowering / file-listing exec.
 datafusion = { version = "53", default-features = false }
 datafusion-common = { version = "53", default-features = false }
+datafusion-execution = { version = "53", default-features = false }
 datafusion-expr = { version = "53", default-features = false }
 datafusion-functions = { version = "53", default-features = false }
 datafusion-functions-nested = { version = "53", default-features = false }
+datafusion-functions-window = { version = "53", default-features = false }
 datafusion-functions-json = { version = "0.53", default-features = false }
+datafusion-physical-expr = { version = "53", default-features = false }
+datafusion-physical-expr-common = { version = "53", default-features = false }
+datafusion-physical-plan = { version = "53", default-features = false }
+datafusion-datasource = { version = "53", default-features = false }
+datafusion-datasource-json = { version = "53", default-features = false }
+datafusion-datasource-parquet = { version = "53", default-features = false }
+
+async-stream = "0.3"
+async-trait = "0.1"
+futures = "0.3"
+url = "2"
 
 [features]
 # The `test-utils` feature exposes the `testing` module (buffered collectors over the
