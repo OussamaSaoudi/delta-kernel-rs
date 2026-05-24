@@ -1,0 +1,38 @@
+[package]
+name = "delta-kernel-datafusion-engine"
+description = "DataFusion-backed executor for Delta Kernel declarative plans."
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+# Pulls in declarative plans + Arrow/Tokio engine so `delta_kernel::engine` and
+# `delta_kernel::arrow` resolve consistently with the kernel itself.
+delta_kernel = { path = "../kernel", default-features = false, features = [
+    "declarative-plans",
+    "default-engine-rustls",
+    "arrow",
+] }
+
+# DataFusion 53 surface used by the current compile / error layer. Subsequent PRs add
+# the physical-plan/datasource crates as the executor and `LoadExec` land.
+datafusion = { version = "53", default-features = false }
+datafusion-common = { version = "53", default-features = false }
+datafusion-expr = { version = "53", default-features = false }
+datafusion-functions = { version = "53", default-features = false }
+datafusion-functions-nested = { version = "53", default-features = false }
+datafusion-functions-json = { version = "0.53", default-features = false }
+
+[features]
+# The `test-utils` feature exposes the `testing` module (buffered collectors over the
+# eventual `DataFusionExecutor`). That module ships with the executor PR; this branch
+# declares the feature now so downstream crates can opt in without conditional gating
+# in their `Cargo.toml`.
+test-utils = []
+
+[dev-dependencies]
+rstest = "0.23"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
