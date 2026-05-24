@@ -59,6 +59,7 @@ cargo +nightly fmt \
 | `delta-kernel-unity-catalog`             | `delta-kernel-unity-catalog/`              | Unity Catalog integration (UCKernelClient, UCCommitter) |
 | `unity-catalog-delta-client-api`         | `unity-catalog-delta-client-api/`          | Unity Catalog client traits and shared models           |
 | `unity-catalog-delta-rest-client`        | `unity-catalog-delta-rest-client/`         | Unity Catalog REST client                               |
+| `delta-kernel-datafusion-engine`         | `delta-kernel-datafusion-engine/`          | DataFusion-backed engine for kernel declarative plans   |
 
 ### Feature Flags
 
