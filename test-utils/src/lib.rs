@@ -2,6 +2,8 @@
 
 pub mod column_mapping_fixtures;
 pub mod counting_reporter;
+pub mod parquet;
+pub mod schemas;
 pub mod table_builder;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
