@@ -12,6 +12,7 @@ use crate::error::plan_compilation;
 
 pub mod expr_translator;
 mod json_parse;
+pub mod logical;
 pub mod stamp_udf;
 
 /// Context shared by the compiler for leaf nodes that need runtime side state.
@@ -19,7 +20,7 @@ pub mod stamp_udf;
 /// Carries only static / shared bits -- there is no per-step mutable accumulator
 /// here. Drained reducer state for `Reduce` steps flows directly out of the
 /// `DataFusionExecutor::execute_step` as an [`EngineResponse::Reducer`] after the
-/// executor finishes the sink locally. (The executor itself ships in a subsequent PR.)
+/// executor finishes the sink locally. (The executor lives in a downstream module.)
 ///
 /// [`EngineResponse::Reducer`]: delta_kernel::plans::state_machines::framework::state_machine::EngineResponse::Reducer
 #[derive(Clone)]
