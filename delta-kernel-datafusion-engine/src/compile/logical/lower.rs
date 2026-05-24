@@ -19,30 +19,35 @@
 //! # Schema policy
 //!
 //! Kernel `Plan`s do not carry per-Ref kernel schemas (those live on the plan builder only
-//! during IR construction). DataFusion derives output schemas from `LogicalPlan` shape and arrow
-//! types; the only place a kernel `SchemaRef` is reconstructed engine-side is
-//! [`NodeKind::Load`], whose output schema is computed from the upstream's arrow shape and
-//! threaded into the load table provider. The load provider and its schema-derivation helper
-//! live with the load executor in a downstream module; until that module is present in this
-//! workspace slice, the placeholder `lower_load` below rejects the node at compile time.
+//! during IR construction). DataFusion derives output schemas from `LogicalPlan` shape and
+//! arrow types; the only place a kernel [`SchemaRef`] is reconstructed engine-side is
+//! [`NodeKind::Load`], whose output schema is computed from the upstream's arrow shape via
+//! [`StructType::try_from_arrow`] and threaded into [`LoadTableProvider::try_new`].
 //!
 //! [`NodeKind::Load`]: NodeKind::Load
+//! [`SchemaRef`]: SchemaRef
+//! [`StructType::try_from_arrow`]: delta_kernel::engine::arrow_conversion::TryFromArrow
+//! [`LoadTableProvider`]: crate::exec::LoadTableProvider
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use datafusion::catalog::TableProvider;
+use datafusion::datasource::provider_as_source;
 use datafusion_common::arrow::datatypes::Schema as ArrowSchema;
 use datafusion_common::error::DataFusionError;
 use datafusion_common::{Column, DFSchema};
 use datafusion_expr::logical_plan::{EmptyRelation, LogicalPlan, Values};
 use datafusion_expr::{lit, Expr, ExprFunctionExt, JoinType as DfJoinType, LogicalPlanBuilder};
 use datafusion_functions_window::row_number::row_number;
-use delta_kernel::engine::arrow_conversion::TryIntoArrow;
+use delta_kernel::engine::arrow_conversion::{TryFromArrow, TryIntoArrow};
 use delta_kernel::expressions::Expression;
 use delta_kernel::plans::ir::nodes::{
     EquiJoinNode, LoadNode, MaxByVersionNode, UnionNode, ValuesNode,
 };
 use delta_kernel::plans::ir::plan::{JoinKind, NodeKind, PlanNode, Ref};
+use delta_kernel::plans::schema_expr::field_op::load_output_schema;
+use delta_kernel::schema::{ColumnMetadataKey, DataType, StructField, StructType};
 
 use super::ordered_union::compile_ordered_union;
 use super::project::compile_project_node;
@@ -53,6 +58,7 @@ use crate::compile::expr_translator::{
 };
 use crate::compile::CompileContext;
 use crate::error::plan_compilation;
+use crate::exec::LoadTableProvider;
 
 /// Compile a slice of [`PlanNode`]s to a DataFusion [`LogicalPlan`] rooted at `terminal`.
 ///
@@ -205,23 +211,96 @@ fn lower_values(node: &ValuesNode) -> Result<LogicalPlan, DataFusionError> {
     })
 }
 
-/// Lower [`NodeKind::Load`] -- the streaming parquet/json loader that materializes deletion
-/// vectors and field-id reshape. The physical `LoadExec` / `LoadTableProvider` and the
-/// schema-derivation helper (`load_output_schema`) live in a downstream module not yet
-/// present in this workspace slice; until they are, the lowering rejects the node with a
-/// typed `plan_compilation` error so a partial pipeline fails fast at compile time instead
-/// of silently dropping the load.
+/// Convert a [`LogicalPlan`]'s arrow schema back to a kernel [`StructType`]. Used at
+/// compile time when downstream lowerings (Load's output schema) need a kernel-typed view
+/// of the upstream output.
+fn kernel_schema_from_logical(plan: &LogicalPlan) -> Result<StructType, DataFusionError> {
+    let arrow: ArrowSchema = plan.schema().as_arrow().clone();
+    StructType::try_from_arrow(&arrow).map_err(|e| {
+        plan_compilation(format!(
+            "compile_plan: arrow -> kernel schema conversion failed: {e}",
+        ))
+    })
+}
+
+/// Lower [`NodeKind::Load`] -- the streaming parquet/json loader. The DV-driven row filter
+/// and field-id reshape paths require DataFusion 54 and are rejected at
+/// [`crate::exec::LoadExec::new`] construction; this PR only supports the no-DV /
+/// no-column-mapping subset.
+///
+/// DV-annotated and column-mapping-bearing loads are also rejected here at compile time
+/// (in addition to the physical-planning guards in `LoadExec::new`) so the lowering
+/// surface is symmetric with `lower_scan_*` and callers get the rejection before any
+/// later DataFusion planning runs. The duplicate column-mapping walker shared with
+/// `scan.rs`'s helper can be deduplicated once a third caller motivates extracting it
+/// into a shared module.
 fn lower_load(
     built: &HashMap<Ref, LogicalPlan>,
     upstream_ref: Ref,
-    _node: &LoadNode,
-    _ctx: &CompileContext,
+    node: &LoadNode,
+    ctx: &CompileContext,
 ) -> Result<LogicalPlan, DataFusionError> {
-    let _ = lookup(built, upstream_ref)?;
-    Err(plan_compilation(
-        "compile_plan: NodeKind::Load lowering unavailable until LoadExec lands \
-         (LoadTableProvider not yet present in this workspace slice)",
-    ))
+    // Reject DV-annotated loads at compile time, symmetric with the column-mapping check
+    // below and with `LoadExec::new`'s physical-planning guard. A DV-annotated `LoadNode`
+    // that reaches `LoadExec::new` fails at physical-planning time, but we surface the
+    // rejection during logical lowering too so partial pipelines fail fast and consumers
+    // can react during plan compilation.
+    if node.dv_ref.is_some() {
+        return Err(plan_compilation(
+            "Load: deletion-vector-annotated loads require DataFusion 54 \
+             (virtual `_row_number` column); the engine currently targets DataFusion 53",
+        ));
+    }
+    if schema_has_column_mapping(node.file_schema.fields()) {
+        return Err(plan_compilation(
+            "Load: column-mapping schemas require DataFusion 54 \
+             (FieldIdPhysicalExprAdapterFactory); the engine currently targets DataFusion 53",
+        ));
+    }
+    let upstream_logical = lookup(built, upstream_ref)?.clone();
+    let upstream_kernel = kernel_schema_from_logical(&upstream_logical)?;
+    let output_kernel_schema = load_output_schema(
+        &node.file_schema,
+        &node.passthrough_columns,
+        &upstream_kernel,
+    )
+    .map_err(|e| plan_compilation(format!("compile_plan: Load output schema: {e}")))?;
+    let provider: Arc<dyn TableProvider> = Arc::new(LoadTableProvider::try_new(
+        upstream_logical,
+        Arc::new(node.clone()),
+        Arc::clone(&ctx.engine),
+        output_kernel_schema,
+    )?);
+    LogicalPlanBuilder::scan("kernel_load", provider_as_source(provider), None)?.build()
+}
+
+fn schema_has_column_mapping<'a>(fields: impl IntoIterator<Item = &'a StructField>) -> bool {
+    fields.into_iter().any(field_has_column_mapping)
+}
+
+fn field_has_column_mapping(field: &StructField) -> bool {
+    if field
+        .metadata
+        .contains_key(ColumnMetadataKey::ColumnMappingId.as_ref())
+        || field
+            .metadata
+            .contains_key(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref())
+    {
+        return true;
+    }
+    data_type_has_column_mapping(field.data_type())
+}
+
+fn data_type_has_column_mapping(dt: &DataType) -> bool {
+    match dt {
+        DataType::Struct(inner) => schema_has_column_mapping(inner.fields()),
+        DataType::Array(arr) => data_type_has_column_mapping(arr.element_type()),
+        DataType::Map(map) => {
+            data_type_has_column_mapping(map.key_type())
+                || data_type_has_column_mapping(map.value_type())
+        }
+        _ => false,
+    }
 }
 
 /// Lower `NodeKind::MaxByVersion` to `row_number() OVER (PARTITION BY ... ORDER BY version DESC)`

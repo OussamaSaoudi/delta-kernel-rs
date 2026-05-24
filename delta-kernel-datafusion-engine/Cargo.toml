@@ -27,6 +27,7 @@ datafusion-functions-nested = { version = "53", default-features = false }
 datafusion-functions-window = { version = "53", default-features = false }
 datafusion-functions-json = { version = "0.53", default-features = false }
 datafusion-physical-expr = { version = "53", default-features = false }
+datafusion-physical-expr-adapter = { version = "53", default-features = false }
 datafusion-physical-expr-common = { version = "53", default-features = false }
 datafusion-physical-plan = { version = "53", default-features = false }
 datafusion-datasource = { version = "53", default-features = false }
@@ -35,7 +36,10 @@ datafusion-datasource-parquet = { version = "53", default-features = false }
 
 async-stream = "0.3"
 async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures = "0.3"
+roaring = "0.10"
+tokio = { version = "1", default-features = false, features = ["rt"] }
 url = "2"
 
 [features]
