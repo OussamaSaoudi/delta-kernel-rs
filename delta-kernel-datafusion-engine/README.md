@@ -3,16 +3,16 @@
 A DataFusion-backed executor for [`delta_kernel`](https://crates.io/crates/delta_kernel)
 declarative plans.
 
-The kernel emits an engine-agnostic plan IR (`delta_kernel::plans::ir::plan::Plan`).
-This crate compiles those plans into a DataFusion `LogicalPlan` and (in a downstream
-slice) exposes a `DataFusionExecutor` that runs them against a connector-provided
-`delta_kernel::Engine`. The physical `LoadExec` operator and the executor driver land in
-downstream slices of this stack.
+The kernel emits an engine-agnostic plan IR (`delta_kernel::plans::ir::plan::Plan`). This
+crate compiles those plans into a DataFusion `LogicalPlan` and exposes a
+`DataFusionExecutor` that runs them against a connector-provided
+`delta_kernel::Engine`.
 
-This crate is feature-gated by the kernel's `declarative-plans` feature. It targets
+The crate is feature-gated by the kernel's `declarative-plans` feature. It targets
 **DataFusion 53**; features that need DataFusion 54 (virtual `_row_number` column,
-field-id-aware physical adapters) are intentionally absent and surface as typed
-`plan_compilation` / `Unsupported` errors at compile time.
+field-id-aware physical adapters, deletion-vector decoding inside `LoadExec`) are
+intentionally absent and surface as typed `plan_compilation` / `Unsupported` errors at
+compile time so connectors fail fast instead of silently reading the wrong data.
 
 ## What ships in this slice
 
@@ -21,13 +21,13 @@ field-id-aware physical adapters) are intentionally absent and surface as typed
 | `compile::expr_translator` | `delta_kernel::expressions::Expression` / `Predicate` -> DataFusion `Expr`. |
 | `compile::stamp_udf` | Internal "stamp" UDF used by reducer sinks. |
 | `compile::json_parse` (internal) | JSON-stats column extraction UDFs over the kernel `StructType`. |
-| `compile::logical` | Per-`NodeKind` logical-plan lowering: `Values`, `Filter`, `Project`, `Union`, `MaxByVersion`, `EquiJoin`, plus a `compile_plan` entry point that walks the IR. `Load` lowering is intentionally rejected until `LoadExec` lands. |
-| `exec::file_listing` | `FileListingExec` physical operator over a static slice of files (path + size + modification_time). Used by `Scan` lowering. |
+| `compile::logical` | Per-`NodeKind` logical-plan lowering: `Values`, `Filter`, `Project`, `Union`, `MaxByVersion`, `EquiJoin`, and `Load`, with a `compile_plan` entry point that walks the IR. |
+| `exec` | `FileListingExec` and the streaming `LoadExec` / `LoadTableProvider` pair (no-DV / no-column-mapping subset). |
+| `executor` | `DataFusionExecutor`: drives kernel coroutine state machines (scan / scan_metadata / full_state) and compiles `ResultPlan` -> `DataFrame`. |
 | `error` | Typed bridges (`DataFusionError` <-> `DeltaError`), `DfResultIntoDelta` extension trait. |
-
-The remaining downstream slices add the `LoadExec` physical operator and the
-`DataFusionExecutor` driver.
+| `testing` | Buffered collectors over `DataFusionExecutor` for integration tests. |
 
 ## Status
 
-Experimental. Public surface is unstable while the executor lands.
+Experimental. Public surface is unstable while the executor matures. Deletion vectors and
+field-id-aware Parquet reads land once DataFusion 54 ships.

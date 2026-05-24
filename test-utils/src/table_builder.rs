@@ -529,6 +529,44 @@ impl FeatureSet {
         self
     }
 
+    /// Common feature sets for cross-product testing: empty, one per write-compatible
+    /// feature, and one with all write-compatible features combined. Not the full power
+    /// set -- add specific combos as needed.
+    ///
+    /// `type_widening` is intentionally excluded because kernel errors when writing
+    /// tables with that feature enabled (see `TableFeature::TypeWidening`).
+    pub fn common() -> Vec<Self> {
+        vec![
+            Self::empty(),
+            Self::new().column_mapping("name"),
+            Self::new().ict(),
+            Self::new().v2_checkpoint(),
+            Self::new().deletion_vectors(),
+            Self::new().append_only(),
+            Self::new().change_data_feed(),
+            Self::new().domain_metadata(),
+            Self::new().vacuum_protocol_check(),
+            Self::new().row_tracking(),
+            Self::new()
+                .column_mapping("name")
+                .ict()
+                .v2_checkpoint()
+                .deletion_vectors()
+                .append_only()
+                .change_data_feed()
+                .domain_metadata()
+                .vacuum_protocol_check()
+                .row_tracking(),
+        ]
+    }
+
+    /// Whether v2_checkpoint is enabled.
+    pub fn has_v2_checkpoint(&self) -> bool {
+        self.table_properties
+            .iter()
+            .any(|(k, v)| k == "delta.feature.v2Checkpoint" && v == "supported")
+    }
+
     /// Returns the table features implied by the properties in this set. Used by tests
     /// to check that each builder method actually enables the right feature.
     pub fn expected_features(&self) -> Vec<TableFeature> {

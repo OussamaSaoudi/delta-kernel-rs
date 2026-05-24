@@ -43,12 +43,14 @@ tokio = { version = "1", default-features = false, features = ["rt"] }
 url = "2"
 
 [features]
-# The `test-utils` feature exposes the `testing` module (buffered collectors over the
-# eventual `DataFusionExecutor`). That module ships with the executor PR; this branch
-# declares the feature now so downstream crates can opt in without conditional gating
-# in their `Cargo.toml`.
+# Reserved marker feature for future test-only surface (e.g. an in-memory engine
+# factory). The `testing` module itself is always compiled because the integration
+# tests in this crate need it unconditionally; downstream connectors can still opt in
+# to this feature today so they don't have to add it later when the gated surface lands.
 test-utils = []
 
 [dev-dependencies]
 rstest = "0.23"
+tempfile = "3"
+test_utils = { path = "../test-utils" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
