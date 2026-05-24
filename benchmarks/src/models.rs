@@ -14,15 +14,38 @@ use url::Url;
 #[derive(Clone, Debug)]
 pub struct ReadConfig {
     pub name: String,
+    pub read_engine: ReadEngine,
     pub parallel_scan: ParallelScan,
+}
+
+/// Selects which engine implementation drives a read benchmark or workload.
+///
+/// `DefaultEngine` measures the kernel default Arrow/Tokio engine end-to-end.
+/// `Datafusion` measures the `delta-kernel-datafusion-engine` `DataFusionExecutor`,
+/// which compiles the kernel `Plan` IR into a DataFusion `LogicalPlan` and drives it
+/// to completion. The DataFusion variant rejects column-mapping and deletion-vector
+/// plans on DataFusion 53; callers (e.g. `workload_bench`) filter unsupported
+/// tables out of the bench matrix before runner setup.
+#[derive(Clone, Debug)]
+pub enum ReadEngine {
+    DefaultEngine,
+    Datafusion,
 }
 
 /// Provides a default set of read configs for a given table, read spec, and operation
 pub fn default_read_configs() -> Vec<ReadConfig> {
-    vec![ReadConfig {
-        name: "serial".into(),
-        parallel_scan: ParallelScan::Disabled,
-    }]
+    vec![
+        ReadConfig {
+            name: "default_engine_serial".into(),
+            read_engine: ReadEngine::DefaultEngine,
+            parallel_scan: ParallelScan::Disabled,
+        },
+        ReadConfig {
+            name: "datafusion".into(),
+            read_engine: ReadEngine::Datafusion,
+            parallel_scan: ParallelScan::Disabled,
+        },
+    ]
 }
 
 #[derive(Clone, Debug)]
@@ -205,7 +228,7 @@ impl TimeTravel {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Spec {
     Read(ReadSpec),
-    #[serde(alias = "snapshot_construction")]
+    #[serde(alias = "snapshot", alias = "snapshot_construction")]
     SnapshotConstruction(Box<SnapshotConstructionSpec>),
 }
 
@@ -244,19 +267,11 @@ pub struct SnapshotConstructionSpec {
     pub expected: Option<SnapshotExpected>,
 }
 
-impl SnapshotConstructionSpec {
-    pub fn as_str(&self) -> &str {
-        "snapshotConstruction"
-    }
-}
-
 impl Spec {
     pub fn as_str(&self) -> &str {
         match self {
             Spec::Read(read_spec) => read_spec.as_str(),
-            Spec::SnapshotConstruction(snapshot_construction_spec) => {
-                snapshot_construction_spec.as_str()
-            }
+            Spec::SnapshotConstruction(_) => "snapshotConstruction",
         }
     }
 

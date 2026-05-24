@@ -13,12 +13,14 @@
 use std::hint::black_box;
 use std::sync::Arc;
 
+use delta_kernel::arrow::array::RecordBatch;
 use delta_kernel::engine::default::executor::tokio::TokioMultiThreadExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::expressions::PredicateRef;
 use delta_kernel::object_store::local::LocalFileSystem;
-use delta_kernel::scan::{AfterSequentialScanMetadata, ParallelScanMetadata};
+use delta_kernel::scan::{AfterSequentialScanMetadata, ParallelScanMetadata, Scan};
 use delta_kernel::{Engine, Snapshot};
+use delta_kernel_datafusion_engine::DataFusionExecutor;
 use delta_kernel_unity_catalog::UCKernelClient;
 use unity_catalog_delta_client_api::{Error as UcApiError, Operation};
 use unity_catalog_delta_rest_client::{
@@ -27,10 +29,13 @@ use unity_catalog_delta_rest_client::{
 use url::Url;
 
 use crate::models::{
-    ParallelScan, ReadConfig, ReadOperation, ReadSpec, SnapshotConstructionSpec, TableInfo,
-    TimeTravel,
+    ParallelScan, ReadConfig, ReadEngine, ReadOperation, ReadSpec, SnapshotConstructionSpec,
+    TableInfo, TimeTravel,
 };
 use crate::predicate_parser::parse_predicate;
+use crate::workload::{
+    build_scan_for_spec, execute_read_via_datafusion, filter_batches_with_predicate,
+};
 
 /// Delta table property indicating catalog-managed support.
 const CATALOG_MANAGED_PROPERTY: &str = "delta.feature.catalogManaged";
@@ -52,8 +57,7 @@ fn build_engine(
     )
 }
 
-/// Determines how a snapshot is loaded. Built once at setup via [`resolve_snapshot_strategy`],
-/// then used by runners to construct snapshots.
+/// Determines how a snapshot is loaded. Built once at setup via [`resolve_snapshot_strategy`].
 enum SnapshotStrategy {
     /// Standard snapshot builder (local, S3, or UC-managed non-catalog-managed tables).
     Standard { url: Url },
@@ -348,23 +352,102 @@ impl WorkloadRunner for ReadMetadataRunner {
     }
 }
 
-/// Factory function that creates the appropriate read runner for a given operation and config
-pub fn create_read_runner(
-    table_info: &TableInfo,
-    case_name: &str,
-    read_spec: &ReadSpec,
-    operation: ReadOperation,
-    config: ReadConfig,
-    runtime: Arc<tokio::runtime::Runtime>,
-) -> Result<Box<dyn WorkloadRunner>, Box<dyn std::error::Error>> {
-    match operation {
-        ReadOperation::ReadMetadata => Ok(Box::new(ReadMetadataRunner::setup(
-            table_info, case_name, read_spec, config, runtime,
-        )?)),
-        ReadOperation::ReadData => Err("ReadDataRunner not yet implemented".into()),
+/// Shared setup state for the ReadData runners: a fully-built `Scan` (predicate +
+/// column projection pre-applied), its engine, the benchmark display name, and the
+/// original logical-schema predicate (kept separately because kernel rewrites the
+/// predicate to physical column names inside the scan; only the original can be
+/// evaluated against logical-schema output batches).
+struct ReadDataSetup {
+    scan: Scan,
+    post_filter_predicate: Option<PredicateRef>,
+    engine: Arc<dyn Engine>,
+    name: String,
+}
+
+impl ReadDataSetup {
+    fn build(
+        table_info: &TableInfo,
+        case_name: &str,
+        read_spec: &ReadSpec,
+        config: &ReadConfig,
+        runtime: Arc<tokio::runtime::Runtime>,
+    ) -> Result<(Self, Arc<tokio::runtime::Runtime>), Box<dyn std::error::Error>> {
+        let (engine, strategy) = resolve_snapshot_strategy(table_info, runtime.clone())?;
+        let snapshot =
+            strategy.load_snapshot(engine.as_ref(), &runtime, read_spec.time_travel.as_ref())?;
+        let (scan, post_filter_predicate) = build_scan_for_spec(snapshot, read_spec)?;
+        let name = format!(
+            "{}/{}/{}/{}",
+            table_info.name,
+            case_name,
+            ReadOperation::ReadData.as_str(),
+            config.name,
+        );
+        Ok((
+            Self {
+                scan,
+                post_filter_predicate,
+                engine,
+                name,
+            },
+            runtime,
+        ))
     }
 }
 
+pub struct ReadDataStateMachineRunner {
+    setup: ReadDataSetup,
+}
+
+impl ReadDataStateMachineRunner {
+    pub fn setup(
+        table_info: &TableInfo,
+        case_name: &str,
+        read_spec: &ReadSpec,
+        config: ReadConfig,
+        runtime: Arc<tokio::runtime::Runtime>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (setup, _runtime) =
+            ReadDataSetup::build(table_info, case_name, read_spec, &config, runtime)?;
+        Ok(Self { setup })
+    }
+}
+
+impl WorkloadRunner for ReadDataStateMachineRunner {
+    fn execute(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Match `ReadDataPlansRunner`: materialize every batch into Arrow form and then
+        // apply the residual post-scan predicate so both bench paths measure the same
+        // end-to-end work (scan + DV + per-batch predicate evaluation) for residual-
+        // filter workloads. Without this the two ReadData runners diverge silently and
+        // the bench numbers are not directly comparable.
+        let batches: Vec<RecordBatch> = self
+            .setup
+            .scan
+            .execute(self.setup.engine.clone())?
+            .map(|res| -> Result<RecordBatch, Box<dyn std::error::Error>> {
+                let data = res?;
+                let arrow = delta_kernel::engine::arrow_data::ArrowEngineData::try_from_engine_data(
+                    data,
+                )?;
+                Ok(arrow.into())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let filtered =
+            filter_batches_with_predicate(batches, self.setup.post_filter_predicate.as_deref())?;
+        black_box(filtered);
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        &self.setup.name
+    }
+}
+
+/// Default-engine snapshot construction runner. Measures end-to-end snapshot load cost
+/// (log replay + checkpoint reads), which is the closest counterpart to the
+/// SnapshotConstruction acceptance workloads. There is no DataFusion variant: snapshot
+/// loading still flows through the kernel engine regardless of which executor drives
+/// downstream plans.
 pub struct SnapshotConstructionRunner {
     engine: Arc<dyn Engine>,
     runtime: Arc<tokio::runtime::Runtime>,
@@ -415,12 +498,79 @@ impl WorkloadRunner for SnapshotConstructionRunner {
     }
 }
 
+pub struct ReadDataPlansRunner {
+    setup: ReadDataSetup,
+    executor: DataFusionExecutor,
+    runtime: Arc<tokio::runtime::Runtime>,
+}
+
+impl ReadDataPlansRunner {
+    pub fn setup(
+        table_info: &TableInfo,
+        case_name: &str,
+        read_spec: &ReadSpec,
+        config: ReadConfig,
+        runtime: Arc<tokio::runtime::Runtime>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (setup, runtime) =
+            ReadDataSetup::build(table_info, case_name, read_spec, &config, runtime)?;
+        let executor = DataFusionExecutor::try_new_with_engine(setup.engine.clone())
+            .map_err(|e| format!("DataFusion executor setup failed: {e}"))?;
+        Ok(Self {
+            setup,
+            executor,
+            runtime,
+        })
+    }
+}
+
+impl WorkloadRunner for ReadDataPlansRunner {
+    fn execute(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let result = self.runtime.block_on(execute_read_via_datafusion(
+            &self.executor,
+            &self.setup.scan,
+            self.setup.post_filter_predicate.as_deref(),
+        ))?;
+        black_box(result);
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        &self.setup.name
+    }
+}
+
+/// Factory function that creates the appropriate read runner for a given operation and config
+pub fn create_read_runner(
+    table_info: &TableInfo,
+    case_name: &str,
+    read_spec: &ReadSpec,
+    operation: ReadOperation,
+    config: ReadConfig,
+    runtime: Arc<tokio::runtime::Runtime>,
+) -> Result<Box<dyn WorkloadRunner>, Box<dyn std::error::Error>> {
+    match (operation, &config.read_engine) {
+        (ReadOperation::ReadMetadata, ReadEngine::DefaultEngine) => Ok(Box::new(
+            ReadMetadataRunner::setup(table_info, case_name, read_spec, config, runtime)?,
+        )),
+        (ReadOperation::ReadMetadata, ReadEngine::Datafusion) => {
+            Err("ReadMetadata with the Datafusion engine is not supported".into())
+        }
+        (ReadOperation::ReadData, ReadEngine::DefaultEngine) => Ok(Box::new(
+            ReadDataStateMachineRunner::setup(table_info, case_name, read_spec, config, runtime)?,
+        )),
+        (ReadOperation::ReadData, ReadEngine::Datafusion) => Ok(Box::new(
+            ReadDataPlansRunner::setup(table_info, case_name, read_spec, config, runtime)?,
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::LazyLock;
 
     use super::*;
-    use crate::models::{ParallelScan, ReadConfig, ReadSpec, TableInfo, TimeTravel};
+    use crate::models::{ParallelScan, ReadConfig, ReadEngine, ReadSpec, TableInfo};
 
     fn test_runtime() -> Arc<tokio::runtime::Runtime> {
         static RT: LazyLock<Arc<tokio::runtime::Runtime>> = LazyLock::new(|| {
@@ -475,15 +625,25 @@ mod tests {
 
     fn serial_config() -> ReadConfig {
         ReadConfig {
-            name: "serial".to_string(),
+            name: "default_engine_serial".to_string(),
+            read_engine: ReadEngine::DefaultEngine,
             parallel_scan: ParallelScan::Disabled,
         }
     }
 
     fn parallel_config() -> ReadConfig {
         ReadConfig {
-            name: "parallel2".to_string(),
+            name: "default_engine_parallel2".to_string(),
+            read_engine: ReadEngine::DefaultEngine,
             parallel_scan: ParallelScan::Enabled { num_threads: 2 },
+        }
+    }
+
+    fn datafusion_config() -> ReadConfig {
+        ReadConfig {
+            name: "datafusion".to_string(),
+            read_engine: ReadEngine::Datafusion,
+            parallel_scan: ParallelScan::Disabled,
         }
     }
 
@@ -499,7 +659,7 @@ mod tests {
         .expect("setup should succeed");
         assert_eq!(
             runner.name(),
-            "basic_partitioned/testCase/readMetadata/serial"
+            "basic_partitioned/testCase/readMetadata/default_engine_serial"
         );
         assert!(runner.execute().is_ok());
     }
@@ -516,53 +676,8 @@ mod tests {
         .expect("setup should succeed");
         assert_eq!(
             runner.name(),
-            "basic_partitioned/testCase/readMetadata/parallel2"
+            "basic_partitioned/testCase/readMetadata/default_engine_parallel2"
         );
-        assert!(runner.execute().is_ok());
-    }
-
-    fn test_snapshot_spec() -> SnapshotConstructionSpec {
-        SnapshotConstructionSpec {
-            time_travel: None,
-            expected: None,
-        }
-    }
-
-    #[test]
-    fn test_snapshot_construction_runner_setup() {
-        let runner = SnapshotConstructionRunner::setup(
-            &test_table_info(),
-            "testCase",
-            &test_snapshot_spec(),
-            test_runtime(),
-        );
-        assert!(runner.is_ok());
-    }
-
-    #[test]
-    fn test_snapshot_construction_runner_name() {
-        let runner = SnapshotConstructionRunner::setup(
-            &test_table_info(),
-            "testCase",
-            &test_snapshot_spec(),
-            test_runtime(),
-        )
-        .expect("setup should succeed");
-        assert_eq!(
-            runner.name(),
-            "basic_partitioned/testCase/snapshotConstruction"
-        );
-    }
-
-    #[test]
-    fn test_snapshot_construction_runner_execute() {
-        let runner = SnapshotConstructionRunner::setup(
-            &test_table_info(),
-            "testCase",
-            &test_snapshot_spec(),
-            test_runtime(),
-        )
-        .expect("setup should succeed");
         assert!(runner.execute().is_ok());
     }
 
@@ -577,7 +692,9 @@ mod tests {
             test_runtime(),
         )
         .expect("create_read_runner should succeed");
-        assert!(runner.execute().is_ok());
+        if let Err(e) = runner.execute() {
+            panic!("read_metadata serial execute failed: {e}");
+        }
     }
 
     #[test]
@@ -610,16 +727,35 @@ mod tests {
     }
 
     #[test]
-    fn test_create_read_runner_read_data_unimplemented() {
-        let result = create_read_runner(
+    fn test_create_read_runner_read_data_state_machine() {
+        let runner = create_read_runner(
             &test_table_info(),
             "testCase",
             &test_read_spec(),
             ReadOperation::ReadData,
             serial_config(),
             test_runtime(),
+        )
+        .expect("create_read_runner should succeed");
+        assert!(runner.execute().is_ok());
+    }
+
+    #[test]
+    fn test_create_read_runner_read_data_plans_datafusion() {
+        let runner = create_read_runner(
+            &test_table_info(),
+            "testCase",
+            &test_read_spec(),
+            ReadOperation::ReadData,
+            datafusion_config(),
+            test_runtime(),
+        )
+        .expect("create_read_runner should succeed");
+        assert_eq!(
+            runner.name(),
+            "basic_partitioned/testCase/readData/datafusion"
         );
-        assert!(result.is_err());
+        assert!(runner.execute().is_ok());
     }
 
     #[test]
@@ -627,21 +763,5 @@ mod tests {
         let url = Url::parse("gs://bucket/table").unwrap();
         let result = resolve_engine_for_url(&url, test_runtime());
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_snapshot_construction_with_time_travel() {
-        let spec = SnapshotConstructionSpec {
-            time_travel: Some(TimeTravel::Version { version: 0 }),
-            expected: None,
-        };
-        let runner = SnapshotConstructionRunner::setup(
-            &test_table_info(),
-            "testCase",
-            &spec,
-            test_runtime(),
-        )
-        .expect("setup should succeed");
-        assert!(runner.execute().is_ok());
     }
 }

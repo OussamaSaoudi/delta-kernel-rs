@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use delta_kernel_benchmarks::models::{
-    default_read_configs, ParallelScan, ReadConfig, ReadOperation, Spec,
+    default_read_configs, ParallelScan, ReadConfig, ReadEngine, ReadOperation, Spec, TableInfo,
 };
 use delta_kernel_benchmarks::runners::{
     create_read_runner, SnapshotConstructionRunner, WorkloadRunner,
@@ -28,8 +28,8 @@ fn workload_benchmarks(c: &mut Criterion) {
     for workload in &workloads {
         match &workload.spec {
             Spec::Read(read_spec) => {
-                for operation in [ReadOperation::ReadMetadata] {
-                    for config in build_read_configs(&workload.table_info.name) {
+                for operation in [ReadOperation::ReadMetadata, ReadOperation::ReadData] {
+                    for config in build_read_configs(&workload.table_info, operation) {
                         let runner = create_read_runner(
                             &workload.table_info,
                             &workload.case_name,
@@ -43,6 +43,9 @@ fn workload_benchmarks(c: &mut Criterion) {
                     }
                 }
             }
+            // Snapshot construction has no DataFusion executor variant -- snapshot loading
+            // flows through the kernel engine for both runners -- so we register the
+            // default-engine `SnapshotConstructionRunner` only.
             Spec::SnapshotConstruction(snapshot_construction_spec) => {
                 let runner = SnapshotConstructionRunner::setup(
                     &workload.table_info,
@@ -74,18 +77,68 @@ fn run_benchmark(c: &mut Criterion, runner: &dyn WorkloadRunner, reporter: &Coun
     }
 }
 
-fn build_read_configs(table_name: &str) -> Vec<ReadConfig> {
-    // Choose which benchmark configurations to run for a given table
-    // TODO: This function will take in table info to choose the appropriate configs for a given
-    // table
-    let mut configs = default_read_configs();
-    if table_name.contains("V2Chkpt") {
-        configs.push(ReadConfig {
-            name: "parallel2".into(),
-            parallel_scan: ParallelScan::Enabled { num_threads: 2 },
-        });
+fn build_read_configs(table_info: &TableInfo, operation: ReadOperation) -> Vec<ReadConfig> {
+    match operation {
+        ReadOperation::ReadMetadata => {
+            // Metadata benchmark comparison modes:
+            // 1) default-engine serial
+            // 2) default-engine parallel
+            let mut configs = vec![ReadConfig {
+                name: "default_engine_serial".into(),
+                read_engine: ReadEngine::DefaultEngine,
+                parallel_scan: ParallelScan::Disabled,
+            }];
+            let num_threads = if table_info.name.contains("V2Chkpt") {
+                2
+            } else {
+                4
+            };
+            configs.push(ReadConfig {
+                name: format!("default_engine_parallel{num_threads}"),
+                read_engine: ReadEngine::DefaultEngine,
+                parallel_scan: ParallelScan::Enabled { num_threads },
+            });
+            configs
+        }
+        ReadOperation::ReadData => {
+            // Skip the DataFusion `ReadData` config for tables with column mapping or
+            // deletion vectors enabled: `LoadExec::new` rejects those plans on
+            // DataFusion 53 and the bench would panic instead of producing a number.
+            // The DataFusion variant rejoins once DF54 ships the `_row_number` virtual
+            // column + field-id-aware adapters.
+            default_read_configs()
+                .into_iter()
+                .filter(|cfg| {
+                    !matches!(cfg.read_engine, ReadEngine::Datafusion)
+                        || datafusion_executor_supports(table_info)
+                })
+                .collect()
+        }
     }
-    configs
+}
+
+/// Quick property-based check: the DataFusion read-data runner cannot drive tables that
+/// require column mapping or deletion vectors on DataFusion 53. Used to filter unsupported
+/// configurations out of the bench matrix before runner setup so they don't panic at
+/// `LoadExec::new`.
+///
+/// Parallels `acceptance/tests/common/mod.rs::datafusion_executor_unsupported_feature` --
+/// that one inspects a fully-loaded `Snapshot`, this one inspects the static `TableInfo`
+/// JSON before any IO. Keep the two predicates in lockstep when DF54 gates land
+/// (row-tracking, etc.); a shared helper is the right home once `Snapshot` exposes
+/// the protocol feature list publicly.
+fn datafusion_executor_supports(table_info: &TableInfo) -> bool {
+    const COLUMN_MAPPING_MODE: &str = "delta.columnMapping.mode";
+    const ENABLE_DELETION_VECTORS: &str = "delta.enableDeletionVectors";
+    let cm_enabled = table_info
+        .properties
+        .get(COLUMN_MAPPING_MODE)
+        .is_some_and(|m| m != "none");
+    let dv_enabled = table_info
+        .properties
+        .get(ENABLE_DELETION_VECTORS)
+        .is_some_and(|v| v == "true");
+    !cm_enabled && !dv_enabled
 }
 
 criterion_group!(benches, workload_benchmarks);
