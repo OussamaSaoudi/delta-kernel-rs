@@ -35,26 +35,46 @@ use std::sync::Arc;
 
 use url::Url;
 
-use crate::expressions::{
-    ColumnName, Expression, ExpressionRef, IntoColumnName, PredicateRef, Scalar,
-};
-use crate::plans::errors::{DeltaError, DeltaErrorCode};
+use crate::expressions::{ColumnName, ExpressionRef, IntoColumnName, PredicateRef, Scalar};
+use crate::plans::errors::DeltaError;
 use crate::plans::ir::nodes::{
     EquiJoinNode, FilterNode, ListFilesNode, LoadNode, MaxByVersionNode, ProjectNode, ReduceSink,
     ScanJsonNode, ScanParquetNode, UnionNode, ValuesNode,
 };
 use crate::plans::ir::plan::{JoinKind, NodeKind, Plan, PlanNode, Ref, ResultPlan};
 use crate::plans::kernel_reducers::{Extractor, KernelReducer, KernelReducerOutput};
-use crate::plans::schema_expr::check::{check_column_refs, check_expression};
+use crate::plans::schema_expr::check::{
+    check_projection, check_select, infer_projection_schema, validate_exprs,
+};
 use crate::plans::schema_expr::field_op::{
-    arc_struct_or_invariant, compile_field_op, identity_named_expr, load_output_schema, FieldOp,
+    compile_field_op, load_output_schema, narrow_schema_to, FieldOp,
 };
 use crate::plans::state_machines::framework::coroutine::{Engine, StepResume, StepYield};
 use crate::plans::state_machines::framework::state_machine::{
     EngineRequest, EngineResponse, SchemaQuery,
 };
 use crate::schema::{SchemaRef, StructField};
-use crate::{delta_error, FileMeta};
+use crate::FileMeta;
+
+// ============================================================================
+// Local error shorthand
+// ============================================================================
+
+/// Build a Delta-agnostic [`BoxedSource`][crate::plans::errors::BoxedSource] from a
+/// `format!`-style message. The plan builder is a generic plan-construction tool that knows
+/// nothing about Delta error codes -- every internal sanity check produces a boxed error here
+/// and relies on `impl From<BoxedSource> for DeltaError` to lift it at the `?` boundary with
+/// the catch-all [`DeltaCommandInvariantViolation`][crate::plans::errors::DeltaErrorCode] code.
+///
+/// Use [`DeltaResultExt::or_delta`][crate::plans::errors::DeltaResultExt::or_delta] when a more
+/// specific code is appropriate.
+macro_rules! pb_err {
+    ($($arg:tt)*) => {
+        <$crate::plans::errors::BoxedSource as ::std::convert::From<::std::string::String>>::from(
+            ::std::format!($($arg)*),
+        )
+    };
+}
 
 // ============================================================================
 // Shared state
@@ -92,12 +112,12 @@ impl ContextState {
     /// Validates that `builder` was minted in the current session (not stale across dispatch).
     fn ensure_fresh(&self, builder: &PlanBuilder) -> Result<(), DeltaError> {
         if self.session_id != builder.session_id {
-            return Err(delta_error!(
-                DeltaErrorCode::DeltaCommandInvariantViolation,
+            return Err(pb_err!(
                 "stale builder: builder session={cs} expected {ss}",
                 cs = builder.session_id,
                 ss = self.session_id,
-            ));
+            )
+            .into());
         }
         Ok(())
     }
@@ -155,11 +175,11 @@ impl Context {
     pub fn list_files(
         &self,
         start_from: Url,
-        listing_schema: SchemaRef,
+        listing_schema: impl Into<SchemaRef>,
     ) -> Result<PlanBuilder, DeltaError> {
         self.push_source(
             NodeKind::ListFiles(ListFilesNode { start_from }),
-            listing_schema,
+            listing_schema.into(),
         )
     }
 
@@ -168,15 +188,14 @@ impl Context {
     pub fn scan_parquet(
         &self,
         files: Vec<FileMeta>,
-        schema: SchemaRef,
+        schema: impl Into<SchemaRef>,
     ) -> Result<PlanBuilder, DeltaError> {
-        self.push_source(
-            NodeKind::ScanParquet(ScanParquetNode {
-                files,
-                schema: Arc::clone(&schema),
-            }),
-            schema,
-        )
+        let schema = schema.into();
+        let node = ScanParquetNode {
+            files,
+            schema: Arc::clone(&schema),
+        };
+        self.push_source(NodeKind::ScanParquet(node), schema)
     }
 
     /// Append a `NodeKind::ScanJson` source over newline-delimited JSON `files`. Output
@@ -184,30 +203,41 @@ impl Context {
     pub fn scan_json(
         &self,
         files: Vec<FileMeta>,
-        schema: SchemaRef,
+        schema: impl Into<SchemaRef>,
     ) -> Result<PlanBuilder, DeltaError> {
-        self.push_source(
-            NodeKind::ScanJson(ScanJsonNode {
-                files,
-                schema: Arc::clone(&schema),
-            }),
-            schema,
-        )
+        let schema = schema.into();
+        let node = ScanJsonNode {
+            files,
+            schema: Arc::clone(&schema),
+        };
+        self.push_source(NodeKind::ScanJson(node), schema)
     }
 
-    /// Append a `NodeKind::Values` source.
-    pub fn values(
+    /// Append a `NodeKind::Values` source. Rows accept any nested iterable whose leaf
+    /// values are convertible into [`Scalar`]: e.g. `[[1i64, 2], [3, 4]]` or a
+    /// `Vec<Vec<Scalar>>`. Combined with the per-leaf [`Into<Scalar>`] conversions
+    /// for primitive types, callers seldom need a `vec!` or explicit `Scalar::Long`.
+    /// For empty rows, pass `Vec::<Vec<Scalar>>::new()` (or a typed helper) so the
+    /// item type can be inferred.
+    pub fn values<R, S>(
         &self,
-        schema: SchemaRef,
-        rows: Vec<Vec<Scalar>>,
-    ) -> Result<PlanBuilder, DeltaError> {
-        self.push_source(
-            NodeKind::Values(ValuesNode {
-                schema: Arc::clone(&schema),
-                rows,
-            }),
-            schema,
-        )
+        schema: impl Into<SchemaRef>,
+        rows: impl IntoIterator<Item = R>,
+    ) -> Result<PlanBuilder, DeltaError>
+    where
+        R: IntoIterator<Item = S>,
+        S: Into<Scalar>,
+    {
+        let schema = schema.into();
+        let rows: Vec<Vec<Scalar>> = rows
+            .into_iter()
+            .map(|r| r.into_iter().map(Into::into).collect())
+            .collect();
+        let node = ValuesNode {
+            schema: Arc::clone(&schema),
+            rows,
+        };
+        self.push_source(NodeKind::Values(node), schema)
     }
 
     /// Drain the accumulator into a [`EngineRequest::Reduce`] yielded through `engine` and recover
@@ -242,23 +272,24 @@ impl Context {
         // Drop the builder handle so the only remaining Rc on `state` is `self`'s.
         drop(builder);
 
+        let operation = EngineRequest::Reduce {
+            stmts,
+            terminal,
+            sink,
+        };
         let StepResume(result) = engine
             .yield_(StepYield {
-                operation: EngineRequest::Reduce {
-                    stmts,
-                    terminal,
-                    sink,
-                },
+                operation,
                 step_name,
             })
             .await;
         let payload = result.map_err(|e| e.into_delta_typed())?;
         let EngineResponse::Reducer(handle) = payload else {
-            return Err(delta_error!(
-                DeltaErrorCode::DeltaCommandInvariantViolation,
+            return Err(pb_err!(
                 "reduce: executor returned non-Reducer payload `{payload:?}` for \
                  EngineRequest::Reduce",
-            ));
+            )
+            .into());
         };
         extractor.extract(handle).map_err(|e| e.into_delta_typed())
     }
@@ -277,19 +308,20 @@ impl Context {
         step_name: &'static str,
     ) -> Result<SchemaRef, DeltaError> {
         self.state.borrow_mut().invalidate_cursors();
+        let operation = EngineRequest::SchemaQuery(SchemaQuery::new(path.into()));
         let StepResume(result) = engine
             .yield_(StepYield {
-                operation: EngineRequest::SchemaQuery(SchemaQuery::new(path.into())),
+                operation,
                 step_name,
             })
             .await;
         let payload = result.map_err(|e| e.into_delta_typed())?;
         let EngineResponse::Schema(schema) = payload else {
-            return Err(delta_error!(
-                DeltaErrorCode::DeltaCommandInvariantViolation,
+            return Err(pb_err!(
                 "schema_query: executor returned non-Schema payload `{payload:?}` for \
                  EngineRequest::SchemaQuery",
-            ));
+            )
+            .into());
         };
         Ok(schema)
     }
@@ -313,8 +345,7 @@ impl Context {
         let inner = Rc::try_unwrap(self.state)
             .map(|cell| cell.into_inner())
             .map_err(|_| {
-                delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
+                pb_err!(
                     "into_result_plan: outstanding PlanBuilder handles -- drop other Cursors before \
                      calling this method",
                 )
@@ -359,26 +390,22 @@ impl PlanBuilder {
     pub fn schema(&self) -> Result<SchemaRef, DeltaError> {
         let state = self.state.borrow();
         state.ensure_fresh(self)?;
-        state
+        Ok(state
             .ref_schemas
             .get(self.ref_id.0 as usize)
             .cloned()
             .ok_or_else(|| {
-                delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
+                pb_err!(
                     "schema: ref {ref_id} has no recorded schema",
-                    ref_id = self.ref_id.0,
+                    ref_id = self.ref_id.0
                 )
-            })
+            })?)
     }
 
     /// Validates that `other` shares the same underlying context state.
     fn ensure_same_context(&self, other: &PlanBuilder) -> Result<(), DeltaError> {
         if !Rc::ptr_eq(&self.state, &other.state) {
-            return Err(delta_error!(
-                DeltaErrorCode::DeltaCommandInvariantViolation,
-                "builder from a different context cannot be combined",
-            ));
+            return Err(pb_err!("builder from a different context cannot be combined").into());
         }
         Ok(())
     }
@@ -410,18 +437,26 @@ impl PlanBuilder {
         Ok(PlanBuilder::new(state, r, s.session_id))
     }
 
-    /// Apply a nested field edit and append the resulting projection node. The parent
-    /// path is derived from `op` itself ([`FieldOp::parent_path`]).
+    /// Single plumbing primitive for every projection-emitting method. Each caller
+    /// hands us the validated `(output_schema, named_exprs)` -- this just packages
+    /// them into `NodeKind::Project` and pushes the node.
+    fn push_project(
+        self,
+        output_schema: SchemaRef,
+        named_exprs: Vec<(String, ExpressionRef)>,
+    ) -> Result<Self, DeltaError> {
+        let node = ProjectNode {
+            named_exprs,
+            output_schema: Arc::clone(&output_schema),
+        };
+        self.push_unary(NodeKind::Project(node), output_schema)
+    }
+
+    /// Apply a nested field edit and append the resulting projection node.
     fn apply_field_op(self, op: FieldOp) -> Result<Self, DeltaError> {
         let input_schema = self.schema()?;
-        let (output_schema, named_exprs) = compile_field_op(&input_schema, &op)?;
-        self.push_unary(
-            NodeKind::Project(ProjectNode {
-                named_exprs,
-                output_schema: Arc::clone(&output_schema),
-            }),
-            output_schema,
-        )
+        let (output_schema, pairs) = compile_field_op(&input_schema, &op)?;
+        self.push_project(output_schema, pairs)
     }
 
     // === Filter / Project ====================================================
@@ -437,93 +472,42 @@ impl PlanBuilder {
     ///
     /// Each pair becomes one output field `(name, infer_type(expr))`. Inference is
     /// narrow -- unsupported expressions error out and direct callers to
-    /// [`Self::project_with_schema`].
+    /// [`Self::project_with_schema`]. Schema derivation lives in
+    /// `schema_expr::check::infer_projection_schema`.
     pub fn project(
         self,
         named_exprs: impl IntoIterator<Item = (impl Into<String>, impl Into<ExpressionRef>)>,
     ) -> Result<Self, DeltaError> {
         let input_schema = self.schema()?;
-        let pairs: Vec<(String, Arc<Expression>)> = named_exprs
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
-        let mut fields = Vec::with_capacity(pairs.len());
-        for (name, expr) in &pairs {
-            let ty = check_expression(expr.as_ref(), &input_schema, None)?;
-            fields.push(StructField::nullable(name.clone(), ty));
-        }
-        let output_schema: SchemaRef = arc_struct_or_invariant(fields)?;
-        self.push_unary(
-            NodeKind::Project(ProjectNode {
-                named_exprs: pairs,
-                output_schema: Arc::clone(&output_schema),
-            }),
-            output_schema,
-        )
+        let (output_schema, pairs) = infer_projection_schema(&input_schema, named_exprs)?;
+        self.push_project(output_schema, pairs)
     }
 
     /// Append a `NodeKind::Project` with caller-supplied output schema. Positional:
-    /// `exprs[i]` becomes `schema.fields()[i]`. Each expression's column references
-    /// are validated against the input schema via `schema_expr::check::check_column_refs`;
-    /// no type check is performed because callers routinely use this method to rename
-    /// fields (e.g. column-mapping physical -> logical), where output field names
-    /// differ from any inferrable type the expression could produce.
+    /// the i-th expression becomes `schema.fields()[i]`. Validation lives in
+    /// `schema_expr::check::check_projection`: arity + per-expression bidirectional
+    /// type check against the target field's type, with **structural** type
+    /// equivalence (struct field names of nested types are ignored) so column-mapping
+    /// physical -> logical renames are accepted.
     pub fn project_with_schema(
         self,
         exprs: impl IntoIterator<Item = impl Into<ExpressionRef>>,
         schema: SchemaRef,
     ) -> Result<Self, DeltaError> {
-        let exprs: Vec<ExpressionRef> = exprs.into_iter().map(Into::into).collect();
-        let field_count = schema.fields().count();
-        if exprs.len() != field_count {
-            return Err(delta_error!(
-                DeltaErrorCode::DeltaCommandInvariantViolation,
-                "project_with_schema: expected {field_count} expressions, got {got}",
-                got = exprs.len(),
-            ));
-        }
         let input_schema = self.schema()?;
-        for expr in &exprs {
-            check_column_refs(expr.as_ref(), &input_schema)?;
-        }
-        let pairs: Vec<(String, Arc<Expression>)> = schema
-            .fields()
-            .map(|f| f.name().clone())
-            .zip(exprs)
-            .collect();
-        self.push_unary(
-            NodeKind::Project(ProjectNode {
-                named_exprs: pairs,
-                output_schema: Arc::clone(&schema),
-            }),
-            schema,
-        )
+        let pairs = check_projection(&input_schema, exprs, &schema)?;
+        self.push_project(schema, pairs)
     }
 
     // === Schema-edit sugar (over project) ====================================
 
     /// Identity-by-name projection: every field in `schema` becomes `col(name)` against
-    /// the input. Each `col(name)` is bidirectionally checked against the input schema
-    /// with the corresponding target field's type as the expected output (see
-    /// `schema_expr::check::check_expression`).
+    /// the input, strict-type-checked field by field. Validation + pair construction
+    /// live in `schema_expr::check::check_select`.
     pub fn select(self, schema: SchemaRef) -> Result<Self, DeltaError> {
         let input_schema = self.schema()?;
-        let pairs: Vec<(String, ExpressionRef)> = schema
-            .fields()
-            .map(|f| {
-                let name = f.name();
-                let expr = identity_named_expr(name.clone());
-                check_expression(expr.1.as_ref(), &input_schema, Some(f.data_type()))?;
-                Ok(expr)
-            })
-            .collect::<Result<_, DeltaError>>()?;
-        self.push_unary(
-            NodeKind::Project(ProjectNode {
-                named_exprs: pairs,
-                output_schema: Arc::clone(&schema),
-            }),
-            schema,
-        )
+        let pairs = check_select(&input_schema, &schema)?;
+        self.push_project(schema, pairs)
     }
 
     /// Append a caller-typed `(field, expr)` after the existing fields. The supplied
@@ -537,12 +521,7 @@ impl PlanBuilder {
         field: StructField,
         expr: impl Into<ExpressionRef>,
     ) -> Result<Self, DeltaError> {
-        self.apply_field_op(FieldOp::insert_after(
-            ColumnName::default(),
-            None,
-            field,
-            expr.into(),
-        ))
+        self.apply_field_op(FieldOp::append(ColumnName::default(), field, expr.into()))
     }
 
     /// Insert `leaf` immediately after `sibling`'s position in its parent struct.
@@ -558,19 +537,11 @@ impl PlanBuilder {
         leaf: StructField,
         expr: impl Into<ExpressionRef>,
     ) -> Result<Self, DeltaError> {
-        let sibling = sibling.into_column_name();
-        let (sibling_leaf, parent_components) = sibling.path().split_last().ok_or_else(|| {
-            delta_error!(
-                DeltaErrorCode::DeltaCommandInvariantViolation,
-                "insert_col_after: sibling path is empty",
-            )
-        })?;
-        self.apply_field_op(FieldOp::insert_after(
-            ColumnName::new(parent_components),
-            Some(sibling_leaf.clone()),
+        self.apply_field_op(FieldOp::insert_after_sibling(
+            sibling.into_column_name(),
             leaf,
             expr.into(),
-        ))
+        )?)
     }
 
     /// Replace the field at `path` with `new_field` (allowing rename + retype) and
@@ -620,8 +591,12 @@ impl PlanBuilder {
     /// listed `value_columns`, lifted from the input schema in declared order.
     ///
     /// The validator ensures every name in `value_columns` resolves in the input.
-    /// Group-by expressions and `version` are checked against the input schema via
-    /// `schema_expr::check::check_expression` but do not contribute fields to the output.
+    /// Group-by expressions and `version` are type-checked against the input schema
+    /// (well-formedness + column-ref resolution) via
+    /// [`schema_expr::check::validate_exprs`]; their inferred types are discarded
+    /// since they do not contribute to the output.
+    ///
+    /// [`schema_expr::check::validate_exprs`]: crate::plans::schema_expr::check::validate_exprs
     pub fn max_by_version(
         self,
         group_by: impl IntoIterator<Item = impl Into<ExpressionRef>>,
@@ -632,28 +607,17 @@ impl PlanBuilder {
         let version_column: ExpressionRef = version.into();
         let value_columns: Vec<String> = value_columns.into_iter().map(Into::into).collect();
         let input_schema = self.schema()?;
-        for expr in group_by.iter().chain(std::iter::once(&version_column)) {
-            check_expression(expr.as_ref(), &input_schema, None)?;
-        }
-        let mut fields: Vec<StructField> = Vec::with_capacity(value_columns.len());
-        for name in &value_columns {
-            let f = input_schema.field(name).ok_or_else(|| {
-                delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    "max_by_version: value column {name:?} not in input schema",
-                )
-            })?;
-            fields.push(f.clone());
-        }
-        let output_schema = arc_struct_or_invariant(fields)?;
-        self.push_unary(
-            NodeKind::MaxByVersion(MaxByVersionNode {
-                group_by,
-                version_column,
-                value_columns,
-            }),
-            output_schema,
-        )
+        validate_exprs(
+            &input_schema,
+            group_by.iter().cloned().chain([version_column.clone()]),
+        )?;
+        let output_schema = narrow_schema_to(&input_schema, &value_columns, "max_by_version")?;
+        let node = MaxByVersionNode {
+            group_by,
+            version_column,
+            value_columns,
+        };
+        self.push_unary(NodeKind::MaxByVersion(node), output_schema)
     }
 
     /// Left-anti join: rows of `self` whose key matches no row of `other`. Output schema
@@ -668,51 +632,36 @@ impl PlanBuilder {
             .map(|(l, r)| (l.into(), r.into()))
             .collect();
         let output_schema = self.schema()?;
-        self.push_nary(
-            NodeKind::EquiJoin(EquiJoinNode {
-                kind: JoinKind::LeftAnti,
-                key_pairs,
-            }),
-            &[&other],
-            output_schema,
-        )
+        let node = EquiJoinNode {
+            kind: JoinKind::LeftAnti,
+            key_pairs,
+        };
+        self.push_nary(NodeKind::EquiJoin(node), &[&other], output_schema)
     }
 
     /// Unordered union with one or more other cursors. All inputs must share the same
     /// schema (strict equality).
     pub fn union_all(self, others: &[PlanBuilder]) -> Result<Self, DeltaError> {
-        let first_schema = self.schema()?;
-        for o in others {
-            if o.schema()? != first_schema {
-                return Err(delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    "union: input schemas disagree",
-                ));
-            }
-        }
-        let others_refs: Vec<&PlanBuilder> = others.iter().collect();
-        self.push_nary(
-            NodeKind::Union(UnionNode { ordered: false }),
-            &others_refs,
-            first_schema,
-        )
+        self.union(others, false)
     }
 
     /// Order-preserving union with one or more other cursors. All inputs must share the
     /// same schema.
     pub fn union_ordered(self, others: &[PlanBuilder]) -> Result<Self, DeltaError> {
+        self.union(others, true)
+    }
+
+    /// Shared body: validate per-input schema equality, then push `NodeKind::Union`.
+    fn union(self, others: &[PlanBuilder], ordered: bool) -> Result<Self, DeltaError> {
         let first_schema = self.schema()?;
         for o in others {
             if o.schema()? != first_schema {
-                return Err(delta_error!(
-                    DeltaErrorCode::DeltaCommandInvariantViolation,
-                    "union: input schemas disagree",
-                ));
+                return Err(pb_err!("union: input schemas disagree").into());
             }
         }
         let others_refs: Vec<&PlanBuilder> = others.iter().collect();
         self.push_nary(
-            NodeKind::Union(UnionNode { ordered: true }),
+            NodeKind::Union(UnionNode { ordered }),
             &others_refs,
             first_schema,
         )
@@ -730,7 +679,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::expressions::{col, Predicate};
+    use crate::expressions::{col, lit, Expression, Predicate};
     use crate::plans::ir::plan::JoinKind;
     use crate::plans::kernel_reducers::{
         FinishedHandle, KdfControl, KernelReducerKind, KernelReducerOutput,
@@ -752,6 +701,14 @@ mod tests {
         MaxByVersionUnknownValueColumn,
     }
 
+    /// Type-annotated empty rows literal for `Context::values` in tests that exercise
+    /// builder shape only (and don't care about row data). Avoids the
+    /// generic-inference failure of bare `vec![]` against `values`'s `impl IntoIterator`
+    /// signature.
+    fn no_rows() -> Vec<Vec<Scalar>> {
+        vec![]
+    }
+
     fn id_ts_schema() -> SchemaRef {
         Arc::new(
             StructType::try_new(vec![
@@ -766,7 +723,7 @@ mod tests {
     #[test]
     fn sources_mint_refs_and_record_schemas() {
         let ctx = Context::new();
-        let v = ctx.values(id_ts_schema(), vec![]).unwrap();
+        let v = ctx.values(id_ts_schema(), no_rows()).unwrap();
         let j = ctx.scan_json(vec![], id_ts_schema()).unwrap();
         let p = ctx.scan_parquet(vec![], id_ts_schema()).unwrap();
         assert_eq!(v.ref_id(), Ref(0));
@@ -779,9 +736,9 @@ mod tests {
     #[test]
     fn into_result_plan_runs_dce() {
         let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
-        let dead = ctx.values(id_ts_schema(), vec![]).unwrap(); // unreachable
-        let kept = src.filter(Arc::new(col("id").is_not_null())).unwrap();
+        let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
+        let dead = ctx.values(id_ts_schema(), no_rows()).unwrap(); // unreachable
+        let kept = src.filter(col("id").is_not_null()).unwrap();
         // Drop the dead branch handle so try_unwrap works and DCE removes it.
         drop(dead);
         let result_plan = ctx.into_result_plan(kept).unwrap();
@@ -794,7 +751,7 @@ mod tests {
     #[test]
     fn filter_preserves_schema() {
         let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
+        let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
         let f = src.filter(Arc::new(Predicate::column(["id"]))).unwrap();
         assert_eq!(*f.schema().unwrap(), *id_ts_schema());
     }
@@ -803,12 +760,9 @@ mod tests {
     #[test]
     fn project_infers_output_schema() {
         let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
+        let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
         let projected = src
-            .project([
-                ("id_out", Arc::new(col("id")) as ExpressionRef),
-                ("ts_out", Arc::new(col("ts")) as ExpressionRef),
-            ])
+            .project([("id_out", col("id")), ("ts_out", col("ts"))])
             .unwrap();
         let schema = projected.schema().unwrap();
         let names: Vec<&str> = schema.fields().map(|f| f.name().as_str()).collect();
@@ -825,22 +779,22 @@ mod tests {
     #[test]
     fn project_with_schema_validates_length_and_uses_caller_schema() {
         let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
+        let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
 
         let target = Arc::new(
             StructType::try_new(vec![StructField::nullable("only", DataType::STRING)]).unwrap(),
         );
-        let exprs: Vec<ExpressionRef> = vec![Arc::new(col("id"))];
         let p = src
             .clone()
-            .project_with_schema(exprs, Arc::clone(&target))
+            .project_with_schema([col("id")], Arc::clone(&target))
             .unwrap();
         assert_eq!(*p.schema().unwrap(), *target);
 
-        let bad: Vec<ExpressionRef> = vec![Arc::new(col("id")), Arc::new(col("ts"))];
-        let err = src.project_with_schema(bad, target).unwrap_err();
+        let err = src
+            .project_with_schema([col("id"), col("ts")], target)
+            .unwrap_err();
         assert!(
-            err.to_string().contains("expected 1 expressions"),
+            err.to_string().contains("projection arity mismatch"),
             "got: {err}"
         );
     }
@@ -869,7 +823,7 @@ mod tests {
     #[test]
     fn insert_col_after_top_level_inserts_after_sibling() {
         let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
+        let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
         let out = src
             .insert_col_after(
                 "id",
@@ -889,11 +843,11 @@ mod tests {
     #[test]
     fn insert_col_after_nested_inserts_in_parent_struct() {
         let ctx = Context::new();
-        let src = ctx.values(nested_add_schema(), vec![]).unwrap();
+        let src = ctx.values(nested_add_schema(), no_rows()).unwrap();
         let stats_struct =
             StructType::try_new(vec![StructField::nullable("numRecords", DataType::LONG)]).unwrap();
         let parsed_field = StructField::nullable("stats_parsed", stats_struct.clone());
-        let parsed_expr = Expression::struct_from([Arc::new(Expression::literal(0i64))]);
+        let parsed_expr = Expression::struct_from([lit(0i64)]);
         let out = src
             .insert_col_after(["add", "stats"], parsed_field, parsed_expr)
             .unwrap();
@@ -930,25 +884,21 @@ mod tests {
         let ctx = Context::new();
         let err = match case {
             FieldOpRejectCase::InsertAfterMissingSibling => {
-                let src = ctx.values(nested_add_schema(), vec![]).unwrap();
+                let src = ctx.values(nested_add_schema(), no_rows()).unwrap();
                 src.insert_col_after(
                     ["add", "missing"],
                     StructField::nullable("x", DataType::LONG),
-                    Expression::literal(0i64),
+                    lit(0i64),
                 )
                 .unwrap_err()
             }
             FieldOpRejectCase::InsertAfterNameCollision => {
-                let src = ctx.values(id_ts_schema(), vec![]).unwrap();
-                src.insert_col_after(
-                    "id",
-                    StructField::nullable("ts", DataType::LONG),
-                    Expression::literal(0i64),
-                )
-                .unwrap_err()
+                let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
+                src.insert_col_after("id", StructField::nullable("ts", DataType::LONG), lit(0i64))
+                    .unwrap_err()
             }
             FieldOpRejectCase::ReplaceColMissingPath => {
-                let src = ctx.values(nested_add_schema(), vec![]).unwrap();
+                let src = ctx.values(nested_add_schema(), no_rows()).unwrap();
                 src.replace_col(
                     ["add", "missing"],
                     StructField::nullable("missing", DataType::STRING),
@@ -957,11 +907,11 @@ mod tests {
                 .unwrap_err()
             }
             FieldOpRejectCase::DropColMissingPath => {
-                let src = ctx.values(id_ts_schema(), vec![]).unwrap();
+                let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
                 src.drop_col("missing").unwrap_err()
             }
             FieldOpRejectCase::SelectMissingField => {
-                let src = ctx.values(id_ts_schema(), vec![]).unwrap();
+                let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
                 let target = Arc::new(
                     StructType::try_new(vec![StructField::nullable("missing", DataType::STRING)])
                         .unwrap(),
@@ -969,13 +919,9 @@ mod tests {
                 src.select(target).unwrap_err()
             }
             FieldOpRejectCase::MaxByVersionUnknownValueColumn => {
-                let src = ctx.values(id_ts_schema(), vec![]).unwrap();
-                src.max_by_version(
-                    vec![Arc::new(col("id"))],
-                    Arc::new(col("ts")),
-                    vec!["missing".to_string()],
-                )
-                .unwrap_err()
+                let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
+                src.max_by_version([col("id")], col("ts"), ["missing"])
+                    .unwrap_err()
             }
         };
         assert!(err.to_string().contains(needle), "got: {err}");
@@ -985,7 +931,7 @@ mod tests {
     #[test]
     fn replace_col_in_place_retypes_field() {
         let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
+        let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
         let out = src
             .replace_col(
                 "ts",
@@ -1004,11 +950,11 @@ mod tests {
     #[test]
     fn replace_col_nested_renames_and_retypes() {
         let ctx = Context::new();
-        let src = ctx.values(nested_add_schema(), vec![]).unwrap();
+        let src = ctx.values(nested_add_schema(), no_rows()).unwrap();
         let stats_struct =
             StructType::try_new(vec![StructField::nullable("numRecords", DataType::LONG)]).unwrap();
         let new_field = StructField::nullable("stats_parsed", stats_struct.clone());
-        let new_expr = Expression::struct_from([Arc::new(Expression::literal(0i64))]);
+        let new_expr = Expression::struct_from([lit(0i64)]);
         let out = src
             .replace_col(["add", "stats"], new_field, new_expr)
             .unwrap();
@@ -1028,7 +974,7 @@ mod tests {
     #[test]
     fn drop_col_top_level_removes_field() {
         let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
+        let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
         let out = src.drop_col("ts").unwrap();
         let schema = out.schema().unwrap();
         let names: Vec<&str> = schema.fields().map(|f| f.name().as_str()).collect();
@@ -1039,7 +985,7 @@ mod tests {
     #[test]
     fn left_anti_join_output_mirrors_left() {
         let ctx = Context::new();
-        let l = ctx.values(id_ts_schema(), vec![]).unwrap();
+        let l = ctx.values(id_ts_schema(), no_rows()).unwrap();
         let r_schema = Arc::new(
             StructType::try_new(vec![
                 StructField::nullable("rid", DataType::STRING),
@@ -1047,12 +993,9 @@ mod tests {
             ])
             .unwrap(),
         );
-        let r = ctx.values(r_schema, vec![]).unwrap();
+        let r = ctx.values(r_schema, no_rows()).unwrap();
 
-        let key: Vec<(ExpressionRef, ExpressionRef)> =
-            vec![(Arc::new(col("id")), Arc::new(col("rid")))];
-
-        let anti = l.left_anti_join(r, key).unwrap();
+        let anti = l.left_anti_join(r, [(col("id"), col("rid"))]).unwrap();
         assert_eq!(*anti.schema().unwrap(), *id_ts_schema());
     }
 
@@ -1060,15 +1003,15 @@ mod tests {
     #[test]
     fn union_all_requires_matching_schemas() {
         let ctx = Context::new();
-        let a = ctx.values(id_ts_schema(), vec![]).unwrap();
-        let b = ctx.values(id_ts_schema(), vec![]).unwrap();
+        let a = ctx.values(id_ts_schema(), no_rows()).unwrap();
+        let b = ctx.values(id_ts_schema(), no_rows()).unwrap();
         let unioned = a.clone().union_all(&[b]).unwrap();
         assert_eq!(*unioned.schema().unwrap(), *id_ts_schema());
 
         let other_schema = Arc::new(
             StructType::try_new(vec![StructField::nullable("x", DataType::STRING)]).unwrap(),
         );
-        let bad = ctx.values(other_schema, vec![]).unwrap();
+        let bad = ctx.values(other_schema, no_rows()).unwrap();
         let err = a.union_all(&[bad]).unwrap_err();
         assert!(err.to_string().contains("disagree"), "got: {err}");
     }
@@ -1078,11 +1021,9 @@ mod tests {
     fn cross_context_cursors_rejected() {
         let ctx_a = Context::new();
         let ctx_b = Context::new();
-        let a = ctx_a.values(id_ts_schema(), vec![]).unwrap();
-        let b = ctx_b.values(id_ts_schema(), vec![]).unwrap();
-        let key: Vec<(ExpressionRef, ExpressionRef)> =
-            vec![(Arc::new(col("id")), Arc::new(col("id")))];
-        let err = a.left_anti_join(b, key).unwrap_err();
+        let a = ctx_a.values(id_ts_schema(), no_rows()).unwrap();
+        let b = ctx_b.values(id_ts_schema(), no_rows()).unwrap();
+        let err = a.left_anti_join(b, [(col("id"), col("id"))]).unwrap_err();
         assert!(err.to_string().contains("different context"), "got: {err}");
     }
 
@@ -1090,8 +1031,8 @@ mod tests {
     #[test]
     fn into_result_plan_fails_with_outstanding_cursor() {
         let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
-        let _other = ctx.values(id_ts_schema(), vec![]).unwrap();
+        let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
+        let _other = ctx.values(id_ts_schema(), no_rows()).unwrap();
         let err = ctx.into_result_plan(src).unwrap_err();
         assert!(
             err.to_string().contains("outstanding PlanBuilder"),
@@ -1104,14 +1045,8 @@ mod tests {
     #[test]
     fn max_by_version_output_schema_is_value_columns_only() {
         let ctx = Context::new();
-        let src = ctx.values(id_ts_schema(), vec![]).unwrap();
-        let out = src
-            .max_by_version(
-                vec![Arc::new(col("id"))],
-                Arc::new(col("ts")),
-                vec!["ts".to_string()],
-            )
-            .unwrap();
+        let src = ctx.values(id_ts_schema(), no_rows()).unwrap();
+        let out = src.max_by_version([col("id")], col("ts"), ["ts"]).unwrap();
         let schema = out.schema().unwrap();
         let names: Vec<&str> = schema.fields().map(|f| f.name().as_str()).collect();
         assert_eq!(names, ["ts"]);
@@ -1152,9 +1087,9 @@ mod tests {
     fn reduce_yields_step_reduce_and_recovers_typed_output() {
         let mut sm = CoroutineSM::<i64>::new("test", |mut engine, _sm_id| async move {
             let ctx = Context::new();
-            let _dead = ctx.values(id_ts_schema(), vec![]).unwrap();
+            let _dead = ctx.values(id_ts_schema(), no_rows()).unwrap();
             let builder = ctx
-                .values(id_ts_schema(), vec![])
+                .values(id_ts_schema(), no_rows())
                 .unwrap()
                 .filter(Arc::new(col("id").is_not_null()))
                 .unwrap();
@@ -1201,13 +1136,13 @@ mod tests {
     fn reduce_resets_ref_counter() {
         let mut sm = CoroutineSM::<u32>::new("test", |mut engine, _sm_id| async move {
             let ctx = Context::new();
-            let v0 = ctx.values(id_ts_schema(), vec![]).unwrap();
+            let v0 = ctx.values(id_ts_schema(), no_rows()).unwrap();
             let v1 = v0.filter(Arc::new(col("id").is_not_null())).unwrap();
             assert_eq!(v1.ref_id(), Ref(1));
             let _: i64 = ctx
                 .reduce(&mut engine, v1, EchoReducer { value: 0 }, "drain")
                 .await?;
-            let post = ctx.values(id_ts_schema(), vec![]).unwrap();
+            let post = ctx.values(id_ts_schema(), no_rows()).unwrap();
             Ok(post.ref_id().0)
         })
         .unwrap();
@@ -1232,7 +1167,7 @@ mod tests {
     fn reduce_resume_with_wrong_payload_variant_errors() {
         let mut sm = CoroutineSM::<i64>::new("test", |mut engine, _sm_id| async move {
             let ctx = Context::new();
-            let builder = ctx.values(id_ts_schema(), vec![]).unwrap();
+            let builder = ctx.values(id_ts_schema(), no_rows()).unwrap();
             ctx.reduce(&mut engine, builder, EchoReducer { value: 1 }, "drain")
                 .await
         })
@@ -1301,7 +1236,7 @@ mod tests {
         let target_schema = id_ts_schema();
         let mut sm = CoroutineSM::<()>::new("test", move |mut engine, _sm_id| async move {
             let ctx = Context::new();
-            let pre = ctx.values(id_ts_schema(), vec![]).unwrap();
+            let pre = ctx.values(id_ts_schema(), no_rows()).unwrap();
             let _ = ctx
                 .schema_query(&mut engine, "/x.parquet", "footer")
                 .await?;
@@ -1327,7 +1262,7 @@ mod tests {
     #[test]
     fn left_anti_join_records_left_right_inputs() {
         let ctx = Context::new();
-        let left = ctx.values(id_ts_schema(), vec![]).unwrap();
+        let left = ctx.values(id_ts_schema(), no_rows()).unwrap();
         let right_schema = Arc::new(
             StructType::try_new(vec![
                 StructField::nullable("rid", DataType::STRING),
@@ -1335,7 +1270,7 @@ mod tests {
             ])
             .unwrap(),
         );
-        let right = ctx.values(right_schema, vec![]).unwrap();
+        let right = ctx.values(right_schema, no_rows()).unwrap();
         let left_ref = left.ref_id();
         let right_ref = right.ref_id();
         let key: Vec<(ExpressionRef, ExpressionRef)> =

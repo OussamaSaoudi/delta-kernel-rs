@@ -248,18 +248,16 @@ mod tests {
     #[test]
     fn two_phase_sm_executes_in_sequence() {
         let mut sm = CoroutineSM::<i64>::new("test", |mut engine, _sm_id| async move {
-            let _ = engine
-                .yield_(StepYield {
-                    operation: toy_step(),
-                    step_name: "phase_a",
-                })
-                .await;
-            let _ = engine
-                .yield_(StepYield {
-                    operation: toy_step(),
-                    step_name: "phase_b",
-                })
-                .await;
+            let phase_a = StepYield {
+                operation: toy_step(),
+                step_name: "phase_a",
+            };
+            let phase_b = StepYield {
+                operation: toy_step(),
+                step_name: "phase_b",
+            };
+            let _ = engine.yield_(phase_a).await;
+            let _ = engine.yield_(phase_b).await;
             Ok(42)
         })
         .unwrap();
@@ -290,12 +288,11 @@ mod tests {
     #[test]
     fn engine_error_flows_to_body_as_resume_err() {
         let mut sm = CoroutineSM::<String>::new("test", |mut engine, _sm_id| async move {
-            let resume = engine
-                .yield_(StepYield {
-                    operation: toy_step(),
-                    step_name: "p",
-                })
-                .await;
+            let step = StepYield {
+                operation: toy_step(),
+                step_name: "p",
+            };
+            let resume = engine.yield_(step).await;
             match resume.0 {
                 Err(e) => Ok(format!("got: {}", e.kind)),
                 Ok(_) => panic!("expected engine error"),

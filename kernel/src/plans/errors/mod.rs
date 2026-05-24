@@ -144,6 +144,23 @@ impl DeltaError {
     }
 }
 
+/// Auto-convert a [`BoxedSource`] (the boxed `dyn Error` shape used by Delta-agnostic helpers
+/// like `schema_expr` and `plan_context`) into a [`DeltaError`] tagged with the catch-all
+/// [`DeltaErrorCode::DeltaCommandInvariantViolation`]. Lets `?` propagate these errors into
+/// `Result<_, DeltaError>` functions without an explicit `.or_delta(...)` wrap.
+///
+/// Use [`DeltaResultExt::or_delta`] when a more specific code is appropriate -- this impl is
+/// intentionally the catch-all path.
+impl From<BoxedSource> for DeltaError {
+    fn from(source: BoxedSource) -> Self {
+        Self::__new(
+            DeltaErrorCode::DeltaCommandInvariantViolation,
+            source.to_string(),
+            Some(source),
+        )
+    }
+}
+
 // ============================================================================
 // Bridges — kernel::Error <-> DeltaError
 // ============================================================================
@@ -185,19 +202,28 @@ impl DeltaErrAsKernel for DeltaError {
 // or_delta at ? sites
 // ============================================================================
 
-/// Attach a [`DeltaErrorCode`] to any `Result<T, E>` where `E: std::error::Error`. The original
-/// error is preserved in [`DeltaError::source`], walkable via `std::error::Error::source()`.
-/// Use `delta_error!` directly when you also need a custom message.
+/// Attach a [`DeltaErrorCode`] to any `Result<T, E>` where the error can be lifted into a
+/// [`BoxedSource`]. The original error is preserved in [`DeltaError::source`], walkable via
+/// `std::error::Error::source()`. Use `delta_error!` directly when you also need a custom
+/// message.
+///
+/// The bound `E: Into<BoxedSource>` covers two cases without an extra `Box` layer:
+/// - any concrete `E: Error + Send + Sync + 'static` (stdlib's blanket `From` impl), and
+/// - errors that are already a [`BoxedSource`] (low-level modules that return a `Box<dyn Error +
+///   Send + Sync + 'static>` directly to stay Delta-agnostic).
 pub trait DeltaResultExt<T> {
     fn or_delta(self, code: DeltaErrorCode) -> Result<T, DeltaError>;
 }
 
 impl<T, E> DeltaResultExt<T> for Result<T, E>
 where
-    E: std::error::Error + Send + Sync + 'static,
+    E: Into<BoxedSource>,
 {
     fn or_delta(self, code: DeltaErrorCode) -> Result<T, DeltaError> {
-        self.map_err(|e| DeltaError::__new(code, e.to_string(), Some(Box::new(e) as BoxedSource)))
+        self.map_err(|e| {
+            let src: BoxedSource = e.into();
+            DeltaError::__new(code, src.to_string(), Some(src))
+        })
     }
 }
 

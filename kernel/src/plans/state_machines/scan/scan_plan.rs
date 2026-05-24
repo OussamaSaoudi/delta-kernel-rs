@@ -86,17 +86,19 @@ fn do_data_stage(scan: &Scan, live_actions: PlanBuilder) -> Result<PlanBuilder, 
 
     // Per-file parquet read; broadcasts the file-constant struct and `path` to every
     // emitted record-row. Output schema = physical_schema ++ {path, fileConstantValues}.
-    let raw_data = live_actions.load(LoadNode {
+    let passthrough_columns = vec![
+        ColumnName::new([FILE_CONSTANT_VALUES_NAME]),
+        ColumnName::new(["path"]),
+    ];
+    let load = LoadNode {
         file_schema: scan.physical_schema().clone(),
         file_type: FileType::Parquet,
         base_url: Some(scan.snapshot().table_root().clone()),
-        passthrough_columns: vec![
-            ColumnName::new([FILE_CONSTANT_VALUES_NAME]),
-            ColumnName::new(["path"]),
-        ],
+        passthrough_columns,
         file_meta: default_scan_file_columns(),
         dv_ref: Some(DvRef::skip(ColumnName::new(["deletionVector"]))),
-    })?;
+    };
+    let raw_data = live_actions.load(load)?;
 
     // Surviving projection: physical -> logical (column-mapping rename + metadata-column
     // synthesis). The kernel evaluator validates the expressions against the declared
@@ -159,15 +161,14 @@ fn project_scan_file_row(
         file_constant_exprs.push(col([ADD_NAME, "partitionValues_parsed"]).into());
     }
 
-    let schema = Arc::new(StructType::new_unchecked([
+    let file_constants = StructType::new_unchecked(file_constant_fields);
+    let fields = [
         StructField::not_null("path", DataType::STRING),
         StructField::not_null("size", DataType::LONG),
         StructField::nullable("deletionVector", DeletionVectorDescriptor::to_schema()),
-        StructField::nullable(
-            FILE_CONSTANT_VALUES_NAME,
-            StructType::new_unchecked(file_constant_fields),
-        ),
-    ]));
+        StructField::nullable(FILE_CONSTANT_VALUES_NAME, file_constants),
+    ];
+    let schema = Arc::new(StructType::new_unchecked(fields));
     let exprs: Vec<Arc<Expression>> = vec![
         col([ADD_NAME, "path"]).into(),
         col([ADD_NAME, "size"]).into(),

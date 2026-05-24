@@ -18,7 +18,8 @@ Prototype landed locally; nothing merged. Already in the tree:
   `ListFilesNode`, `ValuesNode`, `ReduceSink`, `ScanFileColumns`,
   `DvRef`).
 - `kernel/src/plans/schema_expr/` — builder-time schema/expression utilities:
-  - `check.rs` — bidirectional type checker (`check_expression`, `check_column_refs`).
+  - `check.rs` — bidirectional type checker (`check_expression` plus the operator-aligned
+    helpers `infer_projection_schema`, `check_projection`, `check_select`, `validate_exprs`).
   - `field_op.rs` — `FieldOp` + `compile_field_op` (point-edits over nested structs)
     plus `load_output_schema` shared with engine-side lowering, and small helpers
     (`arc_struct_or_invariant`, `identity_named_expr`).

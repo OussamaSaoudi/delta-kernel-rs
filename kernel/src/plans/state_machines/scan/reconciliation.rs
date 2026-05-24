@@ -38,7 +38,7 @@ use crate::actions::{
     SIDECAR_NAME,
 };
 use crate::expressions::{
-    col, column_expr, ColumnName, Expression, ExpressionRef, Predicate, PredicateRef, Scalar,
+    col, column_expr, lit, ColumnName, Expression, ExpressionRef, Predicate, PredicateRef, Scalar,
 };
 use crate::path::ParsedLogPath;
 use crate::plans::errors::{DeltaError, DeltaErrorCode, KernelErrAsDelta};
@@ -127,7 +127,7 @@ fn is_file_row() -> Predicate {
 /// both dedup keys.
 fn file_arm() -> Expression {
     Expression::array(vec![
-        Expression::literal("file"),
+        lit("file"),
         file_field(&["path"]),
         file_field(&["deletionVector", "storageType"]),
         file_field(&["deletionVector", "pathOrInlineDv"]),
@@ -148,7 +148,7 @@ pub(super) fn fsr_dedup_key() -> Expression {
     let null_str = || Expression::null_literal(DataType::STRING);
     let singleton = |kind: &str| {
         Expression::array(vec![
-            Expression::literal(kind),
+            lit(kind),
             null_str(), // primary_id (none for singleton actions)
             null_str(), // dv_storage (file-row only)
             null_str(), // dv_inline_dv (file-row only)
@@ -156,28 +156,26 @@ pub(super) fn fsr_dedup_key() -> Expression {
     };
     let single_id = |kind: &str, id: Expression| {
         Expression::array(vec![
-            Expression::literal(kind),
+            lit(kind),
             id,
             null_str(), // dv_storage (file-row only)
             null_str(), // dv_inline_dv (file-row only)
         ])
     };
-    Expression::case_when(
-        vec![
-            (is_file_row(), file_arm()),
-            (col(["protocol"]).is_not_null(), singleton(PROTOCOL_NAME)),
-            (col(METADATA_ID).is_not_null(), singleton("metadata")),
-            (
-                col(["domainMetadata"]).is_not_null(),
-                single_id(DOMAIN_METADATA_NAME, col(["domainMetadata", "domain"])),
-            ),
-            (
-                col(["txn"]).is_not_null(),
-                single_id(SET_TRANSACTION_NAME, col(["txn", "appId"])),
-            ),
-        ],
-        null_string_array(),
-    )
+    let arms = vec![
+        (is_file_row(), file_arm()),
+        (col(["protocol"]).is_not_null(), singleton(PROTOCOL_NAME)),
+        (col(METADATA_ID).is_not_null(), singleton("metadata")),
+        (
+            col(["domainMetadata"]).is_not_null(),
+            single_id(DOMAIN_METADATA_NAME, col(["domainMetadata", "domain"])),
+        ),
+        (
+            col(["txn"]).is_not_null(),
+            single_id(SET_TRANSACTION_NAME, col(["txn", "appId"])),
+        ),
+    ];
+    Expression::case_when(arms, null_string_array())
 }
 
 /// Scan-pipeline dedup key: file-path identity over `{add, remove}` only.
@@ -211,14 +209,14 @@ fn retention_filter(min_file_ts: i64, txn_expiry: Option<i64>) -> Predicate {
         col(["remove"]).is_null(),
         col(REMOVE_DELETION_TIMESTAMP)
             .or_lit(0i64)
-            .gt(Expression::literal(min_file_ts)),
+            .gt(lit(min_file_ts)),
     );
     let txn_ok = match txn_expiry {
         None => Predicate::literal(true),
         Some(cutoff) => Predicate::or_from([
             col(["txn"]).is_null(),
             col(TXN_LAST_UPDATED).is_null(),
-            col(TXN_LAST_UPDATED).gt(Expression::literal(cutoff)),
+            col(TXN_LAST_UPDATED).gt(lit(cutoff)),
         ]),
     };
     Predicate::and(remove_ok, txn_ok)
@@ -250,16 +248,17 @@ pub(super) fn build_reconciliation(
     // VALUES(commits) -> Load(JSON) broadcasts the per-commit `version` column onto every
     // emitted action row.
     let commit_rows = log_files_to_rows(&log_root, seg.find_commit_cover())?;
+    let commit_load = LoadNode {
+        file_schema: Arc::clone(base),
+        file_type: FileType::Json,
+        base_url: Some(log_root.clone()),
+        passthrough_columns: vec![ColumnName::new(["version"])],
+        file_meta: default_scan_file_columns(),
+        dv_ref: None,
+    };
     let commit_raw = ctx
         .values(commit_load_schema(), commit_rows)?
-        .load(LoadNode {
-            file_schema: Arc::clone(base),
-            file_type: FileType::Json,
-            base_url: Some(log_root.clone()),
-            passthrough_columns: vec![ColumnName::new(["version"])],
-            file_meta: default_scan_file_columns(),
-            dv_ref: None,
-        })?;
+        .load(commit_load)?;
 
     // === Stage 2: commit_dedup ==========================================================
     // Commits never carry native parsed stats; always parse JSON. partitionValues_parsed is
@@ -410,8 +409,8 @@ fn load_checkpoint_files(
             .with_partitions_parsed(parts)?
         }
         _ => match file_format {
-            FileFormat::Parquet => ctx.scan_parquet(files, Arc::clone(base))?,
-            FileFormat::Json => ctx.scan_json(files, Arc::clone(base))?,
+            FileFormat::Parquet => ctx.scan_parquet(files, base.clone())?,
+            FileFormat::Json => ctx.scan_json(files, base.clone())?,
         }
         .with_json_stats_parsed(stats)?
         .with_partitions_parsed(parts)?,
@@ -442,7 +441,7 @@ impl ReconciliationPlanBuilder for PlanBuilder {
         let Some(stats_schema) = stats else {
             return Ok(self);
         };
-        let new_field = StructField::nullable("stats_parsed", stats_schema.as_ref().clone());
+        let new_field = StructField::nullable("stats_parsed", stats_schema);
         let new_expr = Expression::parse_json(col([ADD_NAME, "stats"]), Arc::clone(stats_schema));
         self.replace_col([ADD_NAME, "stats"], new_field, new_expr)
     }
@@ -451,8 +450,7 @@ impl ReconciliationPlanBuilder for PlanBuilder {
         let Some(parts_schema) = parts else {
             return Ok(self);
         };
-        let new_field =
-            StructField::nullable("partitionValues_parsed", parts_schema.as_ref().clone());
+        let new_field = StructField::nullable("partitionValues_parsed", parts_schema);
         let new_expr = Expression::map_to_struct(col([ADD_NAME, "partitionValues"]));
         self.replace_col([ADD_NAME, "partitionValues"], new_field, new_expr)
     }
@@ -723,13 +721,11 @@ mod tests {
     fn retention_filter_keeps_and_drops_tombstones() {
         let p = retention_filter(100, None);
         let engine = SyncEngine::new();
-        let schema = Arc::new(
-            StructType::try_new([
-                StructField::nullable(REMOVE_NAME, Remove::to_schema()),
-                StructField::nullable("txn", SetTransaction::to_schema()),
-            ])
-            .unwrap(),
-        );
+        let fields = [
+            StructField::nullable(REMOVE_NAME, Remove::to_schema()),
+            StructField::nullable("txn", SetTransaction::to_schema()),
+        ];
+        let schema = Arc::new(StructType::try_new(fields).unwrap());
         let rows = StringArray::from(vec![
             r#"{"remove":{"path":"old","deletionTimestamp":101,"dataChange":true,"partitionValues":{}}}"#
                 .to_string(),

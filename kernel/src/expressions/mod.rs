@@ -47,6 +47,20 @@ pub fn col<N: IntoColumnName>(name: N) -> Expression {
     Expression::Column(name.into_column_name())
 }
 
+/// Build an [`Expression::Literal`] from anything that converts into a [`Scalar`].
+///
+/// Concise alternative to [`Expression::literal`] mirroring [`col`]'s shape; intended
+/// for builder/test sites where readability matters. Accepts the same value types
+/// [`Scalar`] does (`i32`, `i64`, `&str`, `bool`, ...).
+///
+/// ```ignore
+/// use delta_kernel::expressions::lit;
+/// let zero = lit(0i64);
+/// ```
+pub fn lit(value: impl Into<Scalar>) -> Expression {
+    Expression::literal(value)
+}
+
 ////////////////////////////////////////////////////////////////////////
 // Operators
 ////////////////////////////////////////////////////////////////////////

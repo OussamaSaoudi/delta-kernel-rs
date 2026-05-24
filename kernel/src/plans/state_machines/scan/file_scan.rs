@@ -255,12 +255,8 @@ mod tests {
         #[case] data_type: DataType,
         #[case] expect_transform: bool,
     ) {
-        let schema = Arc::new(
-            StructType::try_new(vec![annotated_field(
-                "field", "col-phys", 1, data_type, true,
-            )])
-            .unwrap(),
-        );
+        let fields = vec![annotated_field("field", "col-phys", 1, data_type, true)];
+        let schema = Arc::new(StructType::try_new(fields).unwrap());
         let state_info =
             get_state_info(schema, vec![], None, &[], cm_name_metadata(), vec![]).unwrap();
         let exprs = scan_data_projection(&state_info).unwrap();
@@ -275,13 +271,11 @@ mod tests {
 
     #[test]
     fn scan_data_projection_partition_column() {
-        let schema = Arc::new(
-            StructType::try_new(vec![
-                StructField::nullable("id", DataType::STRING),
-                StructField::nullable("date", DataType::DATE),
-            ])
-            .unwrap(),
-        );
+        let fields = vec![
+            StructField::nullable("id", DataType::STRING),
+            StructField::nullable("date", DataType::DATE),
+        ];
+        let schema = Arc::new(StructType::try_new(fields).unwrap());
         let state_info = get_simple_state_info(schema, vec!["date".to_string()]).unwrap();
         let exprs = scan_data_projection(&state_info).unwrap();
         assert_eq!(exprs.len(), 2);
@@ -294,18 +288,11 @@ mod tests {
 
     #[test]
     fn scan_data_projection_file_path_errors() {
-        let schema = Arc::new(
-            StructType::try_new(vec![StructField::nullable("id", DataType::STRING)]).unwrap(),
-        );
-        let state_info = get_state_info(
-            schema,
-            vec![],
-            None,
-            &[],
-            HashMap::new(),
-            vec![("my_path", MetadataColumnSpec::FilePath)],
-        )
-        .unwrap();
+        let fields = vec![StructField::nullable("id", DataType::STRING)];
+        let schema = Arc::new(StructType::try_new(fields).unwrap());
+        let metadata_cols = vec![("my_path", MetadataColumnSpec::FilePath)];
+        let state_info =
+            get_state_info(schema, vec![], None, &[], HashMap::new(), metadata_cols).unwrap();
         let err = scan_data_projection(&state_info)
             .expect_err("FilePath metadata column should not be projected");
         assert_eq!(err.code, DeltaErrorCode::DeltaCommandInvariantViolation);
@@ -319,18 +306,11 @@ mod tests {
     /// Regression: row index must use the user-supplied field name, not `_metadata.row_index`.
     #[test]
     fn scan_data_projection_user_named_row_index() {
-        let schema = Arc::new(
-            StructType::try_new(vec![StructField::nullable("id", DataType::STRING)]).unwrap(),
-        );
-        let state_info = get_state_info(
-            schema,
-            vec![],
-            None,
-            &[],
-            HashMap::new(),
-            vec![("my_row_idx", MetadataColumnSpec::RowIndex)],
-        )
-        .unwrap();
+        let fields = vec![StructField::nullable("id", DataType::STRING)];
+        let schema = Arc::new(StructType::try_new(fields).unwrap());
+        let metadata_cols = vec![("my_row_idx", MetadataColumnSpec::RowIndex)];
+        let state_info =
+            get_state_info(schema, vec![], None, &[], HashMap::new(), metadata_cols).unwrap();
         let exprs = scan_data_projection(&state_info).unwrap();
         assert_eq!(exprs.len(), 2);
         assert_eq!(exprs[0].as_ref(), &col(["id"]));
@@ -341,16 +321,17 @@ mod tests {
     /// classifier-synthesized row-index column name from the spec.
     #[test]
     fn scan_data_projection_row_id_synthesized_index() {
-        let schema = Arc::new(
-            StructType::try_new(vec![StructField::nullable("id", DataType::STRING)]).unwrap(),
-        );
+        let fields = vec![StructField::nullable("id", DataType::STRING)];
+        let schema = Arc::new(StructType::try_new(fields).unwrap());
+        let metadata_cols = vec![("row_id", MetadataColumnSpec::RowId)];
+        let metadata = row_tracking_metadata("some_row_id_col");
         let state_info = get_state_info(
             schema,
             vec![],
             None,
             ROW_TRACKING_FEATURES,
-            row_tracking_metadata("some_row_id_col"),
-            vec![("row_id", MetadataColumnSpec::RowId)],
+            metadata,
+            metadata_cols,
         )
         .unwrap();
         let exprs = scan_data_projection(&state_info).unwrap();
@@ -371,19 +352,20 @@ mod tests {
     /// `GenerateRowId` spec carries the same `row_index_field_name`.
     #[test]
     fn scan_data_projection_row_id_with_explicit_index() {
-        let schema = Arc::new(
-            StructType::try_new(vec![StructField::nullable("id", DataType::STRING)]).unwrap(),
-        );
+        let fields = vec![StructField::nullable("id", DataType::STRING)];
+        let schema = Arc::new(StructType::try_new(fields).unwrap());
+        let metadata_cols = vec![
+            ("row_id", MetadataColumnSpec::RowId),
+            ("row_index", MetadataColumnSpec::RowIndex),
+        ];
+        let metadata = row_tracking_metadata("some_row_id_col");
         let state_info = get_state_info(
             schema,
             vec![],
             None,
             ROW_TRACKING_FEATURES,
-            row_tracking_metadata("some_row_id_col"),
-            vec![
-                ("row_id", MetadataColumnSpec::RowId),
-                ("row_index", MetadataColumnSpec::RowIndex),
-            ],
+            metadata,
+            metadata_cols,
         )
         .unwrap();
         let exprs = scan_data_projection(&state_info).unwrap();

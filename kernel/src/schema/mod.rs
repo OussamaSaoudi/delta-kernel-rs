@@ -1856,6 +1856,12 @@ impl From<StructType> for DataType {
     }
 }
 
+impl From<&StructType> for DataType {
+    fn from(struct_type: &StructType) -> Self {
+        struct_type.clone().into()
+    }
+}
+
 impl From<ArrayType> for DataType {
     fn from(array_type: ArrayType) -> Self {
         DataType::Array(Box::new(array_type))
@@ -1865,6 +1871,16 @@ impl From<ArrayType> for DataType {
 impl From<SchemaRef> for DataType {
     fn from(schema: SchemaRef) -> Self {
         Arc::unwrap_or_clone(schema).into()
+    }
+}
+
+/// Borrowed counterpart to [`From<SchemaRef>`]: clones the inner [`StructType`] (i.e. it
+/// does the same deep clone as `(&*schema).clone().into()`). Lets call sites pass an
+/// `&SchemaRef` directly into any `impl Into<DataType>` parameter without first
+/// `Arc::clone`-ing or `.as_ref().clone()`-ing.
+impl From<&SchemaRef> for DataType {
+    fn from(schema: &SchemaRef) -> Self {
+        (**schema).clone().into()
     }
 }
 

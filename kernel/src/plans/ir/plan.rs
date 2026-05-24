@@ -214,21 +214,22 @@ mod tests {
         let dead = Ref(1);
         let kept = Ref(2);
         let dead2 = Ref(3);
-        let plan = Plan {
-            stmts: vec![
-                values_node(src.0),
-                filter_node(Arc::new(col("x").is_null()), src, dead.0),
-                filter_node(Arc::new(col("x").is_not_null()), src, kept.0),
-                PlanNode {
-                    kind: NodeKind::Project(ProjectNode {
-                        named_exprs: vec![("y".to_string(), Arc::new(Expression::column(["x"])))],
-                        output_schema: schema(),
-                    }),
-                    inputs: vec![dead],
-                    output: Ref(dead2.0),
-                },
-            ],
+        let project = ProjectNode {
+            named_exprs: vec![("y".to_string(), Arc::new(Expression::column(["x"])))],
+            output_schema: schema(),
         };
+        let dead_project = PlanNode {
+            kind: NodeKind::Project(project),
+            inputs: vec![dead],
+            output: Ref(dead2.0),
+        };
+        let stmts = vec![
+            values_node(src.0),
+            filter_node(Arc::new(col("x").is_null()), src, dead.0),
+            filter_node(Arc::new(col("x").is_not_null()), src, kept.0),
+            dead_project,
+        ];
+        let plan = Plan { stmts };
 
         let pruned = plan.reachable_from(kept);
         let outputs: Vec<Ref> = pruned.stmts.iter().map(|n| n.output).collect();

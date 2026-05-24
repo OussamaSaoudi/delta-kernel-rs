@@ -102,7 +102,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::arrow::array::{Int32Array, Int64Array, RecordBatch};
+    use crate::arrow::array::{ArrayRef, Int32Array, Int64Array, RecordBatch};
     use crate::arrow::datatypes::{
         DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
     };
@@ -124,17 +124,14 @@ mod tests {
             ArrowField::new("sizeInBytes", ArrowDataType::Int64, true),
             ArrowField::new("numOfAddFiles", ArrowDataType::Int64, true),
         ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(Int64Array::from(vec![42])),
-                Arc::new(Int64Array::from(vec![Some(100)])),
-                Arc::new(Int32Array::from(vec![None])),
-                Arc::new(Int64Array::from(vec![Some(2048)])),
-                Arc::new(Int64Array::from(vec![Some(7)])),
-            ],
-        )
-        .unwrap();
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![42])),
+            Arc::new(Int64Array::from(vec![Some(100)])),
+            Arc::new(Int32Array::from(vec![None])),
+            Arc::new(Int64Array::from(vec![Some(2048)])),
+            Arc::new(Int64Array::from(vec![Some(7)])),
+        ];
+        let batch = RecordBatch::try_new(schema, columns).unwrap();
         let engine_data = ArrowEngineData::new(batch);
 
         let mut reader = CheckpointHintReader::default();

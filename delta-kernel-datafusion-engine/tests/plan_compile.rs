@@ -12,9 +12,7 @@ use common::SumRowsReducer;
 use delta_kernel::arrow::array::{AsArray, RecordBatch};
 use delta_kernel::arrow::compute::concat_batches;
 use delta_kernel::arrow::datatypes::Int64Type;
-use delta_kernel::expressions::{
-    ColumnName, Expression, ExpressionRef, Predicate, PredicateRef, Scalar,
-};
+use delta_kernel::expressions::{col, lit, ColumnName, Predicate};
 use delta_kernel::plans::ir::nodes::{FileType, LoadNode, ReduceSink, ScanFileColumns};
 use delta_kernel::plans::ir::plan::ResultPlan;
 use delta_kernel::plans::state_machines::framework::plan_context::Context;
@@ -65,13 +63,10 @@ fn long_col(batch: &RecordBatch, name: &str) -> Vec<i64> {
 /// `Values` rows lower to a `LogicalPlan::Values` whose batches preserve row order.
 #[test]
 fn values_round_trip_preserves_rows() {
-    let rows = vec![
-        vec![Scalar::Long(1), Scalar::Long(10)],
-        vec![Scalar::Long(2), Scalar::Long(20)],
-        vec![Scalar::Long(3), Scalar::Long(30)],
-    ];
     let ctx = Context::new();
-    let builder = ctx.values(long_schema(&["a", "b"]), rows).unwrap();
+    let builder = ctx
+        .values(long_schema(&["a", "b"]), [[1i64, 10], [2, 20], [3, 30]])
+        .unwrap();
     let rp = ctx.into_result_plan(builder).unwrap();
 
     let batch = run_to_one_batch(rp);
@@ -84,21 +79,9 @@ fn values_round_trip_preserves_rows() {
 fn filter_drops_rows_where_predicate_is_false() {
     let ctx = Context::new();
     let src = ctx
-        .values(
-            long_schema(&["x"]),
-            vec![
-                vec![Scalar::Long(1)],
-                vec![Scalar::Long(2)],
-                vec![Scalar::Long(3)],
-                vec![Scalar::Long(4)],
-            ],
-        )
+        .values(long_schema(&["x"]), [[1i64], [2], [3], [4]])
         .unwrap();
-    let predicate: PredicateRef = Arc::new(Predicate::gt(
-        Expression::column(["x"]),
-        Expression::literal(2i64),
-    ));
-    let builder = src.filter(predicate).unwrap();
+    let builder = src.filter(Predicate::gt(col("x"), lit(2i64))).unwrap();
     let rp = ctx.into_result_plan(builder).unwrap();
 
     let batch = run_to_one_batch(rp);
@@ -111,18 +94,9 @@ fn filter_drops_rows_where_predicate_is_false() {
 #[test]
 fn project_renames_columns() {
     let ctx = Context::new();
-    let src = ctx
-        .values(
-            long_schema(&["a", "b"]),
-            vec![vec![Scalar::Long(11), Scalar::Long(22)]],
-        )
-        .unwrap();
-    let exprs: Vec<ExpressionRef> = vec![
-        Arc::new(Expression::column(["b"])),
-        Arc::new(Expression::column(["a"])),
-    ];
+    let src = ctx.values(long_schema(&["a", "b"]), [[11i64, 22]]).unwrap();
     let builder = src
-        .project_with_schema(exprs, long_schema(&["y", "x"]))
+        .project_with_schema([col("b"), col("a")], long_schema(&["y", "x"]))
         .unwrap();
     let rp = ctx.into_result_plan(builder).unwrap();
 
@@ -136,18 +110,8 @@ fn project_renames_columns() {
 #[test]
 fn ordered_union_preserves_input_order() {
     let ctx = Context::new();
-    let left = ctx
-        .values(
-            long_schema(&["v"]),
-            vec![vec![Scalar::Long(1)], vec![Scalar::Long(2)]],
-        )
-        .unwrap();
-    let right = ctx
-        .values(
-            long_schema(&["v"]),
-            vec![vec![Scalar::Long(3)], vec![Scalar::Long(4)]],
-        )
-        .unwrap();
+    let left = ctx.values(long_schema(&["v"]), [[1i64], [2]]).unwrap();
+    let right = ctx.values(long_schema(&["v"]), [[3i64], [4]]).unwrap();
     let builder = left.union_ordered(&[right]).unwrap();
     let rp = ctx.into_result_plan(builder).unwrap();
 
@@ -159,24 +123,9 @@ fn ordered_union_preserves_input_order() {
 #[test]
 fn left_anti_join_drops_matched_left_rows() {
     let ctx = Context::new();
-    let left = ctx
-        .values(
-            long_schema(&["k"]),
-            vec![
-                vec![Scalar::Long(1)],
-                vec![Scalar::Long(2)],
-                vec![Scalar::Long(3)],
-            ],
-        )
-        .unwrap();
-    let right = ctx
-        .values(long_schema(&["k"]), vec![vec![Scalar::Long(2)]])
-        .unwrap();
-    let keys: Vec<(ExpressionRef, ExpressionRef)> = vec![(
-        Arc::new(Expression::column(["k"])),
-        Arc::new(Expression::column(["k"])),
-    )];
-    let builder = left.left_anti_join(right, keys).unwrap();
+    let left = ctx.values(long_schema(&["k"]), [[1i64], [2], [3]]).unwrap();
+    let right = ctx.values(long_schema(&["k"]), [[2i64]]).unwrap();
+    let builder = left.left_anti_join(right, [(col("k"), col("k"))]).unwrap();
     let rp = ctx.into_result_plan(builder).unwrap();
 
     let batch = run_to_one_batch(rp);
@@ -191,21 +140,9 @@ fn left_anti_join_drops_matched_left_rows() {
 async fn step_reduce_drains_plan_into_reducer_handle() {
     let ctx = Context::new();
     let src = ctx
-        .values(
-            long_schema(&["v"]),
-            vec![
-                vec![Scalar::Long(1)],
-                vec![Scalar::Long(2)],
-                vec![Scalar::Long(3)],
-                vec![Scalar::Long(4)],
-            ],
-        )
+        .values(long_schema(&["v"]), [[1i64], [2], [3], [4]])
         .unwrap();
-    let predicate: PredicateRef = Arc::new(Predicate::gt(
-        Expression::column(["v"]),
-        Expression::literal(2i64),
-    ));
-    let builder = src.filter(predicate).unwrap();
+    let builder = src.filter(Predicate::gt(col("v"), lit(2i64))).unwrap();
     let rp = ctx.into_result_plan(builder).unwrap();
     let terminal = rp.result;
     let stmts = rp.plan.stmts;
@@ -270,12 +207,9 @@ async fn load_node_reads_files_and_broadcasts_passthrough() {
     let upstream = ctx
         .values(
             upstream_schema,
-            vec![
-                vec![
-                    Scalar::String(rel_path.clone()),
-                    Scalar::String("alpha".into()),
-                ],
-                vec![Scalar::String(rel_path), Scalar::String("beta".into())],
+            [
+                [rel_path.clone(), "alpha".into()],
+                [rel_path, "beta".into()],
             ],
         )
         .unwrap();
@@ -317,19 +251,17 @@ fn max_by_version_keeps_top_row_per_group_and_narrows_to_value_columns() {
     let src = ctx
         .values(
             long_schema(&["k", "version", "payload"]),
-            vec![
-                vec![Scalar::Long(1), Scalar::Long(1), Scalar::Long(100)],
-                vec![Scalar::Long(1), Scalar::Long(3), Scalar::Long(300)],
-                vec![Scalar::Long(1), Scalar::Long(2), Scalar::Long(200)],
-                vec![Scalar::Long(2), Scalar::Long(5), Scalar::Long(500)],
-                vec![Scalar::Long(2), Scalar::Long(7), Scalar::Long(700)],
+            [
+                [1i64, 1, 100],
+                [1, 3, 300],
+                [1, 2, 200],
+                [2, 5, 500],
+                [2, 7, 700],
             ],
         )
         .unwrap();
-    let group_by: Vec<ExpressionRef> = vec![Arc::new(Expression::column(["k"]))];
-    let version_column: ExpressionRef = Arc::new(Expression::column(["version"]));
     let builder = src
-        .max_by_version(group_by, version_column, vec!["payload".to_string()])
+        .max_by_version([col("k")], col("version"), ["payload"])
         .unwrap();
     let rp = ctx.into_result_plan(builder).unwrap();
 

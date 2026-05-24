@@ -7,12 +7,30 @@
 //! [`PlanBuilder`][crate::plans::state_machines::framework::plan_context::PlanBuilder] *and*
 //! engine-side lowering).
 //!
-//! - `check` -- bidirectional type checker for builder schema derivation
-//!   (`check_expression`, `check_column_refs`). Kernel-internal.
+//! - `check` -- bidirectional type checker for builder schema derivation (`check_expression` under
+//!   `TypeEq`, plus the operator-aligned helpers `infer_projection_schema`, `check_projection`,
+//!   `check_select`, `validate_exprs`). Kernel-internal.
 //! - [`field_op`] -- nested struct edits (`FieldOp` + `compile_field_op`) plus a small set of
-//!   schema/expression conveniences (`arc_struct_or_invariant`, `identity_named_expr`,
-//!   plus the publicly re-exported [`field_op::load_output_schema`] shared with engine-side
-//!   lowering).
+//!   schema/expression conveniences (`arc_struct_or_invariant`, `identity_named_expr`, plus the
+//!   publicly re-exported [`field_op::load_output_schema`] shared with engine-side lowering).
+//!
+//! # Errors
+//!
+//! These modules are deliberately Delta-agnostic: they're generic schema/expression utilities
+//! and shouldn't know about [`DeltaError`][crate::plans::errors::DeltaError] /
+//! [`DeltaErrorCode`][crate::plans::errors::DeltaErrorCode]. Instead they return
+//! `SchemaExprResult` -- an anyhow-style boxed `dyn Error` -- and callers at the plan-builder
+//! boundary wrap that into a `DeltaError` with the appropriate code via
+//! [`DeltaResultExt::or_delta`][crate::plans::errors::DeltaResultExt::or_delta]. The boxed
+//! source is preserved through `std::error::Error::source()`.
 
 pub(crate) mod check;
 pub mod field_op;
+
+/// Boxed, sendable error type returned by the `check` and `field_op` primitives. Identical
+/// to [`crate::plans::errors::BoxedSource`]; aliased here so call sites read as "schema-expr's
+/// error" without leaking the Delta error vocabulary into a generic type-checker.
+pub(crate) type SchemaExprError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// `Result` alias paired with `SchemaExprError`.
+pub(crate) type SchemaExprResult<T> = std::result::Result<T, SchemaExprError>;
