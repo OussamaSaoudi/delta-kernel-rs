@@ -74,8 +74,9 @@ pub(crate) static CHECKPOINT_READ_SCHEMA: LazyLock<SchemaRef> =
 #[allow(clippy::unwrap_used)]
 pub(crate) static CHECKPOINT_READ_SCHEMA_NO_STATS: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(
-        CHECKPOINT_READ_SCHEMA
-            .with_struct_at(&[ADD_NAME], |add| Ok(add.with_field_removed("stats")))
+        (**CHECKPOINT_READ_SCHEMA)
+            .clone()
+            .with_nested_field_removed(&[ADD_NAME], "stats")
             .unwrap(),
     )
 });

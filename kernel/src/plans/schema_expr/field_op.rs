@@ -263,34 +263,49 @@ pub(crate) fn compile_field_op(
 // FieldOp internals (private)
 // ============================================================================
 
-/// Schema half of a [`FieldOp`]: walk `parent_path` into `input_schema` via
-/// [`StructType::with_struct_at`] and apply the schema-level edit at the leaf parent.
-/// Defers existence and collision checks to the underlying `with_field_*` methods.
+/// Schema half of a [`FieldOp`]: walk `parent_path` into `input_schema` and apply the
+/// schema-level edit at the leaf parent. Insert/replace defer existence and collision
+/// checks to the underlying [`StructType::with_nested_field_*`] methods; drop adds an
+/// up-front existence check on top of [`StructType::with_nested_field_removed`] (which
+/// is otherwise a silent no-op when the field is missing).
 fn schema_after_field_op(
     input_schema: &StructType,
     parent_path: &[String],
     op: &FieldOp,
 ) -> SchemaExprResult<SchemaRef> {
-    let new_struct = input_schema.with_struct_at(parent_path, |s| match op {
+    let parent: Vec<&str> = parent_path.iter().map(String::as_str).collect();
+    let new_struct = match op {
         FieldOp::InsertAfter {
             after, new_field, ..
-        } => s.with_field_inserted_after(after.as_deref(), new_field.clone()),
+        } => input_schema.clone().with_nested_field_inserted_after(
+            &parent,
+            after.as_deref(),
+            new_field.clone(),
+        )?,
         FieldOp::Replace {
             target, new_field, ..
-        } => s.with_field_replaced(target_leaf(target)?, new_field.clone()),
+        } => input_schema.clone().with_nested_field_replaced(
+            &parent,
+            target_leaf(target)?,
+            new_field.clone(),
+        )?,
         FieldOp::Drop { target } => {
             let leaf = target_leaf(target)?;
-            if s.field(leaf).is_none() {
-                return Err(Error::generic(format!("Field {leaf} not found")));
-            }
-            Ok(s.with_field_removed(leaf))
+            // `with_nested_field_removed` silently accepts a missing leaf; tighten the
+            // contract by erroring out so misconstructed drops surface at compile time.
+            input_schema.clone().map_struct_at(&parent, |s| {
+                if s.field(leaf).is_none() {
+                    return Err(Error::generic(format!("Field `{leaf}` not found")));
+                }
+                Ok(s.with_field_removed(leaf))
+            })?
         }
-    })?;
+    };
     Ok(Arc::new(new_struct))
 }
 
 /// Last component of a non-empty target path. Returns a kernel error (not a `DeltaError`)
-/// so it can be returned from inside `with_struct_at`'s closure. Callers of
+/// so it can be returned from inside `map_struct_at`'s closure. Callers of
 /// [`compile_field_op`] are expected to validate non-emptiness up front, so this is a
 /// defensive guard against a misconstructed [`FieldOp::Replace`] / [`FieldOp::Drop`].
 fn target_leaf(target: &ColumnName) -> Result<&str, Error> {

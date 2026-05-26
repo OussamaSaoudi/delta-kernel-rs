@@ -47,7 +47,7 @@ use crate::plans::ir::nodes::{
 };
 use crate::plans::state_machines::framework::coroutine::Engine;
 use crate::plans::state_machines::framework::plan_context::{Context, PlanBuilder};
-use crate::schema::{arc_schema, ArrayType, DataType, SchemaRef, StructField, ToSchema};
+use crate::schema::{ArrayType, DataType, SchemaRef, StructField, StructType, ToSchema};
 use crate::snapshot::Snapshot;
 use crate::utils::current_time_duration;
 use crate::{delta_error, FileMeta};
@@ -59,22 +59,22 @@ use crate::{delta_error, FileMeta};
 /// Scan pipeline base: `{add, remove}` only. The scan path never reconciles
 /// protocol/metaData/txn/domainMetadata (the snapshot reads those separately).
 pub(super) static SCAN_BASE: LazyLock<SchemaRef> = LazyLock::new(|| {
-    arc_schema([
+    Arc::new(StructType::new_unchecked([
         StructField::nullable(ADD_NAME, Add::to_schema()),
         StructField::nullable(REMOVE_NAME, Remove::to_schema()),
-    ])
+    ]))
 });
 
 /// FSR pipeline base: all six action slots.
 pub(super) static FSR_BASE: LazyLock<SchemaRef> = LazyLock::new(|| {
-    arc_schema([
+    Arc::new(StructType::new_unchecked([
         StructField::nullable(ADD_NAME, Add::to_schema()),
         StructField::nullable(REMOVE_NAME, Remove::to_schema()),
         StructField::nullable(PROTOCOL_NAME, Protocol::to_schema()),
         StructField::nullable(METADATA_NAME, Metadata::to_schema()),
         StructField::nullable(DOMAIN_METADATA_NAME, DomainMetadata::to_schema()),
         StructField::nullable(SET_TRANSACTION_NAME, SetTransaction::to_schema()),
-    ])
+    ]))
 });
 
 // ============================================================================
@@ -441,7 +441,7 @@ impl ReconciliationPlanBuilder for PlanBuilder {
         let Some(stats_schema) = stats else {
             return Ok(self);
         };
-        let new_field = StructField::nullable("stats_parsed", stats_schema);
+        let new_field = StructField::nullable("stats_parsed", (**stats_schema).clone());
         let new_expr = Expression::parse_json(col([ADD_NAME, "stats"]), Arc::clone(stats_schema));
         self.replace_col([ADD_NAME, "stats"], new_field, new_expr)
     }
@@ -450,7 +450,7 @@ impl ReconciliationPlanBuilder for PlanBuilder {
         let Some(parts_schema) = parts else {
             return Ok(self);
         };
-        let new_field = StructField::nullable("partitionValues_parsed", parts_schema);
+        let new_field = StructField::nullable("partitionValues_parsed", (**parts_schema).clone());
         let new_expr = Expression::map_to_struct(col([ADD_NAME, "partitionValues"]));
         self.replace_col([ADD_NAME, "partitionValues"], new_field, new_expr)
     }
@@ -468,7 +468,7 @@ impl ReconciliationPlanBuilder for PlanBuilder {
 fn manifest_action_schema(base: &SchemaRef) -> SchemaRef {
     let mut fields: Vec<StructField> = base.fields().cloned().collect();
     fields.push(StructField::nullable(SIDECAR_NAME, Sidecar::to_schema()));
-    arc_schema(fields)
+    Arc::new(StructType::new_unchecked(fields))
 }
 
 /// File schema for the sidecar parquet Load: `base` with `add.stats` swapped for
@@ -492,10 +492,9 @@ fn stats_parsed_file_schema(
     stats_schema: &SchemaRef,
 ) -> Result<SchemaRef, DeltaError> {
     let new_field = StructField::nullable("stats_parsed", stats_schema.as_ref().clone());
-    let new_struct = base
-        .with_struct_at(&[ADD_NAME], |add| {
-            add.with_field_replaced("stats", new_field)
-        })
+    let new_struct = (**base)
+        .clone()
+        .with_nested_field_replaced(&[ADD_NAME], "stats", new_field)
         .map_err(|source| {
             delta_error!(
                 DeltaErrorCode::DeltaCommandInvariantViolation,
@@ -508,11 +507,11 @@ fn stats_parsed_file_schema(
 
 /// `{path, size, version}` Values upstream schema for commit_load.
 fn commit_load_schema() -> SchemaRef {
-    arc_schema([
+    Arc::new(StructType::new_unchecked([
         StructField::not_null("path", DataType::STRING),
         StructField::not_null("size", DataType::LONG),
         StructField::not_null("version", DataType::LONG),
-    ])
+    ]))
 }
 
 // ============================================================================

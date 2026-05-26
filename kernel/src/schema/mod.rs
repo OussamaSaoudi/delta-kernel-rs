@@ -21,8 +21,6 @@ use crate::transforms::SchemaTransform;
 use crate::utils::require;
 use crate::{DeltaResult, Error};
 
-pub mod builder;
-pub use builder::SchemaBuilder;
 pub(crate) mod compare;
 #[cfg(feature = "schema-diff")]
 pub(crate) mod diff;
@@ -36,25 +34,6 @@ pub(crate) mod variant_utils;
 
 pub type Schema = StructType;
 pub type SchemaRef = Arc<StructType>;
-
-/// Build a [`SchemaRef`] from a sequence of [`StructField`]s without going through
-/// `Arc::new(StructType::new_unchecked(...))`.
-///
-/// Use when assembling a schema entirely from known-distinct field names; the
-/// underlying constructor is unchecked, so callers must guarantee the field set
-/// is unique (otherwise later entries silently overwrite earlier ones with the
-/// same name). For validating construction, prefer [`SchemaBuilder::build`].
-///
-/// ```ignore
-/// use delta_kernel::schema::{arc_schema, DataType, StructField};
-/// let schema = arc_schema([
-///     StructField::not_null("path", DataType::STRING),
-///     StructField::not_null("size", DataType::LONG),
-/// ]);
-/// ```
-pub fn arc_schema<I: IntoIterator<Item = StructField>>(fields: I) -> SchemaRef {
-    Arc::new(StructType::new_unchecked(fields))
-}
 
 /// Converts a type to a [`Schema`] that represents that type. Derivable for struct types using the
 /// [`delta_kernel_derive::ToSchema`] derive macro.
@@ -674,13 +653,6 @@ impl StructType {
         StructTypeBuilder::new()
     }
 
-    /// Open a fluent [`SchemaBuilder`] seeded with the fields of this struct. Use this when
-    /// you want to add a few extra columns to an existing schema and finalize as a
-    /// [`SchemaRef`].
-    pub fn build_on(&self) -> SchemaBuilder {
-        SchemaBuilder::from_schema(self)
-    }
-
     /// Creates a new [`StructType`] from the given fields without validating them.
     ///
     /// This should only be used when you are sure that the fields are valid.
@@ -1089,13 +1061,16 @@ impl StructType {
         let idx = self
             .fields
             .get_index_of(name)
-            .ok_or_else(|| Error::generic(format!("Field {name} not found")))?;
+            .ok_or_else(|| Error::generic(format!("Field `{name}` not found")))?;
         if name == new_field.name() {
             self.fields[idx] = new_field;
         } else {
+            // Rename: error if `new_field.name()` already names a different sibling
+            // (which would shadow it). Then remove and re-insert at the same index so
+            // the renamed field keeps its position.
             if self.fields.contains_key(new_field.name()) {
                 return Err(Error::generic(format!(
-                    "Field {} already exists",
+                    "Field `{}` already exists",
                     new_field.name()
                 )));
             }
@@ -1106,41 +1081,85 @@ impl StructType {
         Ok(self)
     }
 
-    /// Replaces the nested [`StructType`] at `path` with the result of `f`, rebuilding the
-    /// ancestor [`StructField`] chain along the way. Each path component must resolve to a
-    /// struct field; the last component identifies the [`StructType`] passed (by ownership)
-    /// to `f`. An empty `path` invokes `f` on a clone of `self` directly.
-    ///
-    /// Intermediate fields' nullability and metadata are preserved verbatim; only their
-    /// inner [`StructType`] is replaced.
+    /// Insert `field` after `after` in the nested struct at `path` (empty path = self).
+    /// `after = None` appends to the end (see TODO on
+    /// [`Self::with_field_inserted_after`] re: [#2610]). Ancestor [`StructField`]s
+    /// along `path` keep their nullability and metadata; only their inner
+    /// [`StructType`] is rebuilt.
     ///
     /// # Errors
     ///
-    /// Returns an error if a path component is missing, a non-leaf component is not a struct
-    /// type, or `f` returns an error.
-    pub fn with_struct_at<S, F>(&self, path: &[S], f: F) -> DeltaResult<Self>
+    /// Returns an error if any path component is missing or is not a struct type, or if
+    /// the inner [`Self::with_field_inserted_after`] fails (e.g. `after` does not name an
+    /// existing field, or `field.name()` collides with an existing one).
+    ///
+    /// [#2610]: https://github.com/delta-io/delta-kernel-rs/issues/2610
+    pub fn with_nested_field_inserted_after(
+        self,
+        path: &[&str],
+        after: Option<&str>,
+        field: StructField,
+    ) -> DeltaResult<Self> {
+        self.map_struct_at(path, move |s| s.with_field_inserted_after(after, field))
+    }
+
+    /// Replace the field named `name` in the nested struct at `path` (empty path = self)
+    /// with `new_field`. When `new_field.name() != name` this renames the entry in place
+    /// (see [`Self::with_field_replaced`]). Ancestor [`StructField`]s along `path` keep
+    /// their nullability and metadata; only their inner [`StructType`] is rebuilt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any path component is missing or is not a struct type, if
+    /// `name` is not present in the target struct, or if a rename would collide with an
+    /// existing sibling field.
+    pub fn with_nested_field_replaced(
+        self,
+        path: &[&str],
+        name: &str,
+        new_field: StructField,
+    ) -> DeltaResult<Self> {
+        self.map_struct_at(path, move |s| s.with_field_replaced(name, new_field))
+    }
+
+    /// Remove the field named `name` from the nested struct at `path` (empty path = self).
+    /// Ancestor [`StructField`]s along `path` keep their nullability and metadata; only
+    /// their inner [`StructType`] is rebuilt. Removing a missing leaf field is a no-op
+    /// (matches [`Self::with_field_removed`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any path component is missing or is not a struct type.
+    pub fn with_nested_field_removed(self, path: &[&str], name: &str) -> DeltaResult<Self> {
+        self.map_struct_at(path, move |s| Ok(s.with_field_removed(name)))
+    }
+
+    /// Recursive walker shared by `with_nested_field_*`: descend into the struct at `path`
+    /// and apply `f` to it. Ancestor [`StructField`]s are rebuilt preserving their original
+    /// nullability and metadata.
+    pub(crate) fn map_struct_at<F>(self, path: &[&str], f: F) -> DeltaResult<Self>
     where
-        S: AsRef<str>,
         F: FnOnce(StructType) -> DeltaResult<StructType>,
     {
-        let Some((first, rest)) = path.split_first() else {
-            return f(self.clone());
+        let Some((head, rest)) = path.split_first() else {
+            return f(self);
         };
-        let name = first.as_ref();
         let field = self
-            .field(name)
-            .ok_or_else(|| Error::generic(format!("Field {name} not found")))?;
+            .field(head)
+            .ok_or_else(|| Error::generic(format!("Field `{head}` not found")))?;
         let DataType::Struct(inner) = field.data_type() else {
-            return Err(Error::generic(format!("Field {name} is not a struct type")));
+            return Err(Error::generic(format!(
+                "Field `{head}` is not a struct type"
+            )));
         };
-        let new_inner = inner.with_struct_at(rest, f)?;
+        let new_inner = (**inner).clone().map_struct_at(rest, f)?;
         let new_field = StructField {
             name: field.name.clone(),
             data_type: DataType::Struct(Box::new(new_inner)),
             nullable: field.nullable,
             metadata: field.metadata.clone(),
         };
-        self.clone().with_field_replaced(name, new_field)
+        self.with_field_replaced(head, new_field)
     }
 }
 
@@ -1856,12 +1875,6 @@ impl From<StructType> for DataType {
     }
 }
 
-impl From<&StructType> for DataType {
-    fn from(struct_type: &StructType) -> Self {
-        struct_type.clone().into()
-    }
-}
-
 impl From<ArrayType> for DataType {
     fn from(array_type: ArrayType) -> Self {
         DataType::Array(Box::new(array_type))
@@ -1871,16 +1884,6 @@ impl From<ArrayType> for DataType {
 impl From<SchemaRef> for DataType {
     fn from(schema: SchemaRef) -> Self {
         Arc::unwrap_or_clone(schema).into()
-    }
-}
-
-/// Borrowed counterpart to [`From<SchemaRef>`]: clones the inner [`StructType`] (i.e. it
-/// does the same deep clone as `(&*schema).clone().into()`). Lets call sites pass an
-/// `&SchemaRef` directly into any `impl Into<DataType>` parameter without first
-/// `Arc::clone`-ing or `.as_ref().clone()`-ing.
-impl From<&SchemaRef> for DataType {
-    fn from(schema: &SchemaRef) -> Self {
-        (**schema).clone().into()
     }
 }
 
@@ -3991,59 +3994,66 @@ mod tests {
         assert_eq!(new_schema.field_at_index(0).unwrap().name(), "id");
     }
 
-    #[test]
-    fn test_with_field_replaced() {
-        let schema =
-            StructType::try_new([StructField::new("id", DataType::INTEGER, false)]).unwrap();
-        let new_schema = schema
-            .with_field_replaced("id", StructField::new("name", DataType::STRING, true))
-            .unwrap();
-
-        // Rename keeps a single field at the original index AND keys the IndexMap entry
-        // by the new name so lookups via `field(new_name)` work.
-        assert_eq!(new_schema.num_fields(), 1);
-        assert_eq!(new_schema.field_at_index(0).unwrap().name(), "name");
-        assert!(new_schema.field("name").is_some());
-        assert!(new_schema.field("id").is_none());
-    }
-
-    #[test]
-    fn test_with_field_replaced_rename_preserves_position() {
-        // Replacement preserves the original field's index even when renaming.
-        let schema = StructType::try_new([
+    /// Schema with both top-level fields (a/b/c) and a nested `outer` struct that mirrors
+    /// them, so the same rstest can exercise root and nested replace cases over one fixture.
+    fn replace_test_schema() -> StructType {
+        let abc = StructType::try_new([
             StructField::new("a", DataType::STRING, false),
             StructField::new("b", DataType::INTEGER, false),
             StructField::new("c", DataType::DOUBLE, false),
         ])
         .unwrap();
-        let new_schema = schema
-            .with_field_replaced("b", StructField::nullable("renamed", DataType::LONG))
-            .unwrap();
-        let names: Vec<&str> = new_schema.fields().map(|f| f.name().as_str()).collect();
-        assert_eq!(names, ["a", "renamed", "c"]);
-    }
-
-    #[test]
-    fn test_with_field_replaced_rename_collision_errors() {
-        // Renaming to a name already used by an unrelated field is rejected.
-        let schema = StructType::try_new([
+        StructType::try_new([
             StructField::new("a", DataType::STRING, false),
             StructField::new("b", DataType::INTEGER, false),
+            StructField::new("c", DataType::DOUBLE, false),
+            StructField::nullable("outer", abc),
         ])
-        .unwrap();
-        let result = schema.with_field_replaced("a", StructField::nullable("b", DataType::LONG));
-        assert_result_error_with_message(result, "already exists");
+        .unwrap()
     }
 
-    #[test]
-    fn test_with_field_replaced_non_existent_field() {
-        let schema =
-            StructType::try_new([StructField::new("id", DataType::INTEGER, false)]).unwrap();
-        let new_schema = schema.with_field_replaced(
-            "nonexistent",
-            StructField::new("name", DataType::STRING, true),
+    #[rstest]
+    #[case::overwrite_same_name(vec![], "b", "b", vec!["a", "b", "c", "outer"])]
+    #[case::rename(vec![], "b", "renamed", vec!["a", "renamed", "c", "outer"])]
+    #[case::nested_rename(vec!["outer"], "b", "renamed", vec!["a", "renamed", "c"])]
+    fn test_with_field_replaced(
+        #[case] path: Vec<&str>,
+        #[case] target: &str,
+        #[case] new_name: &str,
+        #[case] expected_names: Vec<&str>,
+    ) {
+        let new_schema = replace_test_schema()
+            .with_nested_field_replaced(
+                &path,
+                target,
+                StructField::nullable(new_name, DataType::STRING),
+            )
+            .unwrap();
+        let leaf = descend_to(&new_schema, &path);
+        let names: Vec<&str> = leaf.fields().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, expected_names);
+        assert_eq!(leaf.field(new_name).unwrap().data_type(), &DataType::STRING);
+        if target != new_name {
+            assert!(leaf.field(target).is_none());
+        }
+    }
+
+    #[rstest]
+    #[case::not_found(vec![], "nonexistent", "x", "Field `nonexistent` not found")]
+    #[case::rename_collision(vec![], "a", "b", "Field `b` already exists")]
+    #[case::nested_leaf_missing(vec!["outer"], "absent", "absent", "Field `absent` not found")]
+    fn test_with_field_replaced_errors(
+        #[case] path: Vec<&str>,
+        #[case] target: &str,
+        #[case] new_name: &str,
+        #[case] msg: &str,
+    ) {
+        let result = replace_test_schema().with_nested_field_replaced(
+            &path,
+            target,
+            StructField::nullable(new_name, DataType::STRING),
         );
-        assert!(new_schema.is_err(), "Expected error for non-existent field");
+        assert_result_error_with_message(result, msg);
     }
 
     /// Schema: { a: { b: { c: double } } } — supports walks at depths 1, 2, and 3.
@@ -4135,52 +4145,84 @@ mod tests {
         );
     }
 
-    // === with_struct_at ===
+    // === with_nested_field_* ===
 
-    /// Walk a path, append a leaf field via the closure, assert the leaf struct gained it
-    /// while every ancestor on the path is rebuilt cleanly. Empty path operates on root.
-    #[rstest]
-    #[case::root(vec![], vec![])]
-    #[case::depth_one(vec!["a"], vec!["a"])]
-    #[case::depth_two(vec!["a", "b"], vec!["a", "b"])]
-    fn test_with_struct_at_appends_field_at_path(
-        #[case] path: Vec<&str>,
-        #[case] inspect: Vec<&str>,
-    ) {
-        let new_schema = walk_test_schema()
-            .with_struct_at(&path, |s| {
-                s.with_field_inserted_after(None, StructField::nullable("x", DataType::INTEGER))
-            })
-            .unwrap();
-        // Walk `inspect` to retrieve the (possibly nested) struct that received the new field.
-        let mut cursor = &new_schema;
-        for name in &inspect {
+    /// Walks `path` through `schema` and returns the (possibly nested) struct at that path.
+    fn descend_to<'a>(schema: &'a StructType, path: &[&str]) -> &'a StructType {
+        let mut cursor = schema;
+        for name in path {
             let DataType::Struct(inner) = cursor.field(name).unwrap().data_type() else {
                 panic!("expected struct at {name}");
             };
             cursor = inner.as_ref();
         }
-        assert!(cursor.field("x").is_some(), "x not found at path {path:?}");
+        cursor
     }
 
     #[rstest]
-    #[case::missing_component(vec!["a", "missing"], "Field missing not found")]
+    #[case::root(vec![])]
+    #[case::depth_one(vec!["a"])]
+    #[case::depth_two(vec!["a", "b"])]
+    fn test_with_nested_field_inserted_after_at_path(#[case] path: Vec<&str>) {
+        let new_schema = walk_test_schema()
+            .with_nested_field_inserted_after(
+                &path,
+                None,
+                StructField::nullable("x", DataType::INTEGER),
+            )
+            .unwrap();
+        let expected_leaf = StructField::nullable("x", DataType::INTEGER);
+        assert_eq!(
+            descend_to(&new_schema, &path).field("x"),
+            Some(&expected_leaf)
+        );
+    }
+
+    #[rstest]
+    #[case::missing_component(vec!["a", "missing"], "Field `missing` not found")]
     // `c` is a DOUBLE leaf, so traversing past it fails.
     #[case::intermediate_not_struct(vec!["a", "b", "c", "d"], "not a struct type")]
-    fn test_with_struct_at_path_errors(#[case] path: Vec<&str>, #[case] msg: &str) {
-        let result = walk_test_schema().with_struct_at(&path, Ok);
+    fn test_with_nested_field_inserted_after_path_errors(
+        #[case] path: Vec<&str>,
+        #[case] msg: &str,
+    ) {
+        let result = walk_test_schema().with_nested_field_inserted_after(
+            &path,
+            None,
+            StructField::nullable("x", DataType::INTEGER),
+        );
         assert_result_error_with_message(result, msg);
     }
 
-    #[test]
-    fn test_with_struct_at_closure_error_propagates() {
-        let result = walk_test_schema()
-            .with_struct_at(&["a"], |_| Err(Error::generic("closure error".to_string())));
-        assert_result_error_with_message(result, "closure error");
+    #[rstest]
+    #[case::after_not_found(Some("nonexistent"), "x", "Field nonexistent not found")]
+    #[case::collision(None, "c", "Field c already exists")]
+    fn test_with_nested_field_inserted_after_leaf_errors(
+        #[case] after: Option<&str>,
+        #[case] new_name: &str,
+        #[case] msg: &str,
+    ) {
+        let result = walk_test_schema().with_nested_field_inserted_after(
+            &["a", "b"],
+            after,
+            StructField::nullable(new_name, DataType::INTEGER),
+        );
+        assert_result_error_with_message(result, msg);
+    }
+
+    #[rstest]
+    #[case::root(vec![], "a")]
+    #[case::depth_one(vec!["a"], "b")]
+    #[case::depth_two(vec!["a", "b"], "c")]
+    fn test_with_nested_field_removed_at_path(#[case] path: Vec<&str>, #[case] field_name: &str) {
+        let new_schema = walk_test_schema()
+            .with_nested_field_removed(&path, field_name)
+            .unwrap();
+        assert!(descend_to(&new_schema, &path).field(field_name).is_none());
     }
 
     #[test]
-    fn test_with_struct_at_preserves_intermediate_metadata_and_nullability() {
+    fn test_with_nested_field_preserves_intermediate_metadata_and_nullability() {
         let leaf = StructType::new_unchecked([StructField::new("c", DataType::DOUBLE, false)]);
         let inner = StructType::new_unchecked([StructField::new(
             "b",
@@ -4192,9 +4234,11 @@ mod tests {
         let schema = StructType::new_unchecked([outer_field]);
 
         let new_schema = schema
-            .with_struct_at(&["a", "b"], |b| {
-                b.with_field_inserted_after(None, StructField::nullable("d", DataType::INTEGER))
-            })
+            .with_nested_field_inserted_after(
+                &["a", "b"],
+                None,
+                StructField::nullable("d", DataType::INTEGER),
+            )
             .unwrap();
         let a_field = new_schema.field("a").unwrap();
         assert!(a_field.is_nullable());

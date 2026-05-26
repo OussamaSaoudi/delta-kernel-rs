@@ -19,7 +19,7 @@ use crate::actions::ADD_NAME;
 use crate::expressions::{Expression, ExpressionRef, Transform, UnaryExpressionOp};
 use crate::schema::{DataType, SchemaRef, StructField, StructType};
 use crate::table_properties::TableProperties;
-use crate::{DeltaResult, Error};
+use crate::DeltaResult;
 
 pub(crate) const STATS_FIELD: &str = "stats";
 pub(crate) const STATS_PARSED_FIELD: &str = "stats_parsed";
@@ -138,35 +138,24 @@ pub(crate) fn build_checkpoint_read_schema(
     stats_schema: &StructType,
     partition_schema: Option<&StructType>,
 ) -> DeltaResult<SchemaRef> {
-    let new_struct = base_schema.with_struct_at(&[ADD_NAME], |add_struct| {
-        if add_struct.field(STATS_PARSED_FIELD).is_some() {
-            return Err(Error::generic(
-                "stats_parsed field already exists in Add schema",
-            ));
-        }
-        if partition_schema.is_some() && add_struct.field(PARTITION_VALUES_PARSED_FIELD).is_some() {
-            return Err(Error::generic(
-                "partitionValues_parsed field already exists in Add schema",
-            ));
-        }
-        let mut result = add_struct.with_field_inserted_after(
-            Some(STATS_FIELD),
+    let mut new_struct = base_schema.clone().with_nested_field_inserted_after(
+        &[ADD_NAME],
+        Some(STATS_FIELD),
+        StructField::nullable(
+            STATS_PARSED_FIELD,
+            DataType::Struct(Box::new(stats_schema.clone())),
+        ),
+    )?;
+    if let Some(pv_schema) = partition_schema {
+        new_struct = new_struct.with_nested_field_inserted_after(
+            &[ADD_NAME],
+            Some(PARTITION_VALUES_FIELD),
             StructField::nullable(
-                STATS_PARSED_FIELD,
-                DataType::Struct(Box::new(stats_schema.clone())),
+                PARTITION_VALUES_PARSED_FIELD,
+                DataType::Struct(Box::new(pv_schema.clone())),
             ),
         )?;
-        if let Some(pv_schema) = partition_schema {
-            result = result.with_field_inserted_after(
-                Some(PARTITION_VALUES_FIELD),
-                StructField::nullable(
-                    PARTITION_VALUES_PARSED_FIELD,
-                    DataType::Struct(Box::new(pv_schema.clone())),
-                ),
-            )?;
-        }
-        Ok(result)
-    })?;
+    }
     Ok(Arc::new(new_struct))
 }
 
@@ -185,10 +174,12 @@ pub(crate) fn build_checkpoint_output_schema(
     stats_schema: &StructType,
     partition_schema: Option<&StructType>,
 ) -> DeltaResult<SchemaRef> {
-    let new_struct = base_schema.with_struct_at(&[ADD_NAME], |add_struct| {
-        build_add_output_schema(config, &add_struct, stats_schema, partition_schema)
-    })?;
-    Ok(Arc::new(new_struct))
+    base_schema
+        .clone()
+        .map_struct_at(&[ADD_NAME], |add_struct| {
+            build_add_output_schema(config, &add_struct, stats_schema, partition_schema)
+        })
+        .map(Arc::new)
 }
 
 // ========================

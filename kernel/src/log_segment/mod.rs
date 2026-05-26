@@ -894,27 +894,26 @@ impl LogSegment {
             // checkpoint advertises native typed columns. Schemas without an `add` field
             // skip augmentation silently (sidecar still appends below).
             if needs_add_augmentation && action_schema.field("add").is_some() {
-                schema = schema.with_struct_at(&["add"], |mut add| {
-                    if let (true, Some(ss)) = (has_stats_parsed, stats_schema) {
-                        add = add.with_field_inserted_after(
-                            None,
-                            StructField::nullable(
-                                "stats_parsed",
-                                DataType::Struct(Box::new(ss.clone())),
-                            ),
-                        )?;
-                    }
-                    if let (true, Some(ps)) = (has_partition_values_parsed, partition_schema) {
-                        add = add.with_field_inserted_after(
-                            None,
-                            StructField::nullable(
-                                "partitionValues_parsed",
-                                DataType::Struct(Box::new(ps.clone())),
-                            ),
-                        )?;
-                    }
-                    Ok(add)
-                })?;
+                if let (true, Some(ss)) = (has_stats_parsed, stats_schema) {
+                    schema = schema.with_nested_field_inserted_after(
+                        &["add"],
+                        None,
+                        StructField::nullable(
+                            "stats_parsed",
+                            DataType::Struct(Box::new(ss.clone())),
+                        ),
+                    )?;
+                }
+                if let (true, Some(ps)) = (has_partition_values_parsed, partition_schema) {
+                    schema = schema.with_nested_field_inserted_after(
+                        &["add"],
+                        None,
+                        StructField::nullable(
+                            "partitionValues_parsed",
+                            DataType::Struct(Box::new(ps.clone())),
+                        ),
+                    )?;
+                }
             }
             // Schemas that already declare `sidecar` (e.g. when the caller projected
             // it in) reuse the existing field; otherwise append it at the end.
