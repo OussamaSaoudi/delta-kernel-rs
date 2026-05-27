@@ -52,6 +52,10 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 strum = { version = "0.27", features = ["derive"] }
 thiserror = "2"
+# Wire format for the declarative-plans IR. Optional; gated by
+# `declarative-plans`. The generated code is included from `OUT_DIR` and only
+# compiled when the feature is enabled (see `build.rs`).
+prost = { version = "0.13", optional = true }
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = "0.3"
 url = "2"
@@ -118,11 +122,22 @@ arrow-expression = ["need-arrow"]
 # Schema diffing functionality (experimental)
 schema-diff = []
 
-# Declarative plan execution via PlanExecutor trait (experimental). The IR uses
-# kernel-internal types (notably `schema::ToSchema`) hidden under `#[internal_api]`, and
-# PlanBasedEngine assumes Arrow EngineData for JSON parsing, so it pulls in the Arrow interop
-# features as well.
-declarative-plans = ["internal-api", "arrow", "arrow-conversion", "arrow-expression"]
+# Declarative plan IR + proto wire format. Opt-in; the existing
+# `Scan`/`Snapshot`/`Transaction` APIs keep working without it.
+#
+# Enables:
+#   - `internal-api` -- the declarative IR uses kernel-internal types (notably
+#     `schema::ToSchema`) hidden under `#[internal_api]`.
+#   - `arrow` / `arrow-conversion` / `arrow-expression` -- PlanBasedEngine assumes Arrow
+#     EngineData for JSON parsing, and the executor works in Arrow types throughout.
+#   - `prost` -- enables the proto wire format generated from `kernel/proto/`.
+declarative-plans = [
+  "internal-api",
+  "arrow",
+  "arrow-conversion",
+  "arrow-expression",
+  "dep:prost",
+]
 
 # Experimental, temporary, test-only feature flag guarding the in-progress column-defaults
 # work. TODO(#2630): remove once full column-defaults support ships.
@@ -144,6 +159,11 @@ default-engine-rustls = ["default-engine-base", "reqwest/rustls"]
 
 [build-dependencies]
 rustc_version = "0.4.1"
+# Only invoked from build.rs when the `declarative-plans` feature is on.
+prost-build = "0.13"
+# Supplies a vendored `protoc` binary so the proto codegen above doesn't require a
+# system protoc install. Only used from build.rs when `declarative-plans` is on.
+protoc-bin-vendored = "3.2"
 
 [dev-dependencies]
 delta_kernel = { path = ".", features = ["test-utils"] }

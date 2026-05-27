@@ -1,0 +1,97 @@
+// Proto mirror of `kernel/src/schema/mod.rs` (the Rust types are the source of truth).
+//
+// Two intentional divergences from the Rust shape:
+//   - `DataType::Primitive(PrimitiveType)` is flattened onto `DataType` (`simple` + `decimal`
+//     cases), with no intermediate `PrimitiveType` message.
+//   - `DataType::Variant(Box<StructType>)` is a payloadless `variant` marker -- the inner
+//     struct is the canonical, known shape, so it is not sent.
+//
+// Field numbers are never reused once published, so the wire format stays compatible.
+
+syntax = "proto3";
+
+package delta.kernel.schema;
+
+// ============================================================================
+// Primitive types
+// ============================================================================
+
+// Decimal is excluded: it carries precision/scale, so it is its own `decimal` case on
+// `DataType` rather than a valueless enum entry.
+enum SimplePrimitiveType {
+  SIMPLE_PRIMITIVE_TYPE_UNSPECIFIED = 0;
+  SIMPLE_PRIMITIVE_TYPE_STRING = 1;
+  SIMPLE_PRIMITIVE_TYPE_LONG = 2;
+  SIMPLE_PRIMITIVE_TYPE_INTEGER = 3;
+  SIMPLE_PRIMITIVE_TYPE_SHORT = 4;
+  SIMPLE_PRIMITIVE_TYPE_BYTE = 5;
+  SIMPLE_PRIMITIVE_TYPE_FLOAT = 6;
+  SIMPLE_PRIMITIVE_TYPE_DOUBLE = 7;
+  SIMPLE_PRIMITIVE_TYPE_BOOLEAN = 8;
+  SIMPLE_PRIMITIVE_TYPE_BINARY = 9;
+  SIMPLE_PRIMITIVE_TYPE_DATE = 10;
+  SIMPLE_PRIMITIVE_TYPE_TIMESTAMP = 11;
+  SIMPLE_PRIMITIVE_TYPE_TIMESTAMP_NTZ = 12;
+}
+
+// Rust uses `u8` (precision in [1,38], scale in [0,precision]); widened to uint32 because
+// proto has no smaller integer type, so consumers must validate the range.
+message DecimalType {
+  uint32 precision = 1;
+  uint32 scale = 2;
+}
+
+// ============================================================================
+// Composite types
+// ============================================================================
+
+message ArrayType {
+  DataType element_type = 1;
+  bool contains_null = 2;
+}
+
+message MapType {
+  DataType key_type = 1;
+  DataType value_type = 2;
+  bool value_contains_null = 3;
+}
+
+message StructType {
+  repeated StructField fields = 1;
+}
+
+// Payloadless: the variant's inner struct is the canonical, known shape, so it is not sent.
+message VariantType {}
+
+// `other_json` holds `MetadataValue::Other` as a serialized JSON string so engines without a
+// native JSON value type can still round-trip it.
+message MetadataValue {
+  oneof value {
+    int64 number = 1;
+    string string = 2;
+    bool boolean = 3;
+    string other_json = 4;
+  }
+}
+
+message StructField {
+  string name = 1;
+  DataType data_type = 2;
+  bool nullable = 3;
+  map<string, MetadataValue> metadata = 4;
+}
+
+// ============================================================================
+// DataType
+// ============================================================================
+
+message DataType {
+  oneof kind {
+    SimplePrimitiveType simple = 1;
+    DecimalType decimal = 2;
+    ArrayType array = 3;
+    StructType struct_type = 4;
+    MapType map_type = 5;
+    VariantType variant = 6;
+  }
+}
