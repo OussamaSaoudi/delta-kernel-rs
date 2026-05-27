@@ -14,8 +14,12 @@ use super::json::SyncJsonHandler;
 use super::parquet::SyncParquetHandler;
 use super::storage::SyncStorageHandler;
 use crate::object_store::DynObjectStore;
-use crate::plans::{IoOperation, Operation, PlanExecutor, PlanResult, QueryPlanNode};
-use crate::{DeltaResult, FileMeta, JsonHandler as _, ParquetHandler as _, StorageHandler as _};
+use crate::plans::ir::nodes::{NodeKind, ScanJsonNode, ScanParquetNode};
+use crate::plans::ir::plan::{PlanNode, ResultPlan};
+use crate::plans::{IoOperation, Operation, PlanExecutor, PlanResult};
+use crate::{
+    DeltaResult, Error, FileMeta, JsonHandler as _, ParquetHandler as _, StorageHandler as _,
+};
 
 /// A synchronous, test-only [`PlanExecutor`] that delegates to [`SyncStorageHandler`],
 /// [`SyncJsonHandler`], and [`SyncParquetHandler`].
@@ -100,28 +104,47 @@ impl SyncPlanExecutor {
         }
     }
 
-    fn execute_query(&self, query: QueryPlanNode) -> DeltaResult<PlanResult> {
-        match query {
-            QueryPlanNode::ScanJson {
-                files,
-                physical_schema,
-                predicate,
-            } => {
-                let iter = self
-                    .json
-                    .read_json_files(&files, physical_schema, predicate)?;
+    fn execute_query(&self, query: ResultPlan) -> DeltaResult<PlanResult> {
+        let node = into_single_node_plan(query)?;
+        match node.kind {
+            NodeKind::ScanJson(ScanJsonNode { files, schema }) => {
+                let iter = self.json.read_json_files(&files, schema, None)?;
                 Ok(PlanResult::Data(iter))
             }
-            QueryPlanNode::ScanParquet {
-                files,
-                physical_schema,
-                predicate,
-            } => {
-                let iter = self
-                    .parquet
-                    .read_parquet_files(&files, physical_schema, predicate)?;
+            NodeKind::ScanParquet(ScanParquetNode { files, schema }) => {
+                let iter = self.parquet.read_parquet_files(&files, schema, None)?;
                 Ok(PlanResult::Data(iter))
             }
+            other => Err(Error::generic(format!(
+                "SyncPlanExecutor only supports ScanJson / ScanParquet, got NodeKind::{other}",
+            ))),
         }
     }
+}
+
+/// Consume `plan` and return its sole [`PlanNode`] when it is a single-node plan whose only
+/// node produces `plan.result`.
+///
+/// Lives here (not on [`ResultPlan`]) because `SyncPlanExecutor` is the only consumer:
+/// real engines compile multi-node DAGs.
+///
+/// # Errors
+///
+/// [`Error::Generic`] -- `plan.plan.nodes.len() != 1`, or the single node's `output` differs
+/// from `plan.result`.
+fn into_single_node_plan(plan: ResultPlan) -> DeltaResult<PlanNode> {
+    let ResultPlan { plan, result } = plan;
+    let [node] = <[_; 1]>::try_from(plan.nodes).map_err(|nodes: Vec<_>| {
+        Error::generic(format!(
+            "expected single-node plan, got {} nodes",
+            nodes.len()
+        ))
+    })?;
+    if node.output != result {
+        return Err(Error::generic(format!(
+            "plan's only node produces RefId {} but result is RefId {}",
+            node.output.0, result.0
+        )));
+    }
+    Ok(node)
 }
