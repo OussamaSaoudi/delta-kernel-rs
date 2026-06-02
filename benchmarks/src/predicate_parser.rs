@@ -43,6 +43,7 @@ use std::borrow::Cow;
 // Imports use a naming convention to distinguish kernel types from sqlparser types:
 // - K-prefix: Kernel types (KExpr, KPred, KBinOp, KPredOp)
 // - P-prefix: Parser/sqlparser types (PExpr, PBinOp, PUnaryOp, PVal)
+use delta_kernel::expressions::type_inference::{can_coerce, find_common_type};
 use delta_kernel::expressions::{
     ArrayData, BinaryExpressionOp as KBinOp, BinaryPredicateOp as KPredOp, ColumnName,
     Expression as KExpr, Predicate as KPred, Scalar,
@@ -251,27 +252,6 @@ fn check_literal(
             actual, expected
         )
         .into()),
-    }
-}
-
-/// Checks if one type can be coerced to another using kernel's type widening rules.
-fn can_coerce(from: &DataType, to: &DataType) -> bool {
-    match (from, to) {
-        (DataType::Primitive(f), DataType::Primitive(t)) => f == t || f.can_widen_to(t),
-        _ => from == to,
-    }
-}
-
-/// Finds the widest common type between two types, if one exists.
-fn find_common_type(l_ty: &DataType, r_ty: &DataType) -> Option<DataType> {
-    if l_ty == r_ty {
-        Some(l_ty.clone())
-    } else if can_coerce(l_ty, r_ty) {
-        Some(r_ty.clone())
-    } else if can_coerce(r_ty, l_ty) {
-        Some(l_ty.clone())
-    } else {
-        None
     }
 }
 

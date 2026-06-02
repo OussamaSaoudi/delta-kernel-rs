@@ -24,6 +24,7 @@ mod column_names;
 pub(crate) mod literal_expression_transform;
 pub(crate) use literal_expression_transform::literal_expression_transform;
 mod scalars;
+pub mod type_inference;
 
 pub type ExpressionRef = std::sync::Arc<Expression>;
 pub type PredicateRef = std::sync::Arc<Predicate>;
