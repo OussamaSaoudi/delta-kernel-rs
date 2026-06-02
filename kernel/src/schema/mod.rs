@@ -31,8 +31,11 @@ pub(crate) mod diff;
 pub mod derive_macro_utils;
 #[cfg(not(feature = "internal-api"))]
 pub(crate) mod derive_macro_utils;
+pub mod schema_patch;
 pub(crate) mod validation;
 pub(crate) mod variant_utils;
+
+pub use schema_patch::{PatchOp, SchemaPatch, SchemaPatchBuilder};
 
 pub type Schema = StructType;
 pub type SchemaRef = Arc<StructType>;
