@@ -3,10 +3,12 @@
 //! This module is opt-in behind the `declarative-plans` feature flag.
 pub mod ir;
 mod query_builder;
+pub mod scan_shape;
 
 use bytes::Bytes;
 pub use ir::{IoOperation, Operation};
 pub use query_builder::QueryPlanBuilder;
+pub use scan_shape::{CheckpointShape, ScanShape, StatsInfo};
 
 use crate::{
     AsAny, DeltaResult, DeltaResultIteratorStatic, EngineData, Error, FileMeta, ParquetFooter,
