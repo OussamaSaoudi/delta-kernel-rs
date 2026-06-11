@@ -41,7 +41,7 @@ pub trait WorkloadRunner {
     fn name(&self) -> &str;
 }
 
-fn build_engine(
+pub fn build_engine(
     store: Arc<delta_kernel::object_store::DynObjectStore>,
     runtime: Arc<tokio::runtime::Runtime>,
 ) -> Arc<dyn Engine> {
@@ -54,7 +54,7 @@ fn build_engine(
 }
 
 /// Determines how a snapshot is loaded. Built once at setup via [`resolve_snapshot_strategy`].
-enum SnapshotStrategy {
+pub enum SnapshotStrategy {
     /// Standard snapshot builder (local, S3, or UC-managed non-catalog-managed tables).
     Standard { url: Url },
     /// Catalog-managed table: snapshot loaded via `UCKernelClient::load_snapshot`.
@@ -67,7 +67,7 @@ enum SnapshotStrategy {
 
 impl SnapshotStrategy {
     /// Builds a snapshot using this strategy.
-    fn load_snapshot(
+    pub fn load_snapshot(
         &self,
         engine: &dyn Engine,
         runtime: &tokio::runtime::Runtime,
@@ -110,7 +110,7 @@ impl SnapshotStrategy {
 ///
 /// For non-UC tables, the engine is built from env vars (`AWS_*` for S3, local filesystem
 /// otherwise).
-fn resolve_snapshot_strategy(
+pub fn resolve_snapshot_strategy(
     table_info: &TableInfo,
     runtime: Arc<tokio::runtime::Runtime>,
 ) -> Result<(Arc<dyn Engine>, SnapshotStrategy), Box<dyn std::error::Error>> {
@@ -176,7 +176,7 @@ fn resolve_snapshot_strategy(
 }
 
 /// Builds an engine from the table URL scheme and env vars (S3 or local).
-fn resolve_engine_for_url(
+pub fn resolve_engine_for_url(
     url: &Url,
     runtime: Arc<tokio::runtime::Runtime>,
 ) -> Result<Arc<dyn Engine>, Box<dyn std::error::Error>> {

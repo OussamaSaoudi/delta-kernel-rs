@@ -13,7 +13,7 @@ use crate::actions::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::ADD_NAME;
 use crate::expressions::{col, ColumnName, Expression};
 use crate::plans::errors::DeltaError;
-use crate::plans::ir::nodes::{default_scan_file_columns, DvRef, FileType, LoadNode};
+use crate::plans::ir::nodes::{DvKind, DvRef, FileType, LoadColumnInfo, LoadNode};
 use crate::plans::state_machines::framework::coroutine::Engine;
 use crate::plans::state_machines::framework::plan_context::{Context, PlanBuilder};
 use crate::scan::log_replay::FILE_CONSTANT_VALUES_NAME;
@@ -78,7 +78,7 @@ pub(super) async fn build_scan_plan(
 /// Splits per-file: the upstream builder emits one row per surviving file (flat
 /// `scan_file_row` shape), and [`PlanBuilder::load`] expands each row into the file's
 /// per-record stream while broadcasting `path` and the `fileConstantValues` struct via
-/// `passthrough_columns`. The trailing projection translates physical -> logical column
+/// `metadata_derived_columns`. The trailing projection translates physical -> logical column
 /// names per the scan's column-mapping mode.
 fn do_data_stage(scan: &Scan, live_actions: PlanBuilder) -> Result<PlanBuilder, DeltaError> {
     let logical_schema = scan.logical_schema().clone();
@@ -86,7 +86,7 @@ fn do_data_stage(scan: &Scan, live_actions: PlanBuilder) -> Result<PlanBuilder, 
 
     // Per-file parquet read; broadcasts the file-constant struct and `path` to every
     // emitted record-row. Output schema = physical_schema ++ {path, fileConstantValues}.
-    let passthrough_columns = vec![
+    let metadata_derived_columns = vec![
         ColumnName::new([FILE_CONSTANT_VALUES_NAME]),
         ColumnName::new(["path"]),
     ];
@@ -94,9 +94,16 @@ fn do_data_stage(scan: &Scan, live_actions: PlanBuilder) -> Result<PlanBuilder, 
         file_schema: scan.physical_schema().clone(),
         file_type: FileType::Parquet,
         base_url: Some(scan.snapshot().table_root().clone()),
-        passthrough_columns,
-        file_meta: default_scan_file_columns(),
-        dv_ref: Some(DvRef::skip(ColumnName::new(["deletionVector"]))),
+        metadata_derived_columns,
+        file_meta: LoadColumnInfo {
+            path_column: ColumnName::new(["path"]),
+            file_size_column: Some(ColumnName::new(["size"])),
+            num_records_column: None,
+        },
+        dv_ref: Some(DvRef {
+            column: ColumnName::new(["deletionVector"]),
+            kind: DvKind::Descriptor,
+        }),
     };
     let raw_data = live_actions.load(load)?;
 

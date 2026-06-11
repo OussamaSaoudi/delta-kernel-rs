@@ -18,7 +18,7 @@ use crate::expressions::col;
 use crate::log_segment::LogSegment;
 use crate::path::ParsedLogPath;
 use crate::plans::errors::DeltaError;
-use crate::plans::ir::nodes::FileFormat;
+use crate::plans::ir::nodes::FileType;
 use crate::plans::kernel_reducers::SidecarCollector;
 use crate::plans::state_machines::framework::coroutine::Engine;
 use crate::plans::state_machines::framework::plan_context::Context;
@@ -39,7 +39,7 @@ pub(super) enum CheckpointShape {
     /// are stored inline; the reconciliation re-scans `files` directly.
     Leaf {
         files: Vec<FileMeta>,
-        file_format: FileFormat,
+        file_format: FileType,
     },
     /// V2 multipart manifest -- `files` are the manifest parts, the leaves live in
     /// sidecars. The reconciliation re-scans the manifest, filters down to sidecar
@@ -47,7 +47,7 @@ pub(super) enum CheckpointShape {
     /// `NodeKind::Load`.
     Manifest {
         files: Vec<FileMeta>,
-        file_format: FileFormat,
+        file_format: FileType,
     },
 }
 
@@ -113,7 +113,7 @@ impl ScanShape {
             stats_probe(seg.checkpoint_schema().as_ref(), stats_schema);
 
         let is_manifest = match file_format {
-            FileFormat::Parquet => {
+            FileType::Parquet => {
                 let url = checkpoint_parts[0].location.location.as_str().to_string();
                 let cp_schema = ctx
                     .schema_query(engine, url, "ScanShape::resolve::checkpoint_schema")
@@ -124,7 +124,7 @@ impl ScanShape {
                 }
                 is_mfst
             }
-            FileFormat::Json => true,
+            FileType::Json => true,
         };
 
         if !is_manifest {
@@ -138,8 +138,8 @@ impl ScanShape {
         // null) to recover sidecar URLs. The manifest is re-scanned in the build phase;
         // this scan is for the sidecar SchemaQuery probe only.
         let manifest_chain = match file_format {
-            FileFormat::Parquet => ctx.scan_parquet(files.clone(), manifest_probe_schema())?,
-            FileFormat::Json => ctx.scan_json(files.clone(), manifest_probe_schema())?,
+            FileType::Parquet => ctx.scan_parquet(files.clone(), manifest_probe_schema())?,
+            FileType::Json => ctx.scan_json(files.clone(), manifest_probe_schema())?,
         };
         let sidecar_chain = manifest_chain.filter(col([SIDECAR_NAME]).is_not_null())?;
         let sidecar_files = ctx
@@ -176,11 +176,11 @@ impl ScanShape {
     }
 }
 
-fn checkpoint_format_from_path(cp: &ParsedLogPath<FileMeta>) -> FileFormat {
+fn checkpoint_format_from_path(cp: &ParsedLogPath<FileMeta>) -> FileType {
     if cp.extension == "json" {
-        FileFormat::Json
+        FileType::Json
     } else {
-        FileFormat::Parquet
+        FileType::Parquet
     }
 }
 

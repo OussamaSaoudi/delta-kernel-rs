@@ -42,9 +42,7 @@ use crate::expressions::{
 };
 use crate::path::ParsedLogPath;
 use crate::plans::errors::{DeltaError, DeltaErrorCode, KernelErrAsDelta};
-use crate::plans::ir::nodes::{
-    default_scan_file_columns, FileFormat, FileType, LoadNode, ScanFileColumns,
-};
+use crate::plans::ir::nodes::{FileType, LoadColumnInfo, LoadNode};
 use crate::plans::state_machines::framework::coroutine::Engine;
 use crate::plans::state_machines::framework::plan_context::{Context, PlanBuilder};
 use crate::schema::{ArrayType, DataType, SchemaRef, StructField, StructType, ToSchema};
@@ -252,8 +250,12 @@ pub(super) fn build_reconciliation(
         file_schema: Arc::clone(base),
         file_type: FileType::Json,
         base_url: Some(log_root.clone()),
-        passthrough_columns: vec![ColumnName::new(["version"])],
-        file_meta: default_scan_file_columns(),
+        metadata_derived_columns: vec![ColumnName::new(["version"])],
+        file_meta: LoadColumnInfo {
+            path_column: ColumnName::new(["path"]),
+            file_size_column: Some(ColumnName::new(["size"])),
+            num_records_column: None,
+        },
         dv_ref: None,
     };
     let commit_raw = ctx
@@ -264,7 +266,7 @@ pub(super) fn build_reconciliation(
     // Commits never carry native parsed stats; always parse JSON. partitionValues_parsed is
     // derived via `map_to_struct` when partitions are requested. JOIN_KEY is appended as the
     // dedup key; `version` already lives on every row (Load broadcast it via
-    // `passthrough_columns`) and feeds `max_by_version` directly. `version` is dropped by
+    // `metadata_derived_columns`) and feeds `max_by_version` directly. `version` is dropped by
     // `max_by_version` (it is not in `value_columns`).
     let value_columns: Vec<String> = base
         .fields()
@@ -300,10 +302,10 @@ pub(super) fn build_reconciliation(
             // FSR = 6). The builder branches: one chases sidecars; the other selects
             // manifest-resident action rows directly.
             let manifest = match file_format {
-                FileFormat::Parquet => {
+                FileType::Parquet => {
                     ctx.scan_parquet(files.clone(), manifest_action_schema(base))?
                 }
-                FileFormat::Json => ctx.scan_json(files.clone(), manifest_action_schema(base))?,
+                FileType::Json => ctx.scan_json(files.clone(), manifest_action_schema(base))?,
             };
             let sidecar_base = log_root.join("_sidecars/").map_err(|e| {
                 delta_error!(
@@ -325,11 +327,11 @@ pub(super) fn build_reconciliation(
                     file_schema: sidecar_file_schema(base, shape.stats.as_ref())?,
                     file_type: FileType::Parquet,
                     base_url: Some(sidecar_base),
-                    passthrough_columns: vec![],
-                    file_meta: ScanFileColumns {
-                        path: ColumnName::new(["path"]),
-                        size: Some(ColumnName::new(["sizeInBytes"])),
-                        record_count: None,
+                    metadata_derived_columns: vec![],
+                    file_meta: LoadColumnInfo {
+                        path_column: ColumnName::new(["path"]),
+                        file_size_column: Some(ColumnName::new(["sizeInBytes"])),
+                        num_records_column: None,
                     },
                     dv_ref: None,
                 })?;
@@ -343,8 +345,8 @@ pub(super) fn build_reconciliation(
             // never carry native stats).
             let top = manifest
                 .drop_col(SIDECAR_NAME)?
-                .with_json_stats_parsed(stats)?
-                .with_partitions_parsed(parts)?;
+                .with_json_stats_parsed(stats)? // TODO: inject hard wired null
+                .with_partitions_parsed(parts)?; // TODO: inject hard wired null
             Some(top.union_all(&[sidecar_aligned])?)
         }
     };
@@ -394,7 +396,7 @@ fn load_checkpoint_files(
     ctx: &Context,
     base: &SchemaRef,
     shape: &ScanShape,
-    file_format: FileFormat,
+    file_format: FileType,
     files: Vec<FileMeta>,
 ) -> Result<PlanBuilder, DeltaError> {
     let parts = shape.partition_schema.as_ref();
@@ -403,14 +405,14 @@ fn load_checkpoint_files(
         Some(s) if s.has_parsed_stats => {
             let scan_schema = stats_parsed_file_schema(base, &s.schema)?;
             match file_format {
-                FileFormat::Parquet => ctx.scan_parquet(files, scan_schema)?,
-                FileFormat::Json => ctx.scan_json(files, scan_schema)?,
+                FileType::Parquet => ctx.scan_parquet(files, scan_schema)?,
+                FileType::Json => ctx.scan_json(files, scan_schema)?,
             }
             .with_partitions_parsed(parts)?
         }
         _ => match file_format {
-            FileFormat::Parquet => ctx.scan_parquet(files, base.clone())?,
-            FileFormat::Json => ctx.scan_json(files, base.clone())?,
+            FileType::Parquet => ctx.scan_parquet(files, base.clone())?,
+            FileType::Json => ctx.scan_json(files, base.clone())?,
         }
         .with_json_stats_parsed(stats)?
         .with_partitions_parsed(parts)?,

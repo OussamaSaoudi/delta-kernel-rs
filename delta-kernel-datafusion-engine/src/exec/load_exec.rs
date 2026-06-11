@@ -54,7 +54,7 @@ pub struct LoadExec {
     projection: Option<Vec<usize>>,
     output_schema: ArrowSchemaRef,
     limit: Option<usize>,
-    /// Indices into `node.passthrough_columns` to materialize, in projected order. `Arc` so
+    /// Indices into `node.metadata_derived_columns` to materialize, in projected order. `Arc` so
     /// per-row open futures can clone cheaply.
     projected_passthrough: Arc<Vec<usize>>,
     /// File source without `_row_number` for rows whose DV column is null (or the whole load node
@@ -85,7 +85,7 @@ impl LoadExec {
         }
 
         let file_count = node.file_schema.fields().len();
-        let passthrough_count = node.passthrough_columns.len();
+        let passthrough_count = node.metadata_derived_columns.len();
         debug_assert_eq!(full_schema.fields().len(), file_count + passthrough_count);
 
         // Always build the no-DV variant: even when `node.dv_ref` is set, individual rows may

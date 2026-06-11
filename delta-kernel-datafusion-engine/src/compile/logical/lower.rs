@@ -1,24 +1,23 @@
 //! Kernel [`Plan`] -> DataFusion [`LogicalPlan`] lowering.
 //!
-//! Topological walk over [`PlanNode`]s. Each statement's output [`Ref`] is mapped to a freshly
-//! built [`LogicalPlan`]. Inputs are guaranteed to be earlier in `plan.stmts` than outputs by
-//! [`Plan::push`], so a single forward pass works.
+//! Topological walk over [`PlanNode`]s. Each node's output [`RefId`] is mapped to a freshly
+//! built [`LogicalPlan`]. Inputs are guaranteed to be earlier in `plan.nodes` than outputs by
+//! the plan builder, so a single forward pass works.
 //!
 //! Every [`NodeKind`] variant wraps a payload struct defined in the kernel IR nodes module;
 //! engine helpers consume those payload structs by reference (`&LoadNode`, `&ScanParquetNode`,
-//! etc.) without repacking. Cross-statement data flow happens entirely through DataFusion's
+//! etc.) without repacking. Cross-node data flow happens entirely through DataFusion's
 //! logical-plan tree (no relation registry, no named handles).
 //!
 //! [`Plan`]: delta_kernel::plans::ir::plan::Plan
 //! [`PlanNode`]: PlanNode
-//! [`Ref`]: Ref
+//! [`RefId`]: RefId
 //! [`LogicalPlan`]: LogicalPlan
-//! [`Plan::push`]: delta_kernel::plans::ir::plan::Plan::push
 //! [`NodeKind`]: NodeKind
 //!
 //! # Schema policy
 //!
-//! Kernel `Plan`s do not carry per-Ref kernel schemas (those live on the plan builder only
+//! Kernel `Plan`s do not carry per-RefId kernel schemas (those live on the plan builder only
 //! during IR construction). DataFusion derives output schemas from `LogicalPlan` shape and arrow
 //! types; the only place a kernel [`SchemaRef`] is reconstructed engine-side is
 //! [`NodeKind::Load`], whose output schema is computed here from the upstream's arrow shape
@@ -43,9 +42,9 @@ use datafusion_functions_window::row_number::row_number;
 use delta_kernel::engine::arrow_conversion::{TryFromArrow, TryIntoArrow};
 use delta_kernel::expressions::Expression;
 use delta_kernel::plans::ir::nodes::{
-    EquiJoinNode, LoadNode, MaxByVersionNode, UnionNode, ValuesNode,
+    EquiJoinNode, LoadNode, MaxByVersionNode, UnionAllNode, ValuesNode,
 };
-use delta_kernel::plans::ir::plan::{JoinKind, NodeKind, PlanNode, Ref};
+use delta_kernel::plans::ir::plan::{JoinKind, NodeKind, PlanNode, RefId};
 use delta_kernel::plans::schema_expr::field_op::load_output_schema;
 use delta_kernel::schema::StructType;
 
@@ -62,50 +61,47 @@ use crate::exec::LoadTableProvider;
 
 /// Compile a slice of [`PlanNode`]s to a DataFusion [`LogicalPlan`] rooted at `terminal`.
 ///
-/// Walks `stmts` in order, lowering each statement and threading the resulting `LogicalPlan`
-/// into a `Ref`-keyed map. The plan returned for `terminal` is then handed back. Statements
-/// unreachable from `terminal` are still compiled (DCE is the builder's job, not the engine's);
-/// engines relying on dead-code elimination should call [`Plan::reachable_from`] before passing
-/// the stmts in. Taking `&[PlanNode]` rather than `&Plan` avoids needing a `Plan::from_stmts`
-/// constructor; both the [`ResultPlan`]-returning drive path (where the caller already has a
-/// `Plan`) and the [`EngineRequest::Reduce`] dispatch (where the executor only sees raw stmts)
-/// share this entry point.
+/// Walks `nodes` in order, lowering each plan node and threading the resulting `LogicalPlan`
+/// into a `RefId`-keyed map. The plan returned for `terminal` is then handed back. Plan nodes
+/// unreachable from `terminal` are still compiled (DCE is the builder's job, not the engine's).
+/// Taking `&[PlanNode]` rather than `&Plan` lets both the [`ResultPlan`]-returning drive path
+/// (where the caller already has a `Plan`) and the [`EngineRequest::Reduce`] dispatch (where
+/// the executor only sees raw nodes) share this entry point.
 ///
-/// [`Plan::reachable_from`]: delta_kernel::plans::ir::plan::Plan::reachable_from
 /// [`ResultPlan`]: delta_kernel::plans::ir::plan::ResultPlan
 /// [`EngineRequest::Reduce`]: delta_kernel::plans::state_machines::framework::state_machine::EngineRequest::Reduce
 pub fn compile_plan(
-    stmts: &[PlanNode],
-    terminal: Ref,
+    nodes: &[PlanNode],
+    terminal: RefId,
     ctx: &CompileContext,
 ) -> Result<LogicalPlan, DataFusionError> {
-    let mut built: HashMap<Ref, LogicalPlan> = HashMap::with_capacity(stmts.len());
-    for stmt in stmts {
-        let logical = lower_stmt(stmt, &built, ctx)?;
-        built.insert(stmt.output, logical);
+    let mut built: HashMap<RefId, LogicalPlan> = HashMap::with_capacity(nodes.len());
+    for node in nodes {
+        let logical = lower_node(node, &built, ctx)?;
+        built.insert(node.output, logical);
     }
     built.remove(&terminal).ok_or_else(|| {
         plan_compilation(format!(
-            "compile_plan: terminal {terminal:?} is not produced by any stmt in the plan",
+            "compile_plan: terminal {terminal:?} is not produced by any node in the plan",
         ))
     })
 }
 
 /// Look up a compiled child plan; the caller clones for ownership.
-fn lookup(built: &HashMap<Ref, LogicalPlan>, r: Ref) -> Result<&LogicalPlan, DataFusionError> {
+fn lookup(built: &HashMap<RefId, LogicalPlan>, r: RefId) -> Result<&LogicalPlan, DataFusionError> {
     built.get(&r).ok_or_else(|| {
         plan_compilation(format!(
-            "compile_plan: input {r:?} not compiled (out-of-order stmts?)",
+            "compile_plan: input {r:?} not compiled (out-of-order nodes?)",
         ))
     })
 }
 
-fn lower_stmt(
-    stmt: &PlanNode,
-    built: &HashMap<Ref, LogicalPlan>,
+fn lower_node(
+    plan_node: &PlanNode,
+    built: &HashMap<RefId, LogicalPlan>,
     ctx: &CompileContext,
 ) -> Result<LogicalPlan, DataFusionError> {
-    match &stmt.kind {
+    match &plan_node.kind {
         // === Sources ====================================================================
         NodeKind::ListFiles(node) => file_listing_to_logical_plan(node),
         NodeKind::ScanParquet(node) => scan_parquet_to_logical_plan(node),
@@ -114,37 +110,37 @@ fn lower_stmt(
 
         // === Unary transforms ===========================================================
         NodeKind::Filter(node) => {
-            let child = lookup(built, expect_one_input(stmt)?)?.clone();
+            let child = lookup(built, expect_one_input(plan_node)?)?.clone();
             let pred = kernel_pred_to_df(node.predicate.as_ref())?;
             LogicalPlanBuilder::from(child).filter(pred)?.build()
         }
         NodeKind::Project(node) => {
-            let child = lookup(built, expect_one_input(stmt)?)?.clone();
+            let child = lookup(built, expect_one_input(plan_node)?)?.clone();
             compile_project_node(child, node)
         }
-        NodeKind::Load(node) => lower_load(built, expect_one_input(stmt)?, node, ctx),
+        NodeKind::Load(node) => lower_load(built, expect_one_input(plan_node)?, node, ctx),
         NodeKind::MaxByVersion(node) => {
-            let child = lookup(built, expect_one_input(stmt)?)?.clone();
+            let child = lookup(built, expect_one_input(plan_node)?)?.clone();
             lower_max_by_version(child, node)
         }
 
         // === N-ary ======================================================================
-        NodeKind::Union(node) => lower_union(stmt, built, node),
-        NodeKind::EquiJoin(node) => lower_equi_join(stmt, built, node),
+        NodeKind::UnionAll(node) => lower_union(plan_node, built, node),
+        NodeKind::EquiJoin(node) => lower_equi_join(plan_node, built, node),
     }
 }
 
 fn lower_union(
-    stmt: &PlanNode,
-    built: &HashMap<Ref, LogicalPlan>,
-    node: &UnionNode,
+    plan_node: &PlanNode,
+    built: &HashMap<RefId, LogicalPlan>,
+    node: &UnionAllNode,
 ) -> Result<LogicalPlan, DataFusionError> {
-    if stmt.inputs.is_empty() {
+    if plan_node.inputs.is_empty() {
         return Err(plan_compilation(
-            "compile_plan: Union with zero inputs is not a valid plan shape",
+            "compile_plan: UnionAll with zero inputs is not a valid plan shape",
         ));
     }
-    let children: Vec<LogicalPlan> = stmt
+    let children: Vec<LogicalPlan> = plan_node
         .inputs
         .iter()
         .map(|r| lookup(built, *r).cloned())
@@ -153,7 +149,7 @@ fn lower_union(
         return children
             .into_iter()
             .next()
-            .ok_or_else(|| plan_compilation("compile_plan: internal: Union lost children"));
+            .ok_or_else(|| plan_compilation("compile_plan: internal: UnionAll lost children"));
     }
     if node.ordered {
         compile_ordered_union(children)
@@ -161,19 +157,19 @@ fn lower_union(
         let mut iter = children.into_iter();
         let first = iter
             .next()
-            .ok_or_else(|| plan_compilation("compile_plan: internal: Union lost children"))?;
+            .ok_or_else(|| plan_compilation("compile_plan: internal: UnionAll lost children"))?;
         iter.try_fold(first, |acc, right| {
             LogicalPlanBuilder::from(acc).union(right)?.build()
         })
     }
 }
 
-fn expect_one_input(stmt: &PlanNode) -> Result<Ref, DataFusionError> {
-    match stmt.inputs.as_slice() {
+fn expect_one_input(plan_node: &PlanNode) -> Result<RefId, DataFusionError> {
+    match plan_node.inputs.as_slice() {
         [r] => Ok(*r),
         other => Err(plan_compilation(format!(
             "compile_plan: {:?} expects exactly one input, got {}",
-            stmt.kind,
+            plan_node.kind,
             other.len()
         ))),
     }
@@ -224,8 +220,8 @@ fn lower_values(node: &ValuesNode) -> Result<LogicalPlan, DataFusionError> {
 }
 
 fn lower_load(
-    built: &HashMap<Ref, LogicalPlan>,
-    upstream_ref: Ref,
+    built: &HashMap<RefId, LogicalPlan>,
+    upstream_ref: RefId,
     node: &LoadNode,
     ctx: &CompileContext,
 ) -> Result<LogicalPlan, DataFusionError> {
@@ -233,7 +229,7 @@ fn lower_load(
     let upstream_kernel = kernel_schema_from_logical(&upstream_logical)?;
     let output_kernel_schema = load_output_schema(
         &node.file_schema,
-        &node.passthrough_columns,
+        &node.metadata_derived_columns,
         &upstream_kernel,
     )
     .map_err(|e| plan_compilation(format!("compile_plan: Load output schema: {e}")))?;
@@ -247,17 +243,18 @@ fn lower_load(
 }
 
 /// Lower `NodeKind::MaxByVersion` to `row_number() OVER (PARTITION BY ... ORDER BY version DESC)`
-/// followed by `WHERE rn = 1` and a final projection narrowing to the `value_columns`. DataFusion
-/// mints a long version-dependent schema name for the window column (e.g. `row_number() PARTITION
-/// BY [...] ROWS BETWEEN ...`); rather than try to synthesize that name we read it back from the
-/// resulting plan's schema (it's the last column appended by [`LogicalPlanBuilder::window_plan`]).
+/// followed by `WHERE rn = 1` and a final projection narrowing to the `output_schema` fields.
+/// DataFusion mints a long version-dependent schema name for the window column (e.g.
+/// `row_number() PARTITION BY [...] ROWS BETWEEN ...`); rather than try to synthesize that name
+/// we read it back from the resulting plan's schema (it's the last column appended by
+/// [`LogicalPlanBuilder::window_plan`]).
 fn lower_max_by_version(
     child: LogicalPlan,
     node: &MaxByVersionNode,
 ) -> Result<LogicalPlan, DataFusionError> {
-    if node.value_columns.is_empty() {
+    if node.output_schema.fields().count() == 0 {
         return Err(plan_compilation(
-            "compile_plan: MaxByVersion with zero value_columns is invalid",
+            "compile_plan: MaxByVersion with empty output_schema is invalid",
         ));
     }
     let partition_by = kernel_exprs_to_df_untyped(&node.group_by)?;
@@ -279,9 +276,9 @@ fn lower_max_by_version(
         .filter(Expr::Column(rn_column).eq(lit(1u64)))?
         .build()?;
     let projection: Vec<Expr> = node
-        .value_columns
-        .iter()
-        .map(|n| Expr::Column(Column::new_unqualified(n)))
+        .output_schema
+        .fields()
+        .map(|f| Expr::Column(Column::new_unqualified(f.name())))
         .collect();
     LogicalPlanBuilder::from(filtered)
         .project(projection)?
@@ -289,32 +286,39 @@ fn lower_max_by_version(
 }
 
 fn lower_equi_join(
-    stmt: &PlanNode,
-    built: &HashMap<Ref, LogicalPlan>,
+    plan_node: &PlanNode,
+    built: &HashMap<RefId, LogicalPlan>,
     node: &EquiJoinNode,
 ) -> Result<LogicalPlan, DataFusionError> {
-    if stmt.inputs.len() != 2 {
+    if plan_node.inputs.len() != 2 {
         return Err(plan_compilation(format!(
             "compile_plan: EquiJoin expects 2 inputs, got {}",
-            stmt.inputs.len()
+            plan_node.inputs.len()
         )));
     }
-    if node.key_pairs.is_empty() {
+    if node.left_keys.is_empty() {
         return Err(plan_compilation(
             "compile_plan: EquiJoin requires at least one key pair",
         ));
     }
-    let left_plan = lookup(built, stmt.inputs[0])?.clone();
-    let right_plan = lookup(built, stmt.inputs[1])?.clone();
+    if node.left_keys.len() != node.right_keys.len() {
+        return Err(plan_compilation(format!(
+            "compile_plan: EquiJoin left_keys ({}) and right_keys ({}) length mismatch",
+            node.left_keys.len(),
+            node.right_keys.len(),
+        )));
+    }
+    let left_plan = lookup(built, plan_node.inputs[0])?.clone();
+    let right_plan = lookup(built, plan_node.inputs[1])?.clone();
     let left_keys: Vec<Expr> = node
-        .key_pairs
+        .left_keys
         .iter()
-        .map(|(l, _)| kernel_expr_to_df_untyped(l.as_ref()))
+        .map(|l| kernel_expr_to_df_untyped(l.as_ref()))
         .collect::<Result<_, _>>()?;
     let right_keys: Vec<Expr> = node
-        .key_pairs
+        .right_keys
         .iter()
-        .map(|(_, r)| kernel_expr_to_df_untyped(r.as_ref()))
+        .map(|r| kernel_expr_to_df_untyped(r.as_ref()))
         .collect::<Result<_, _>>()?;
     let df_kind = match node.kind {
         // `LeftAnti`: emit each left row whose key matches no right row. Output schema mirrors

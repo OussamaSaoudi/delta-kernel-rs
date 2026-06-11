@@ -11,12 +11,12 @@ of mergeable PRs.
 Prototype landed locally; nothing merged. Already in the tree:
 
 - `kernel/src/plans/ir/plan.rs` — `Plan`, `PlanNode`, `NodeKind`,
-  `Ref`, `ResultPlan`, `JoinKind` (LeftAnti only).
+  `RefId`, `ResultPlan`, `JoinKind` (LeftAnti only).
 - `kernel/src/plans/ir/nodes/mod.rs` — per-variant payloads
   (`ScanParquetNode`, `ScanJsonNode`, `ProjectNode`, `FilterNode`,
-  `UnionNode`, `LoadNode`, `MaxByVersionNode`, `EquiJoinNode`,
-  `ListFilesNode`, `ValuesNode`, `ReduceSink`, `ScanFileColumns`,
-  `DvRef`).
+  `UnionAllNode`, `LoadNode`, `MaxByVersionNode`, `EquiJoinNode`,
+  `ListFilesNode`, `ValuesNode`, `ReduceSink`, `LoadColumnInfo`,
+  `DvRef`, `DvKind`).
 - `kernel/src/plans/schema_expr/` — builder-time schema/expression utilities:
   - `check.rs` — bidirectional type checker (`check_expression` plus the operator-aligned
     helpers `infer_projection_schema`, `check_projection`, `check_select`, `validate_exprs`).
@@ -34,7 +34,7 @@ Prototype landed locally; nothing merged. Already in the tree:
   - `step_payload.rs` — `EngineResponse { Reducer(FinishedHandle), Schema, Empty }`.
   - `plan_context.rs` — `Context` (Rc<RefCell<ContextState>>), `PlanBuilder`,
     session_id stale-builder protection, dispatch (`reduce`, `schema_query`,
-    `into_result_plan`), DCE via `Plan::reachable_from`.
+    `into_result_plan`), DCE via `backward-reachability traversal`.
   - `coroutine/` — `CoroutineSM` driver.
 - `kernel/src/plans/state_machines/scan/`:
   - `reconciliation.rs` — `build_reconciliation` over `&Context`.
@@ -80,7 +80,7 @@ Each PR exits with `cargo build --workspace --all-features` clean,
 Land `plans/ir/plan.rs`, `plans/ir/nodes/mod.rs`, `plans/schema_expr/`
 (`check.rs`, `field_op.rs`).
 
-**Verify**: unit tests for each `NodeKind`, `Plan::reachable_from` DCE,
+**Verify**: unit tests for each `NodeKind`, `backward-reachability traversal` DCE,
 `infer_expression_type` covering every `Expression` variant. No call sites
 in legacy code — additive.
 
@@ -134,7 +134,7 @@ Land `plan_context.rs`. Includes:
   `max_by_version`, `left_anti_join`, `union_all`, `union_ordered`).
 - Dispatch methods (`reduce`, `schema_query`, `into_result_plan`).
 - session_id stale-builder protection; DCE in `reduce`/`into_result_plan`
-  via `Plan::reachable_from`.
+  via `backward-reachability traversal`.
 
 **Verify**: unit tests per builder method (schema validation failures,
 stale-builder rejection, DCE pruning). RefCell-discipline test under tokio

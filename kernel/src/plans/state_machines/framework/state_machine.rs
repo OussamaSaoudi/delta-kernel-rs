@@ -29,7 +29,7 @@ use crate::plans::errors::DeltaError;
 #[cfg(doc)]
 use crate::plans::errors::DeltaErrorCode;
 use crate::plans::ir::nodes::ReduceSink;
-use crate::plans::ir::plan::{PlanNode, Ref};
+use crate::plans::ir::plan::{PlanNode, RefId};
 use crate::plans::kernel_reducers::FinishedHandle;
 use crate::schema::SchemaRef;
 
@@ -63,18 +63,18 @@ impl SchemaQuery {
 ///
 /// - [`SchemaQuery`](Self::SchemaQuery) -- metadata-only footer read.
 /// - [`Reduce`](Self::Reduce) -- plan dataflow drained into a [`ReduceSink`]. The engine compiles
-///   `stmts` (a flat plan), runs the DAG, and feeds the rows produced at `terminal` into `sink`.
+///   `nodes` (a flat plan), runs the DAG, and feeds the rows produced at `terminal` into `sink`.
 ///   The reducer's typed output flows back as [`EngineResponse::Reducer`] carrying the
 ///   `FinishedHandle`, and the SM body recovers the typed value via the paired `Extractor`.
 #[derive(Debug, Clone)]
 pub enum EngineRequest {
     /// Read a file's schema without reading data.
     SchemaQuery(SchemaQuery),
-    /// Plan dataflow + reducer drain. The engine evaluates `stmts` as a DAG and pipes the
+    /// Plan dataflow + reducer drain. The engine evaluates `nodes` as a DAG and pipes the
     /// stream produced at `terminal` into `sink`.
     Reduce {
-        stmts: Vec<PlanNode>,
-        terminal: Ref,
+        nodes: Vec<PlanNode>,
+        terminal: RefId,
         sink: ReduceSink,
     },
 }

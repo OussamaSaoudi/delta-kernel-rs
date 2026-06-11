@@ -98,7 +98,7 @@ pub(crate) fn extract_column_array(
 }
 
 /// Per-row inputs the open future captures: file URL, advisory size, optional DV descriptor,
-/// and projected passthrough values (in projected order).
+/// and projected metadata-derived values (in projected order).
 #[derive(Debug, Clone)]
 pub(crate) struct RowInputs {
     pub url: Url,
@@ -108,14 +108,14 @@ pub(crate) struct RowInputs {
 }
 
 /// Extract one upstream row into a [`RowInputs`]. `projected_passthrough` is the precomputed
-/// set of `node.passthrough_columns` indices to materialize, in projected order.
+/// set of `node.metadata_derived_columns` indices to materialize, in projected order.
 pub(crate) fn extract_row_inputs(
     batch: &RecordBatch,
     row: usize,
     node: &LoadNode,
     projected_passthrough: &[usize],
 ) -> Result<RowInputs, DataFusionError> {
-    let path_cn = &node.file_meta.path;
+    let path_cn = &node.file_meta.path_column;
     let path_arr = extract_column_array(batch, path_cn)?;
     if path_arr.is_null(row) {
         return Err(plan_compilation(format!(
@@ -124,7 +124,7 @@ pub(crate) fn extract_row_inputs(
     }
     // Path columns are always Utf8 in scan-emitted Load plans.
     let url = resolve_file_location(node, path_arr.as_string::<i32>().value(row))?;
-    let size = match node.file_meta.size.as_ref() {
+    let size = match node.file_meta.file_size_column.as_ref() {
         Some(sz_cn) => {
             let arr = extract_column_array(batch, sz_cn)?;
             if arr.is_null(row) {
@@ -139,7 +139,7 @@ pub(crate) fn extract_row_inputs(
     let partition_values = projected_passthrough
         .iter()
         .map(|&i| {
-            let cn = &node.passthrough_columns[i];
+            let cn = &node.metadata_derived_columns[i];
             let arr = extract_column_array(batch, cn)?;
             ScalarValue::try_from_array(arr.as_ref(), row)
         })

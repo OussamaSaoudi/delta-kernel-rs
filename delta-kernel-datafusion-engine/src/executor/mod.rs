@@ -20,7 +20,7 @@ use delta_kernel::engine::default::DefaultEngineBuilder;
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::plans::errors::DeltaError;
 use delta_kernel::plans::ir::nodes::ReduceSink;
-use delta_kernel::plans::ir::plan::{PlanNode, Ref, ResultPlan};
+use delta_kernel::plans::ir::plan::{PlanNode, RefId, ResultPlan};
 use delta_kernel::plans::kernel_reducers::{FinishedHandle, KdfControl};
 use delta_kernel::plans::state_machines::framework::coroutine::CoroutineSM;
 use delta_kernel::plans::state_machines::framework::engine_error::{EngineError, EngineErrorKind};
@@ -168,7 +168,7 @@ impl DataFusionExecutor {
         let ctx = CompileContext {
             engine: Arc::clone(&self.engine),
         };
-        let logical = compile_plan(&rp.plan.stmts, rp.result, &ctx).into_delta()?;
+        let logical = compile_plan(&rp.plan.nodes, rp.result, &ctx).into_delta()?;
         Ok(DataFrame::new(self.session_ctx.state(), logical))
     }
 
@@ -206,12 +206,12 @@ impl DataFusionExecutor {
         match op {
             EngineRequest::SchemaQuery(node) => execute_schema_query_phase(&self.engine, node),
             EngineRequest::Reduce {
-                stmts,
+                nodes,
                 terminal,
                 sink,
             } => {
                 let finished = self
-                    .run_reduce(&stmts, terminal, &sink)
+                    .run_reduce(&nodes, terminal, &sink)
                     .await
                     .map_err(EngineError::internal)?;
                 Ok(EngineResponse::Reducer(finished))
@@ -223,14 +223,14 @@ impl DataFusionExecutor {
     /// the reduce sink, and return the finalized handle.
     async fn run_reduce(
         &self,
-        stmts: &[PlanNode],
-        terminal: Ref,
+        plan: &[PlanNode],
+        terminal: RefId,
         sink: &ReduceSink,
     ) -> Result<FinishedHandle, DataFusionError> {
         let ctx = CompileContext {
             engine: Arc::clone(&self.engine),
         };
-        let logical = compile_plan(stmts, terminal, &ctx)?;
+        let logical = compile_plan(plan, terminal, &ctx)?;
         let df_state = self.session_ctx.state();
         let physical = df_state
             .create_physical_plan(&df_state.optimize(&logical)?)
@@ -251,6 +251,7 @@ impl DataFusionExecutor {
         let mut stream = physical.execute(0, Arc::clone(&self.task_ctx))?;
         while let Some(batch) = stream.try_next().await? {
             let arrow = ArrowEngineData::new(batch);
+            throw error; //valid
             match handle.apply(&arrow).map_err(wrap_delta_err)? {
                 KdfControl::Continue => {}
                 KdfControl::Break => break,

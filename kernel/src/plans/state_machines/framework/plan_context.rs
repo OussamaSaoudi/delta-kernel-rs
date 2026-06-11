@@ -1,8 +1,8 @@
 //! Plan-construction context and builder.
 //!
-//! [`Context`] owns the in-flight plan and a per-Ref schema table. [`PlanBuilder`] is a
-//! shared handle to a specific [`Ref`] in that program; builder methods append new
-//! `PlanNode`s and return new [`PlanBuilder`]s threading the freshly minted Refs. Cursors are
+//! [`Context`] owns the in-flight plan and a per-RefIdId schema table. [`PlanBuilder`] is a
+//! shared handle to a specific [`RefId`] in that program; builder methods append new
+//! `PlanNode`s and return new [`PlanBuilder`]s threading the freshly minted RefIds. Cursors are
 //! [`Clone`] (cheap `Rc` clone) so branching is explicit.
 //!
 //! State is shared via `Rc<RefCell<ContextState>>` so transform methods can mutate without
@@ -26,9 +26,10 @@
 //!
 //! [`CoroutineSM`]: crate::plans::state_machines::framework::coroutine::CoroutineSM
 //! [`PlanNode`]: crate::plans::ir::plan::PlanNode
-//! [`Ref`]: crate::plans::ir::plan::Ref
+//! [`RefId`]: crate::plans::ir::plan::RefId
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::mem;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -39,9 +40,9 @@ use crate::expressions::{ColumnName, ExpressionRef, IntoColumnName, PredicateRef
 use crate::plans::errors::DeltaError;
 use crate::plans::ir::nodes::{
     EquiJoinNode, FilterNode, ListFilesNode, LoadNode, MaxByVersionNode, ProjectNode, ReduceSink,
-    ScanJsonNode, ScanParquetNode, UnionNode, ValuesNode,
+    ScanJsonNode, ScanParquetNode, UnionAllNode, ValuesNode,
 };
-use crate::plans::ir::plan::{JoinKind, NodeKind, Plan, PlanNode, Ref, ResultPlan};
+use crate::plans::ir::plan::{JoinKind, NodeKind, Plan, PlanNode, RefId, ResultPlan};
 use crate::plans::kernel_reducers::{Extractor, KernelReducer, KernelReducerOutput};
 use crate::plans::schema_expr::check::{
     check_projection, check_select, infer_projection_schema, validate_exprs,
@@ -80,32 +81,32 @@ macro_rules! pb_err {
 // Shared state
 // ============================================================================
 
-/// In-flight plan being built, the per-Ref schema table, and a session counter.
+/// In-flight plan being built, the per-RefId schema table, and a session counter.
 ///
-/// Ref ids are derived directly from `plan.stmts.len()` at push time: each node's
-/// output Ref equals its index in `stmts`, so the counter and the vector length are
+/// RefIds are derived directly from `plan.nodes.len()` at push time: each node's
+/// output RefId equals its index in `nodes`, so the counter and the vector length are
 /// always in lockstep. No separate `next_ref` field is needed.
 #[derive(Debug, Default)]
 struct ContextState {
     plan: Plan,
-    /// Per-Ref output schemas. `ref_schemas[i]` is the output schema of `plan.stmts[i]`.
+    /// Per-RefId output schemas. `ref_schemas[i]` is the output schema of `plan.nodes[i]`.
     ref_schemas: Vec<SchemaRef>,
     /// Bumped by dispatch methods to invalidate cursors held across yields.
     session_id: u32,
 }
 
 impl ContextState {
-    /// Append a node to the in-flight plan, mint its output Ref, and record
-    /// `schema` for the new Ref.
-    fn push_node(&mut self, kind: NodeKind, inputs: Vec<Ref>, schema: SchemaRef) -> Ref {
-        let output = Ref(self.plan.stmts.len() as u32);
-        self.plan.stmts.push(PlanNode {
+    /// Append a node to the in-flight plan, mint its output RefId, and record
+    /// `schema` for the new RefId.
+    fn push_node(&mut self, kind: NodeKind, inputs: Vec<RefId>, schema: SchemaRef) -> RefId {
+        let output = RefId(self.plan.nodes.len() as u32);
+        self.plan.nodes.push(PlanNode {
             kind,
             inputs,
             output,
         });
         self.ref_schemas.push(schema);
-        debug_assert_eq!(self.ref_schemas.len(), self.plan.stmts.len());
+        debug_assert_eq!(self.ref_schemas.len(), self.plan.nodes.len());
         output
     }
 
@@ -129,8 +130,8 @@ impl ContextState {
         self.session_id = self.session_id.wrapping_add(1);
     }
 
-    /// Drain the in-flight plan for shipment to the engine. Empties the per-Ref
-    /// schema table and invalidates cursors (so the Refs in the returned plan, which
+    /// Drain the in-flight plan for shipment to the engine. Empties the per-RefId
+    /// schema table and invalidates cursors (so the RefIds in the returned plan, which
     /// restart from 0 on the next push, can't collide with any stale handle). The
     /// caller pipes the returned plan through DCE before yielding it.
     fn take_plan_for_dispatch(&mut self) -> Plan {
@@ -161,7 +162,7 @@ impl Context {
         Self::default()
     }
 
-    /// Append a source node with no inputs and return a handle to its output Ref.
+    /// Append a source node with no inputs and return a handle to its output RefId.
     fn push_source(&self, kind: NodeKind, schema: SchemaRef) -> Result<PlanBuilder, DeltaError> {
         let state = &self.state;
         let mut s = state.borrow_mut();
@@ -194,6 +195,7 @@ impl Context {
         let node = ScanParquetNode {
             files,
             schema: Arc::clone(&schema),
+            predicate: None,
         };
         self.push_source(NodeKind::ScanParquet(node), schema)
     }
@@ -209,6 +211,7 @@ impl Context {
         let node = ScanJsonNode {
             files,
             schema: Arc::clone(&schema),
+            predicate: None,
         };
         self.push_source(NodeKind::ScanJson(node), schema)
     }
@@ -243,7 +246,7 @@ impl Context {
     /// Drain the accumulator into a [`EngineRequest::Reduce`] yielded through `engine` and recover
     /// the reducer's typed output via [`Extractor`].
     ///
-    /// Backward-reachability DCE narrows the plan to stmts transitively reachable
+    /// Backward-reachability DCE narrows the plan to nodes transitively reachable
     /// from `builder`. After the yield resumes, the accumulator is reset (empty plan +
     /// empty schema table) and `session_id` is bumped so any cursors held across the
     /// boundary fail at runtime.
@@ -264,16 +267,16 @@ impl Context {
         let sink = ReduceSink::new_reducer(reducer);
         let extractor = Extractor::for_reducer::<S>(sink.token.clone());
         let terminal = builder.ref_id;
-        let stmts: Vec<PlanNode> = {
+        let nodes: Vec<PlanNode> = {
             let mut s = self.state.borrow_mut();
             s.ensure_fresh(&builder)?;
-            s.take_plan_for_dispatch().reachable_from(terminal).stmts
+            reachable_from(s.take_plan_for_dispatch(), terminal).nodes
         };
         // Drop the builder handle so the only remaining Rc on `state` is `self`'s.
         drop(builder);
 
         let operation = EngineRequest::Reduce {
-            stmts,
+            nodes,
             terminal,
             sink,
         };
@@ -327,7 +330,7 @@ impl Context {
     }
 
     /// Drain the accumulator into a [`ResultPlan`] keyed at `builder`. Performs
-    /// backward-reachability DCE; only stmts transitively reachable from
+    /// backward-reachability DCE; only nodes transitively reachable from
     /// `builder.ref_id()` survive.
     ///
     /// Returns an error if `builder` is from a different context (or stale across a
@@ -350,28 +353,60 @@ impl Context {
                      calling this method",
                 )
             })?;
-        let plan = inner.plan.reachable_from(result);
+        let plan = reachable_from(inner.plan, result);
         Ok(ResultPlan { plan, result })
     }
+}
+
+// ============================================================================
+// Backward-reachability DCE
+// ============================================================================
+
+/// Backward-reachability dead-code elimination from `result`.
+///
+/// Returns a new plan containing only the nodes transitively reachable from `result` via
+/// the `inputs` / `output` edges. Node order is preserved; surviving RefIds keep their
+/// original ids. The traversal inspects only the dataflow edges -- no counter state to
+/// preserve.
+fn reachable_from(plan: Plan, result: RefId) -> Plan {
+    let by_output: std::collections::HashMap<RefId, &PlanNode> =
+        plan.nodes.iter().map(|n| (n.output, n)).collect();
+    let mut reachable: HashSet<RefId> = HashSet::new();
+    let mut frontier = vec![result];
+    while let Some(r) = frontier.pop() {
+        if !reachable.insert(r) {
+            continue;
+        }
+        if let Some(node) = by_output.get(&r) {
+            frontier.extend(node.inputs.iter().copied());
+        }
+    }
+    drop(by_output);
+    let nodes = plan
+        .nodes
+        .into_iter()
+        .filter(|n| reachable.contains(&n.output))
+        .collect();
+    Plan { nodes }
 }
 
 // ============================================================================
 // PlanBuilder
 // ============================================================================
 
-/// Handle to a Ref in the in-flight plan. PlanBuilder methods append further
-/// stmts and return new Cursors threading the minted Refs.
+/// Handle to a RefId in the in-flight plan. PlanBuilder methods append further
+/// nodes and return new Cursors threading the minted RefIds.
 #[derive(Clone, Debug)]
 pub struct PlanBuilder {
     state: Rc<RefCell<ContextState>>,
-    ref_id: Ref,
+    ref_id: RefId,
     session_id: u32,
 }
 
 impl PlanBuilder {
     /// Mint a fresh handle for `ref_id` against `state`. Captures `session_id` so the
     /// handle can be invalidated by dispatch methods (see module-level docs).
-    fn new(state: &Rc<RefCell<ContextState>>, ref_id: Ref, session_id: u32) -> Self {
+    fn new(state: &Rc<RefCell<ContextState>>, ref_id: RefId, session_id: u32) -> Self {
         Self {
             state: Rc::clone(state),
             ref_id,
@@ -379,12 +414,12 @@ impl PlanBuilder {
         }
     }
 
-    /// The Ref this builder points at.
-    pub fn ref_id(&self) -> Ref {
+    /// The RefId this builder points at.
+    pub fn ref_id(&self) -> RefId {
         self.ref_id
     }
 
-    /// The schema of the value at this Ref.
+    /// The schema of the value at this RefId.
     ///
     /// Returns an error if the builder is stale.
     pub fn schema(&self) -> Result<SchemaRef, DeltaError> {
@@ -410,12 +445,12 @@ impl PlanBuilder {
         Ok(())
     }
 
-    /// Append a unary node (`self` as sole input) and return a handle to its output Ref.
+    /// Append a unary node (`self` as sole input) and return a handle to its output RefId.
     fn push_unary(self, kind: NodeKind, schema: SchemaRef) -> Result<Self, DeltaError> {
         self.push_nary(kind, &[], schema)
     }
 
-    /// Append an n-ary node over `self` and `others`, returning a handle to its output Ref.
+    /// Append an n-ary node over `self` and `others`, returning a handle to its output RefId.
     fn push_nary(
         self,
         kind: NodeKind,
@@ -576,13 +611,16 @@ impl PlanBuilder {
     // === Load / aggregate / join / union =====================================
 
     /// File-reader transform. Output schema is `node.file_schema` plus a field per
-    /// `passthrough_columns` entry (each field's type is taken from the input schema).
+    /// `metadata_derived_columns` entry (each field's type is taken from the input schema).
     /// Computation is shared with the datafusion lowering path via
     /// `schema_expr::field_op::load_output_schema`.
     pub fn load(self, node: LoadNode) -> Result<Self, DeltaError> {
         let input_schema = self.schema()?;
-        let output_schema =
-            load_output_schema(&node.file_schema, &node.passthrough_columns, &input_schema)?;
+        let output_schema = load_output_schema(
+            &node.file_schema,
+            &node.metadata_derived_columns,
+            &input_schema,
+        )?;
         self.push_unary(NodeKind::Load(node), output_schema)
     }
 
@@ -615,7 +653,7 @@ impl PlanBuilder {
         let node = MaxByVersionNode {
             group_by,
             version_column,
-            value_columns,
+            output_schema: Arc::clone(&output_schema),
         };
         self.push_unary(NodeKind::MaxByVersion(node), output_schema)
     }
@@ -627,14 +665,15 @@ impl PlanBuilder {
         other: PlanBuilder,
         key_pairs: impl IntoIterator<Item = (impl Into<ExpressionRef>, impl Into<ExpressionRef>)>,
     ) -> Result<Self, DeltaError> {
-        let key_pairs: Vec<(ExpressionRef, ExpressionRef)> = key_pairs
+        let (left_keys, right_keys): (Vec<ExpressionRef>, Vec<ExpressionRef>) = key_pairs
             .into_iter()
             .map(|(l, r)| (l.into(), r.into()))
-            .collect();
+            .unzip();
         let output_schema = self.schema()?;
         let node = EquiJoinNode {
             kind: JoinKind::LeftAnti,
-            key_pairs,
+            left_keys,
+            right_keys,
         };
         self.push_nary(NodeKind::EquiJoin(node), &[&other], output_schema)
     }
@@ -651,7 +690,7 @@ impl PlanBuilder {
         self.union(others, true)
     }
 
-    /// Shared body: validate per-input schema equality, then push `NodeKind::Union`.
+    /// Shared body: validate per-input schema equality, then push `NodeKind::UnionAll`.
     fn union(self, others: &[PlanBuilder], ordered: bool) -> Result<Self, DeltaError> {
         let first_schema = self.schema()?;
         for o in others {
@@ -661,7 +700,7 @@ impl PlanBuilder {
         }
         let others_refs: Vec<&PlanBuilder> = others.iter().collect();
         self.push_nary(
-            NodeKind::Union(UnionNode { ordered }),
+            NodeKind::UnionAll(UnionAllNode { ordered }),
             &others_refs,
             first_schema,
         )
@@ -719,20 +758,20 @@ mod tests {
         )
     }
 
-    /// Sources mint sequential Refs with the declared output schema.
+    /// Sources mint sequential RefIds with the declared output schema.
     #[test]
     fn sources_mint_refs_and_record_schemas() {
         let ctx = Context::new();
         let v = ctx.values(id_ts_schema(), no_rows()).unwrap();
         let j = ctx.scan_json(vec![], id_ts_schema()).unwrap();
         let p = ctx.scan_parquet(vec![], id_ts_schema()).unwrap();
-        assert_eq!(v.ref_id(), Ref(0));
-        assert_eq!(j.ref_id(), Ref(1));
-        assert_eq!(p.ref_id(), Ref(2));
+        assert_eq!(v.ref_id(), RefId(0));
+        assert_eq!(j.ref_id(), RefId(1));
+        assert_eq!(p.ref_id(), RefId(2));
         assert_eq!(*v.schema().unwrap(), *id_ts_schema());
     }
 
-    /// `into_result_plan` runs DCE and returns ResultPlan with the surviving stmts.
+    /// `into_result_plan` runs DCE and returns ResultPlan with the surviving nodes.
     #[test]
     fn into_result_plan_runs_dce() {
         let ctx = Context::new();
@@ -742,9 +781,9 @@ mod tests {
         // Drop the dead branch handle so try_unwrap works and DCE removes it.
         drop(dead);
         let result_plan = ctx.into_result_plan(kept).unwrap();
-        let outputs: Vec<u32> = result_plan.plan.stmts.iter().map(|s| s.output.0).collect();
+        let outputs: Vec<u32> = result_plan.plan.nodes.iter().map(|n| n.output.0).collect();
         assert_eq!(outputs, vec![0, 2]); // src=0 + filter=2; dead values=1 dropped
-        assert_eq!(result_plan.result, Ref(2));
+        assert_eq!(result_plan.result, RefId(2));
     }
 
     /// Filter passes through schema unchanged.
@@ -1080,8 +1119,8 @@ mod tests {
         }
     }
 
-    /// `reduce` yields a `EngineRequest::Reduce` with the DCE'd stmts and the builder's terminal
-    /// Ref, the engine resumes with the reducer's finished handle, and the SM body
+    /// `reduce` yields a `EngineRequest::Reduce` with the DCE'd nodes and the builder's terminal
+    /// RefId, the engine resumes with the reducer's finished handle, and the SM body
     /// recovers the typed output.
     #[test]
     fn reduce_yields_step_reduce_and_recovers_typed_output() {
@@ -1102,14 +1141,14 @@ mod tests {
         assert_eq!(sm.step_name(), "drain");
         let token = match sm.get_step().unwrap() {
             EngineRequest::Reduce {
-                stmts,
+                nodes,
                 terminal,
                 sink,
             } => {
                 // DCE: only `values(reachable)` and `filter` remain; `_dead` is dropped.
-                let outputs: Vec<u32> = stmts.iter().map(|s| s.output.0).collect();
+                let outputs: Vec<u32> = nodes.iter().map(|n| n.output.0).collect();
                 assert_eq!(outputs, vec![1, 2]);
-                assert_eq!(terminal, Ref(2));
+                assert_eq!(terminal, RefId(2));
                 sink.token.clone()
             }
             other => panic!("expected EngineRequest::Reduce, got {other:?}"),
@@ -1128,17 +1167,17 @@ mod tests {
         assert!(sm.is_done());
     }
 
-    /// `Context::reduce` resets the Ref counter so the next source minted after
-    /// the reduce boundary starts at `Ref(0)` again. The full plan ships to the
+    /// `Context::reduce` resets the RefId counter so the next source minted after
+    /// the reduce boundary starts at `RefId(0)` again. The full plan ships to the
     /// engine and the session-id bump invalidates any held cursors, so reusing
-    /// Ref ids across the boundary is safe and keeps post-reduce Refs compact.
+    /// RefIds across the boundary is safe and keeps post-reduce RefIds compact.
     #[test]
     fn reduce_resets_ref_counter() {
         let mut sm = CoroutineSM::<u32>::new("test", |mut engine, _sm_id| async move {
             let ctx = Context::new();
             let v0 = ctx.values(id_ts_schema(), no_rows()).unwrap();
             let v1 = v0.filter(Arc::new(col("id").is_not_null())).unwrap();
-            assert_eq!(v1.ref_id(), Ref(1));
+            assert_eq!(v1.ref_id(), RefId(1));
             let _: i64 = ctx
                 .reduce(&mut engine, v1, EchoReducer { value: 0 }, "drain")
                 .await?;
@@ -1156,7 +1195,7 @@ mod tests {
             erased: Box::new(EchoReducer { value: 0 }),
         });
         match sm.submit(Ok(payload)).unwrap() {
-            NextStep::Done(v) => assert_eq!(v, 0, "post-reduce Ref must be 0"),
+            NextStep::Done(v) => assert_eq!(v, 0, "post-reduce RefId must be 0"),
             other => panic!("expected Done, got {other:?}"),
         }
     }
@@ -1258,7 +1297,7 @@ mod tests {
         }
     }
 
-    /// Plan stmt for `left_anti_join` records `[left, right]` as inputs in that order.
+    /// Plan node for `left_anti_join` records `[left, right]` as inputs in that order.
     #[test]
     fn left_anti_join_records_left_right_inputs() {
         let ctx = Context::new();
@@ -1278,10 +1317,15 @@ mod tests {
         let joined = left.left_anti_join(right, key).unwrap();
         let joined_ref = joined.ref_id();
         let plan = ctx.into_result_plan(joined).unwrap();
-        let stmt = plan.plan.node(joined_ref).unwrap();
-        assert_eq!(stmt.inputs, vec![left_ref, right_ref]);
+        let node = plan
+            .plan
+            .nodes
+            .iter()
+            .find(|n| n.output == joined_ref)
+            .unwrap();
+        assert_eq!(node.inputs, vec![left_ref, right_ref]);
         assert!(matches!(
-            stmt.kind,
+            node.kind,
             NodeKind::EquiJoin(EquiJoinNode {
                 kind: JoinKind::LeftAnti,
                 ..

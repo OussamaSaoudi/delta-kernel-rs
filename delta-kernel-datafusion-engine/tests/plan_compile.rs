@@ -13,7 +13,7 @@ use delta_kernel::arrow::array::{AsArray, RecordBatch};
 use delta_kernel::arrow::compute::concat_batches;
 use delta_kernel::arrow::datatypes::Int64Type;
 use delta_kernel::expressions::{col, lit, ColumnName, Predicate};
-use delta_kernel::plans::ir::nodes::{FileType, LoadNode, ReduceSink, ScanFileColumns};
+use delta_kernel::plans::ir::nodes::{FileType, LoadColumnInfo, LoadNode, ReduceSink};
 use delta_kernel::plans::ir::plan::ResultPlan;
 use delta_kernel::plans::state_machines::framework::plan_context::Context;
 use delta_kernel::plans::state_machines::framework::state_machine::{
@@ -145,7 +145,7 @@ async fn step_reduce_drains_plan_into_reducer_handle() {
     let builder = src.filter(Predicate::gt(col("v"), lit(2i64))).unwrap();
     let rp = ctx.into_result_plan(builder).unwrap();
     let terminal = rp.result;
-    let stmts = rp.plan.stmts;
+    let nodes = rp.plan.nodes;
 
     let sink = ReduceSink::new_reducer(SumRowsReducer::new("plan.reduce_test"));
     let token = sink.token.clone();
@@ -153,7 +153,7 @@ async fn step_reduce_drains_plan_into_reducer_handle() {
     let executor = DataFusionExecutor::try_new().unwrap();
     let payload = executor
         .execute_step(EngineRequest::Reduce {
-            stmts,
+            nodes,
             terminal,
             sink,
         })
@@ -176,7 +176,7 @@ async fn step_reduce_drains_plan_into_reducer_handle() {
 }
 
 /// `NodeKind::Load` reads each upstream row's path-column file in `file_type`, broadcasts the
-/// `passthrough_columns` onto every emitted file row, and lifts the `file_schema` columns
+/// `metadata_derived_columns` onto every emitted file row, and lifts the `file_schema` columns
 /// alongside. Verifies the `NodeKind::Load(LoadNode { ... })` lowering: the engine reads the
 /// `LoadNode` payload directly and threads a `LoadTableProvider`/`LoadExec` into the compiled
 /// `LogicalPlan`.
@@ -218,11 +218,11 @@ async fn load_node_reads_files_and_broadcasts_passthrough() {
             file_schema,
             file_type: FileType::Parquet,
             base_url: Some(base_url),
-            passthrough_columns: vec![ColumnName::new(["tag"])],
-            file_meta: ScanFileColumns {
-                path: ColumnName::new(["path"]),
-                size: None,
-                record_count: None,
+            metadata_derived_columns: vec![ColumnName::new(["tag"])],
+            file_meta: LoadColumnInfo {
+                path_column: ColumnName::new(["path"]),
+                file_size_column: None,
+                num_records_column: None,
             },
             dv_ref: None,
         })
@@ -243,8 +243,8 @@ async fn load_node_reads_files_and_broadcasts_passthrough() {
 }
 
 /// `MaxByVersion` keeps the row with the largest `version` per group key, narrowed to the
-/// declared `value_columns` (group_by exprs are aggregation-internal and do NOT appear in
-/// the output).
+/// declared `output_schema` fields (group_by exprs are aggregation-internal and do NOT appear
+/// in the output).
 #[test]
 fn max_by_version_keeps_top_row_per_group_and_narrows_to_value_columns() {
     let ctx = Context::new();
@@ -266,7 +266,7 @@ fn max_by_version_keeps_top_row_per_group_and_narrows_to_value_columns() {
     let rp = ctx.into_result_plan(builder).unwrap();
 
     let batch = run_to_one_batch(rp);
-    // Output is `value_columns` only.
+    // Output is `output_schema` fields only.
     assert_eq!(batch.schema().fields().len(), 1);
     assert_eq!(batch.schema().field(0).name(), "payload");
     let payloads: HashSet<i64> = long_col(&batch, "payload").into_iter().collect();

@@ -88,27 +88,27 @@ pub(crate) fn narrow_schema_to(
 }
 
 /// Build the output schema for a `NodeKind::Load`: `file_schema`'s fields followed by one
-/// field per `passthrough_columns` entry, with the passthrough type resolved by walking
-/// `input_schema` and the passthrough name taken from the column path's leaf.
+/// field per `metadata_derived_columns` entry, with each column's type resolved by walking
+/// `input_schema` and its name taken from the column path's leaf.
 ///
 /// Used by both kernel-side builder validation (`PlanBuilder::load`) and engine-side
 /// lowering (`delta-kernel-datafusion-engine`'s `lower_load`) so the rule stays one place.
 pub fn load_output_schema(
     file_schema: &StructType,
-    passthrough_columns: &[ColumnName],
+    metadata_derived_columns: &[ColumnName],
     input_schema: &StructType,
 ) -> SchemaExprResult<SchemaRef> {
     let mut fields: Vec<StructField> = file_schema.fields().cloned().collect();
-    for col in passthrough_columns {
+    for col in metadata_derived_columns {
         let leaf_name = col
             .path()
             .last()
-            .ok_or_else(|| field_err!("load: passthrough column path is empty"))?
+            .ok_or_else(|| field_err!("load: metadata-derived column path is empty"))?
             .clone();
         let walk = input_schema.walk_column_fields(col)?;
         let leaf = walk
             .last()
-            .ok_or_else(|| field_err!("load: passthrough column resolved to empty path"))?;
+            .ok_or_else(|| field_err!("load: metadata-derived column resolved to empty path"))?;
         fields.push(StructField::nullable(leaf_name, leaf.data_type().clone()));
     }
     arc_struct_or_invariant(fields)
