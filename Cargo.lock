@@ -437,7 +437,6 @@ dependencies = [
  "arrow-select 58.3.0",
  "flatbuffers",
  "lz4_flex 0.13.1",
- "zstd",
 ]
 
 [[package]]
@@ -1281,6 +1280,7 @@ dependencies = [
  "arrow 58.3.0",
  "arrow-schema 58.3.0",
  "async-trait",
+ "bytes",
  "chrono",
  "datafusion-catalog",
  "datafusion-catalog-listing",
@@ -1307,11 +1307,12 @@ dependencies = [
  "datafusion-session",
  "datafusion-sql",
  "futures",
- "indexmap",
  "itertools 0.14.0",
  "log",
  "object_store 0.13.2",
  "parking_lot",
+ "rand 0.9.4",
+ "regex",
  "sqlparser 0.61.0",
  "tempfile",
  "tokio",
@@ -1367,22 +1368,21 @@ dependencies = [
 name = "datafusion-common"
 version = "53.1.0"
 dependencies = [
+ "ahash",
  "arrow 58.3.0",
  "arrow-ipc 58.3.0",
- "arrow-schema 58.3.0",
  "chrono",
- "foldhash 0.2.0",
  "half",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
  "indexmap",
  "itertools 0.14.0",
  "libc",
  "log",
  "object_store 0.13.2",
  "parquet 58.3.0",
+ "paste",
  "sqlparser 0.61.0",
  "tokio",
- "uuid",
  "web-time",
 ]
 
@@ -1417,7 +1417,6 @@ dependencies = [
  "itertools 0.14.0",
  "log",
  "object_store 0.13.2",
- "parking_lot",
  "rand 0.9.4",
  "tokio",
  "url",
@@ -1483,6 +1482,7 @@ dependencies = [
  "datafusion-session",
  "futures",
  "object_store 0.13.2",
+ "serde_json",
  "tokio",
  "tokio-stream",
 ]
@@ -1492,7 +1492,6 @@ name = "datafusion-datasource-parquet"
 version = "53.1.0"
 dependencies = [
  "arrow 58.3.0",
- "arrow-schema 58.3.0",
  "async-trait",
  "bytes",
  "datafusion-common",
@@ -1500,7 +1499,6 @@ dependencies = [
  "datafusion-datasource",
  "datafusion-execution",
  "datafusion-expr",
- "datafusion-functions",
  "datafusion-functions-aggregate-common",
  "datafusion-physical-expr",
  "datafusion-physical-expr-adapter",
@@ -1528,6 +1526,7 @@ dependencies = [
  "arrow 58.3.0",
  "arrow-buffer 58.3.0",
  "async-trait",
+ "chrono",
  "dashmap",
  "datafusion-common",
  "datafusion-expr",
@@ -1546,7 +1545,6 @@ name = "datafusion-expr"
 version = "53.1.0"
 dependencies = [
  "arrow 58.3.0",
- "arrow-schema 58.3.0",
  "async-trait",
  "chrono",
  "datafusion-common",
@@ -1557,6 +1555,7 @@ dependencies = [
  "datafusion-physical-expr-common",
  "indexmap",
  "itertools 0.14.0",
+ "paste",
  "serde_json",
  "sqlparser 0.61.0",
 ]
@@ -1569,6 +1568,7 @@ dependencies = [
  "datafusion-common",
  "indexmap",
  "itertools 0.14.0",
+ "paste",
 ]
 
 [[package]]
@@ -1586,7 +1586,6 @@ dependencies = [
  "datafusion-expr",
  "datafusion-expr-common",
  "datafusion-macros",
- "datafusion-physical-expr-common",
  "hex",
  "itertools 0.14.0",
  "log",
@@ -1594,6 +1593,7 @@ dependencies = [
  "num-traits",
  "rand 0.9.4",
  "regex",
+ "unicode-segmentation",
  "uuid",
 ]
 
@@ -1601,6 +1601,7 @@ dependencies = [
 name = "datafusion-functions-aggregate"
 version = "53.1.0"
 dependencies = [
+ "ahash",
  "arrow 58.3.0",
  "datafusion-common",
  "datafusion-doc",
@@ -1610,16 +1611,17 @@ dependencies = [
  "datafusion-macros",
  "datafusion-physical-expr",
  "datafusion-physical-expr-common",
- "foldhash 0.2.0",
  "half",
  "log",
  "num-traits",
+ "paste",
 ]
 
 [[package]]
 name = "datafusion-functions-aggregate-common"
 version = "53.1.0"
 dependencies = [
+ "ahash",
  "arrow 58.3.0",
  "datafusion-common",
  "datafusion-expr-common",
@@ -1652,11 +1654,11 @@ dependencies = [
  "datafusion-functions-aggregate-common",
  "datafusion-macros",
  "datafusion-physical-expr-common",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
  "itertools 0.14.0",
  "itoa",
  "log",
- "memchr",
+ "paste",
 ]
 
 [[package]]
@@ -1670,6 +1672,7 @@ dependencies = [
  "datafusion-expr",
  "datafusion-physical-plan",
  "parking_lot",
+ "paste",
 ]
 
 [[package]]
@@ -1685,6 +1688,7 @@ dependencies = [
  "datafusion-physical-expr",
  "datafusion-physical-expr-common",
  "log",
+ "paste",
 ]
 
 [[package]]
@@ -1725,6 +1729,7 @@ dependencies = [
 name = "datafusion-physical-expr"
 version = "53.1.0"
 dependencies = [
+ "ahash",
  "arrow 58.3.0",
  "datafusion-common",
  "datafusion-expr",
@@ -1732,11 +1737,12 @@ dependencies = [
  "datafusion-functions-aggregate-common",
  "datafusion-physical-expr-common",
  "half",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
  "indexmap",
  "itertools 0.14.0",
  "parking_lot",
- "petgraph",
+ "paste",
+ "petgraph 0.8.3",
  "tokio",
 ]
 
@@ -1757,15 +1763,15 @@ dependencies = [
 name = "datafusion-physical-expr-common"
 version = "53.1.0"
 dependencies = [
+ "ahash",
  "arrow 58.3.0",
  "chrono",
  "datafusion-common",
  "datafusion-expr-common",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
  "indexmap",
  "itertools 0.14.0",
  "parking_lot",
- "pin-project",
 ]
 
 [[package]]
@@ -1788,9 +1794,8 @@ dependencies = [
 name = "datafusion-physical-plan"
 version = "53.1.0"
 dependencies = [
+ "ahash",
  "arrow 58.3.0",
- "arrow-data 58.3.0",
- "arrow-ipc 58.3.0",
  "arrow-ord 58.3.0",
  "arrow-schema 58.3.0",
  "async-trait",
@@ -1805,7 +1810,7 @@ dependencies = [
  "datafusion-physical-expr-common",
  "futures",
  "half",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
  "indexmap",
  "itertools 0.14.0",
  "log",
@@ -1826,6 +1831,7 @@ dependencies = [
  "datafusion-physical-expr",
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
+ "itertools 0.14.0",
  "log",
 ]
 
@@ -2014,12 +2020,15 @@ name = "delta_kernel_ffi"
 version = "0.21.0"
 dependencies = [
  "cbindgen",
+ "delta-kernel-datafusion-engine",
  "delta-kernel-unity-catalog",
  "delta_kernel",
  "delta_kernel_ffi_macros",
  "itertools 0.14.0",
  "libc",
  "paste",
+ "prost 0.13.5",
+ "prost-build",
  "rand 0.9.4",
  "rstest",
  "serde",
@@ -2562,17 +2571,17 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash 0.2.0",
-]
 
 [[package]]
 name = "hdfs-native"
@@ -2602,8 +2611,8 @@ dependencies = [
  "md-5",
  "num-traits",
  "once_cell",
- "prost",
- "prost-types",
+ "prost 0.14.3",
+ "prost-types 0.14.3",
  "rand 0.9.4",
  "regex",
  "roxmltree",
@@ -3351,6 +3360,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "multimap"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
+
+[[package]]
 name = "native-tls"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3681,6 +3696,16 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "petgraph"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3672b37090dbd86368a4145bc067582552b29c27377cad4e0a306c97f9bd7772"
+dependencies = [
+ "fixedbitset",
+ "indexmap",
+]
+
+[[package]]
+name = "petgraph"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
@@ -3707,26 +3732,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06005508882fb681fd97892ecff4b7fd0fee13ef1aa569f8695dae7ab9099981"
 dependencies = [
  "siphasher",
-]
-
-[[package]]
-name = "pin-project"
-version = "1.1.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbf0d9e68100b3a7989b4901972f265cd542e560a3a8a724e1e20322f4d06ce9"
-dependencies = [
- "pin-project-internal",
-]
-
-[[package]]
-name = "pin-project-internal"
-version = "1.1.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a990e22f43e84855daf260dded30524ef4a9021cc7541c26540500a50b624389"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -3864,12 +3869,55 @@ dependencies = [
 
 [[package]]
 name = "prost"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
+dependencies = [
+ "bytes",
+ "prost-derive 0.13.5",
+]
+
+[[package]]
+name = "prost"
 version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2ea70524a2f82d518bce41317d0fae74151505651af45faf1ffbd6fd33f0568"
 dependencies = [
  "bytes",
- "prost-derive",
+ "prost-derive 0.14.3",
+]
+
+[[package]]
+name = "prost-build"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
+dependencies = [
+ "heck",
+ "itertools 0.14.0",
+ "log",
+ "multimap",
+ "once_cell",
+ "petgraph 0.7.1",
+ "prettyplease",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "regex",
+ "syn 2.0.117",
+ "tempfile",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
+dependencies = [
+ "anyhow",
+ "itertools 0.14.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3887,11 +3935,20 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
+dependencies = [
+ "prost 0.13.5",
+]
+
+[[package]]
+name = "prost-types"
 version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
 dependencies = [
- "prost",
+ "prost 0.14.3",
 ]
 
 [[package]]

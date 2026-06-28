@@ -40,6 +40,10 @@ impl FileListingTableProvider {
 
 #[async_trait::async_trait]
 impl TableProvider for FileListingTableProvider {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn schema(&self) -> Arc<ArrowSchema> {
         Arc::clone(&self.schema)
     }

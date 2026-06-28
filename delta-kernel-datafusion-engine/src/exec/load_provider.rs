@@ -86,6 +86,10 @@ impl std::fmt::Debug for LoadTableProvider {
 
 #[async_trait]
 impl TableProvider for LoadTableProvider {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn schema(&self) -> ArrowSchemaRef {
         Arc::clone(&self.output_schema)
     }

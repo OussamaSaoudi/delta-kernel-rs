@@ -251,7 +251,6 @@ impl DataFusionExecutor {
         let mut stream = physical.execute(0, Arc::clone(&self.task_ctx))?;
         while let Some(batch) = stream.try_next().await? {
             let arrow = ArrowEngineData::new(batch);
-            throw error; //valid
             match handle.apply(&arrow).map_err(wrap_delta_err)? {
                 KdfControl::Continue => {}
                 KdfControl::Break => break,

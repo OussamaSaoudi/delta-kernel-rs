@@ -111,11 +111,9 @@ impl ExecutionPlan for FileListingExec {
         vec![]
     }
 
-    fn apply_expressions(
-        &self,
-        _f: &mut dyn FnMut(&dyn PhysicalExpr) -> DfResult<TreeNodeRecursion>,
-    ) -> DfResult<TreeNodeRecursion> {
-        Ok(TreeNodeRecursion::Continue)
+    // TODO(duckdb M1): apply_expressions removed in the available fork; as_any now required.
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn with_new_children(

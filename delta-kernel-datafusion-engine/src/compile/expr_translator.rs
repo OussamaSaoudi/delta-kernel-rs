@@ -15,13 +15,13 @@ use datafusion_common::arrow::datatypes::{
 };
 use datafusion_common::error::DataFusionError;
 use datafusion_common::{Column, ScalarValue};
-use datafusion_expr::expr::{BinaryExpr, Case, InList, LambdaVariable};
-use datafusion_expr::expr_fn::{cast, lambda};
+use datafusion_expr::expr::{BinaryExpr, Case, InList};
+use datafusion_expr::expr_fn::cast;
 use datafusion_expr::{lit, Expr, Operator};
 use datafusion_functions::core::expr_fn::{
     coalesce, get_field, named_struct, r#struct as make_struct,
 };
-use datafusion_functions_nested::expr_fn::{array_transform, make_array};
+use datafusion_functions_nested::expr_fn::make_array;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::expressions::{
     BinaryExpression, BinaryExpressionOp, BinaryPredicate, BinaryPredicateOp, ColumnName,
@@ -642,14 +642,14 @@ fn rebuild_list_with_target_element(
     if !field_needs_rename(src_elem.data_type(), tgt_elem_dt) {
         return Ok(list_expr);
     }
-    let lambda_field = Arc::new(ArrowField::new(
-        "x",
-        src_elem.data_type().clone(),
-        src_elem.is_nullable(),
-    ));
-    let lambda_var = Expr::LambdaVariable(LambdaVariable::new("x".to_string(), Some(lambda_field)));
-    let body = rebuild_field_for_target(lambda_var, src_elem.data_type(), tgt_elem_dt)?;
-    Ok(array_transform(list_expr, lambda(["x"], body)))
+    // TODO(duckdb M1): nested-LIST column-mapping reshape used `array_transform` + lambda
+    // expressions (`Expr::LambdaVariable` / `lambda` / `array_transform`) that aren't present in
+    // the available datafusion fork. This path is only hit for tables with nested LIST columns
+    // under column mapping that require a field rename -- not exercised by the M1 metadata scan.
+    // Restore once the lambda-bearing fork is available.
+    Err(DataFusionError::NotImplemented(
+        "nested-list column-mapping reshape is unsupported in this build (M1)".to_string(),
+    ))
 }
 
 /// True when reshaping `source_dt` to `target_dt` would change a struct field name

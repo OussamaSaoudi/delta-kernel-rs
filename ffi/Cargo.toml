@@ -28,10 +28,19 @@ delta_kernel = { path = "../kernel", default-features = false, features = [
 delta_kernel_ffi_macros = { path = "../ffi-proc-macros", version = "0.21.0" }
 delta-kernel-unity-catalog = { path = "../delta-kernel-unity-catalog", optional = true }
 unity-catalog-delta-client-api = { path = "../unity-catalog-delta-client-api", optional = true }
+# Phase-1 DuckDB plan-driven scan shim (feature = "duckdb"): execute the scan-metadata
+# ResultPlan via the DataFusion engine and a tokio runtime to drive the `!Send` SM future.
+delta-kernel-datafusion-engine = { path = "../delta-kernel-datafusion-engine", optional = true }
+tokio = { version = "1.47", optional = true, features = ["full"] }
+# Phase-2: proto-encoded ResultPlan over FFI (prost runtime for the generated plan-IR types).
+prost = { version = "0.13", optional = true }
 
 [build-dependencies]
 cbindgen = "0.29.2"
 libc = "0.2.175"
+# Phase-2: compile proto/*.proto into Rust types (only invoked when the `duckdb` feature is on;
+# build.rs gates on CARGO_FEATURE_DUCKDB). Requires `protoc` on PATH.
+prost-build = "0.13"
 
 [dev-dependencies]
 paste = "1.0"
@@ -62,3 +71,15 @@ default-engine-base = ["delta_kernel/default-engine-base"]
 tracing = [ "tracing-core", "tracing-subscriber" ]
 internal-api = []
 test-ffi = []
+
+# Phase-1 DuckDB plan-based scan: exposes the `kdf_scan_*` FFI that drives the kernel's
+# declarative scan-metadata state machine through the DataFusion engine. Pulls in the
+# declarative-plans IR, the default (rustls) engine for IO, and a tokio runtime.
+duckdb = [
+  "dep:delta-kernel-datafusion-engine",
+  "dep:tokio",
+  "dep:prost",
+  "delta_kernel/declarative-plans",
+  "default-engine-rustls",
+  "arrow",
+]

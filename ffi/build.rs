@@ -18,6 +18,29 @@ fn get_target_dir(manifest_dir: &str) -> PathBuf {
 }
 
 fn main() {
+    // Re-run (and thus regenerate the cbindgen headers) whenever the crate source changes. Without
+    // this, emitting any `rerun-if-changed` below would pin build.rs to only those paths and leave
+    // the generated headers stale after src edits.
+    println!("cargo:rerun-if-changed=src");
+
+    // Phase-2 (DuckDB plan-based scan): compile the plan-IR proto schema into Rust types when the
+    // `duckdb` feature is enabled. Requires `protoc` on PATH. Generated files land in OUT_DIR and
+    // are included by `src/duckdb/proto.rs`.
+    if env::var("CARGO_FEATURE_DUCKDB").is_ok() {
+        println!("cargo:rerun-if-changed=proto/plan.proto");
+        println!("cargo:rerun-if-changed=proto/expressions.proto");
+        println!("cargo:rerun-if-changed=proto/schema.proto");
+        prost_build::compile_protos(
+            &[
+                "proto/plan.proto",
+                "proto/expressions.proto",
+                "proto/schema.proto",
+            ],
+            &["proto"],
+        )
+        .expect("prost-build: failed to compile plan-IR proto schema");
+    }
+
     let crate_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
     let package_name = env::var("CARGO_PKG_NAME").expect("CARGO_PKG_NAME should be set");
     let target_dir = get_target_dir(crate_dir.as_str());

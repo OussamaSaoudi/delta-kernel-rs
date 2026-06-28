@@ -192,11 +192,10 @@ impl ExecutionPlan for LoadExec {
         vec![&self.upstream]
     }
 
-    fn apply_expressions(
-        &self,
-        _f: &mut dyn FnMut(&dyn PhysicalExpr) -> DfResult<TreeNodeRecursion>,
-    ) -> DfResult<TreeNodeRecursion> {
-        Ok(TreeNodeRecursion::Continue)
+    // TODO(duckdb M1): the dev datafusion fork had ExecutionPlan::apply_expressions; the
+    // available fork drops it and requires as_any. Not exercised by the M1 metadata scan.
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn with_new_children(

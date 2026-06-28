@@ -48,6 +48,10 @@ impl StampFieldUdf {
 }
 
 impl ScalarUDFImpl for StampFieldUdf {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn name(&self) -> &str {
         "kernel_stamp_field"
     }

@@ -53,6 +53,8 @@ pub mod expressions;
 #[cfg(feature = "tracing")]
 pub mod ffi_tracing;
 pub mod log_path;
+#[cfg(feature = "duckdb")]
+pub mod duckdb;
 pub mod scan;
 pub mod schema;
 pub mod schema_visitor;

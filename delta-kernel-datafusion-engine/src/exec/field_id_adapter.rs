@@ -50,7 +50,7 @@ pub(crate) struct FieldIdPhysicalExprAdapter {
 impl PhysicalExprAdapter for FieldIdPhysicalExprAdapter {
     fn rewrite(&self, expr: Arc<dyn PhysicalExpr>) -> DfResult<Arc<dyn PhysicalExpr>> {
         expr.transform(|e| {
-            if let Some(column) = e.downcast_ref::<Column>() {
+            if let Some(column) = e.as_any().downcast_ref::<Column>() {
                 return Ok(Transformed::yes(self.rewrite_column(column)?));
             }
             Ok(Transformed::no(e))
@@ -138,9 +138,12 @@ impl FieldIdPhysicalExprAdapter {
             renamed_field: Arc::clone(&renamed_physical_field),
             rename_target: Arc::new(renamed_kernel_type),
         });
-        Ok(Arc::new(CastExpr::new_with_target_field(
+        // TODO(duckdb M1): dev fork had CastExpr::new_with_target_field (carried the target
+        // Field for nested renames); the available fork only has new(expr, data_type, opts).
+        // Field-id adaptation is not exercised by the M1 metadata scan (JSON-commit reads).
+        Ok(Arc::new(CastExpr::new(
             rename_expr,
-            Arc::new(logical_field.clone()),
+            logical_field.data_type().clone(),
             None,
         )))
     }
@@ -224,6 +227,10 @@ impl fmt::Display for RenameNestedFieldsByIdExpr {
 }
 
 impl PhysicalExpr for RenameNestedFieldsByIdExpr {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn data_type(&self, _input_schema: &Schema) -> DfResult<DataType> {
         Ok(self.renamed_field.data_type().clone())
     }

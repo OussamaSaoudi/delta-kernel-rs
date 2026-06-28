@@ -282,14 +282,12 @@ pub(crate) fn build_file_source(
     let file_arrow_schema: ArrowSchemaRef = Arc::new(
         ArrowSchema::new(stripped_file_fields).with_metadata(full_schema.metadata().clone()),
     );
-    let mut table_schema = TableSchema::new(file_arrow_schema, passthrough_fields.to_vec());
-    if include_row_number && file_type == FileType::Parquet {
-        let virt_field: FieldRef = Arc::new(
-            ArrowField::new(ROW_NUMBER_COL, ArrowDataType::Int64, false)
-                .with_extension_type(RowNumber),
-        );
-        table_schema = table_schema.with_virtual_columns(vec![virt_field]);
-    }
+    let table_schema = TableSchema::new(file_arrow_schema, passthrough_fields.to_vec());
+    // TODO(duckdb M1): the dev datafusion fork exposed TableSchema::with_virtual_columns to
+    // register the parquet `_row_number` virtual column; the available fork moved virtual-column
+    // wiring onto the parquet source / FileScanConfigBuilder. The row-number virtual column is
+    // only needed by the data/DV Load path, not the M1 metadata scan, so it is skipped here.
+    let _ = include_row_number;
     let source: Arc<dyn FileSource> = match file_type {
         FileType::Parquet => Arc::new(ParquetSource::new(table_schema)),
         FileType::Json => Arc::new(JsonSource::new(table_schema)),
