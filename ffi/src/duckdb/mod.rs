@@ -485,13 +485,14 @@ fn result_plan_sql(path: &str, version: i64) -> Result<String, String> {
     }
     let scan_file_row_ref = *load.inputs.first().ok_or("data Load has no input")?;
 
-    // Materialize any runtime-file-list Loads in the lowered range (e.g. sidecar reads, whose file
-    // list comes from the manifest scan). Execute each such Load's input subplan via DataFusion to
-    // resolve the concrete files, then rewrite that input to a Values node so it lowers to a static
-    // read_parquet.
+    // No peel: lower the FULL plan. Sidecar/manifest runtime Loads (indices below scan_file_row, in
+    // the reconciliation) are still materialized to static read_parquet; the terminal data Load
+    // (above scan_file_row) keeps its runtime `scan_file_row` input and lowers to the `delta_load`
+    // table function (delta_load_sql), which streams it and applies DV + partitions per file.
+    let result_ref = rp.result;
     let mut plan = rp.plan;
     materialize_runtime_loads(&mut plan, &executor, &runtime, scan_file_row_ref)?;
-    super::duckdb::plan_to_sql::result_plan_to_sql_until(&plan, scan_file_row_ref)
+    super::duckdb::plan_to_sql::result_plan_to_sql_until(&plan, result_ref)
 }
 
 /// Minimal JSON string escaping for the load-node params payload.

@@ -225,10 +225,10 @@ fn load_sql(node: &PlanNode, n: &delta_kernel::plans::ir::nodes::LoadNode, plan:
     let input_idx = node.inputs[0].0 as usize;
     let input = plan.nodes.get(input_idx).ok_or("Load: missing input node")?;
     let NodeKind::Values(vals) = &input.kind else {
-        return Err(format!(
-            "Load input is a runtime relation ({}); needs file-list materialization",
-            input.kind
-        ));
+        // Runtime-relation input (the data-stage Load's `scan_file_row`): lower to the `delta_load`
+        // table function, which streams the input rows and reads each file as a concurrent
+        // sink+source operator (intra-file parallelism; DV + partition broadcast applied per file).
+        return delta_load_sql(node, n);
     };
     let vfields: Vec<&delta_kernel::schema::StructField> = vals.schema.fields().collect();
     let field_idx = |name: &str| {
@@ -320,6 +320,52 @@ fn load_sql(node: &PlanNode, n: &delta_kernel::plans::ir::nodes::LoadNode, plan:
         selects.push(format!("SELECT {file_cols}{bcast_sql} FROM {}", reader(&full)?));
     }
     Ok(selects.join("\nUNION ALL BY NAME\n"))
+}
+
+/// Lower a `Load` with a runtime-relation input to the `delta_load` table function. The input CTE
+/// streams one file-descriptor row per file; `delta_load` opens each file (`file_type` / `base_url`),
+/// reads `file_schema`, applies the per-row deletion vector (`dv_column`/`dv_kind`), and broadcasts
+/// metadata-derived columns. This is the faithful, generic realization of the kernel `Load` IR node.
+fn delta_load_sql(node: &PlanNode, n: &delta_kernel::plans::ir::nodes::LoadNode) -> R<String> {
+    use delta_kernel::plans::ir::nodes::DvKind;
+    let file_type = match n.file_type {
+        FileType::Parquet => "parquet",
+        FileType::Json => "json",
+    };
+    // file_schema rendered as a DuckDB STRUCT type so the operator knows the read columns/types.
+    let fields = n
+        .file_schema
+        .fields()
+        .map(|f| Ok(format!("{} {}", quote_ident(f.name()), datatype_sql(&f.data_type())?)))
+        .collect::<R<Vec<_>>>()?
+        .join(", ");
+    let file_schema = format!("STRUCT({fields})").replace('\'', "''");
+    let path_col = n.file_meta.path_column.path();
+    if path_col.len() != 1 {
+        return Err("delta_load path_column must be a top-level column".into());
+    }
+    let mut args = vec![
+        cte(node.inputs[0]),
+        format!("file_type := '{file_type}'"),
+        format!("file_schema := '{file_schema}'"),
+        format!("path_column := '{}'", path_col[0].replace('\'', "''")),
+    ];
+    if let Some(u) = &n.base_url {
+        args.push(format!("base_url := '{}'", u.as_str().replace('\'', "''")));
+    }
+    if let Some(dv) = &n.dv_ref {
+        let dvc = dv.column.path();
+        if dvc.len() != 1 {
+            return Err("delta_load dv_column must be a top-level column".into());
+        }
+        let kind = match dv.kind {
+            DvKind::Descriptor => "descriptor",
+            DvKind::Bytes => "bytes",
+        };
+        args.push(format!("dv_column := '{}'", dvc[0].replace('\'', "''")));
+        args.push(format!("dv_kind := '{kind}'"));
+    }
+    Ok(format!("SELECT * FROM delta_load({})", args.join(", ")))
 }
 
 fn resolve_url(base: Option<&url::Url>, rel: &str) -> R<String> {

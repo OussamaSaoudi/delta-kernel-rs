@@ -44,9 +44,11 @@ fn dump_scan_sql() {
     assert!(matches!(term.kind, NodeKind::Project(_)));
     assert!(matches!(load.kind, NodeKind::Load(_)));
 
+    let result_ref = rp.result;
     delta_kernel_ffi::duckdb::materialize_runtime_loads(&mut plan, &executor, &rt, sfr).unwrap();
 
-    match result_plan_to_sql_until(&plan, sfr) {
+    // Full plan (no peel): the data Load lowers to delta_load(<scan_file_row cte>, ...).
+    match result_plan_to_sql_until(&plan, result_ref) {
         Ok(sql) => println!("=== BEGIN SQL ===\n{sql}\n=== END SQL ==="),
         Err(e) => println!("=== SQL LOWERING ERROR ===\n{e}"),
     }
