@@ -368,6 +368,24 @@ fn delta_load_sql(node: &PlanNode, n: &delta_kernel::plans::ir::nodes::LoadNode)
         args.push(format!("dv_column := '{}'", dvc[0].replace('\'', "''")));
         args.push(format!("dv_kind := '{kind}'"));
     }
+    // metadata_derived_columns: top-level input columns whose value is broadcast onto every output
+    // row (e.g. `fileConstantValues` for the data Load — the terminal projection extracts partition
+    // values from it; `version` for table-changes). The operator outputs file_schema + these columns.
+    if !n.metadata_derived_columns.is_empty() {
+        let cols = n
+            .metadata_derived_columns
+            .iter()
+            .map(|c| {
+                let p = c.path();
+                if p.len() != 1 {
+                    return Err("delta_load metadata_derived must be top-level columns".to_string());
+                }
+                Ok(format!("'{}'", p[0].replace('\'', "''")))
+            })
+            .collect::<R<Vec<_>>>()?
+            .join(", ");
+        args.push(format!("metadata_derived := [{cols}]"));
+    }
     Ok(format!("SELECT * FROM delta_load({})", args.join(", ")))
 }
 
