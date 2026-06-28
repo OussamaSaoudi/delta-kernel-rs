@@ -27,6 +27,7 @@ use url::Url;
 
 pub mod plan_to_sql;
 pub mod proto;
+pub mod sm;
 pub mod proto_convert;
 
 /// One surviving data file produced by the plan-driven scan.
@@ -46,13 +47,13 @@ pub struct KdfScan {
 
 /// Build a local-filesystem-backed kernel default engine. M1 targets on-disk tables; cloud
 /// credential threading (reusing duckdb-delta's `CreateBuilder`) lands in a later milestone.
-fn build_local_engine() -> Arc<dyn Engine> {
+pub(crate) fn build_local_engine() -> Arc<dyn Engine> {
     Arc::new(DefaultEngineBuilder::new(Arc::new(LocalFileSystem::new())).build())
 }
 
 /// Resolve a user-supplied table location to a `Url`. Accepts an existing URL (e.g. `file://`,
 /// `s3://`) or a local filesystem path, which is canonicalized into a `file://` directory URL.
-fn table_url(path: &str) -> Result<Url, String> {
+pub(crate) fn table_url(path: &str) -> Result<Url, String> {
     if let Ok(url) = Url::parse(path) {
         // Treat single-character "schemes" as Windows drive letters, not URL schemes.
         if url.scheme().len() > 1 {
@@ -128,7 +129,7 @@ fn enumerate_files(path: &str) -> Result<Vec<KdfFileRow>, String> {
 ///
 /// # Safety
 /// `out_err`, if non-null, must point to a writable `*mut c_char`.
-unsafe fn write_err(out_err: *mut *mut c_char, msg: &str) {
+pub(crate) unsafe fn write_err(out_err: *mut *mut c_char, msg: &str) {
     if out_err.is_null() {
         return;
     }
@@ -466,10 +467,19 @@ fn result_plan_sql(path: &str, version: i64) -> Result<String, String> {
         .block_on(executor.drive_to_completion(sm))
         .map_err(|e| format!("drive scan SM to ResultPlan: {e}"))?;
 
-    // Peel the data stage: terminal `Project` <- data `Load` <- `scan_file_row`. Lower up to
-    // `scan_file_row`; DuckDB then reads the parquet and the C++ MultiFileReader applies DV +
-    // partitions per file (the data `Load` + final logical projection are NOT lowered to SQL --
-    // DV row-masking can't be expressed in SQL).
+    finalize_result_plan_to_sql(rp, &executor, &runtime)
+}
+
+/// Turn a driven `ResultPlan` into the data-stage DuckDB SQL: validate the terminal
+/// `Project <- Load <- scan_file_row` shape, materialize the reconciliation's runtime Loads
+/// (sidecars/manifests) to static `read_parquet`, and lower the full plan. The terminal data
+/// `Load` keeps its runtime `scan_file_row` input and lowers to the `delta_load` table function.
+/// Shared by the legacy in-kernel driver (`result_plan_sql`) and the C++-driven SM SDK (`sm.rs`).
+pub(crate) fn finalize_result_plan_to_sql(
+    rp: delta_kernel::plans::ir::plan::ResultPlan,
+    executor: &DataFusionExecutor,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<String, String> {
     use delta_kernel::plans::ir::nodes::NodeKind;
     let nodes = &rp.plan.nodes;
     let term = nodes
@@ -485,13 +495,9 @@ fn result_plan_sql(path: &str, version: i64) -> Result<String, String> {
     }
     let scan_file_row_ref = *load.inputs.first().ok_or("data Load has no input")?;
 
-    // No peel: lower the FULL plan. Sidecar/manifest runtime Loads (indices below scan_file_row, in
-    // the reconciliation) are still materialized to static read_parquet; the terminal data Load
-    // (above scan_file_row) keeps its runtime `scan_file_row` input and lowers to the `delta_load`
-    // table function (delta_load_sql), which streams it and applies DV + partitions per file.
     let result_ref = rp.result;
     let mut plan = rp.plan;
-    materialize_runtime_loads(&mut plan, &executor, &runtime, scan_file_row_ref)?;
+    materialize_runtime_loads(&mut plan, executor, runtime, scan_file_row_ref)?;
     super::duckdb::plan_to_sql::result_plan_to_sql_until(&plan, result_ref)
 }
 
