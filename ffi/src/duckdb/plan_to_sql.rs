@@ -353,6 +353,9 @@ fn delta_load_sql(node: &PlanNode, n: &delta_kernel::plans::ir::nodes::LoadNode)
         FileType::Json => "json",
     };
     // file_schema rendered as a DuckDB STRUCT type so the operator knows the read columns/types.
+    // For column-mapping tables these are the *physical* names; the terminal Transform renames them
+    // to logical. The parquet read is mapped by field id (below) so it is robust to physical-name
+    // drift, per the Delta column-mapping spec.
     let fields = n
         .file_schema
         .fields()
@@ -360,6 +363,20 @@ fn delta_load_sql(node: &PlanNode, n: &delta_kernel::plans::ir::nodes::LoadNode)
         .collect::<R<Vec<_>>>()?
         .join(", ");
     let file_schema = format!("STRUCT({fields})").replace('\'', "''");
+
+    // Per-column Delta column-mapping field ids (delta.columnMapping.id) from the read schema's
+    // field metadata, in file_schema order. Emitted only when present (column-mapping tables); the
+    // operator sets these as the read columns' identifiers so the parquet read maps by field id.
+    use delta_kernel::schema::{ColumnMetadataKey, MetadataValue};
+    let field_ids: Vec<String> = n
+        .file_schema
+        .fields()
+        .map(|f| match f.get_config_value(&ColumnMetadataKey::ColumnMappingId) {
+            Some(MetadataValue::Number(id)) => id.to_string(),
+            _ => "NULL".to_string(),
+        })
+        .collect();
+    let has_field_ids = field_ids.iter().any(|s| s != "NULL");
     let path_col = n.file_meta.path_column.path();
     if path_col.len() != 1 {
         return Err("delta_load path_column must be a top-level column".into());
@@ -405,6 +422,9 @@ fn delta_load_sql(node: &PlanNode, n: &delta_kernel::plans::ir::nodes::LoadNode)
             .collect::<R<Vec<_>>>()?
             .join(", ");
         args.push(format!("metadata_derived := [{cols}]"));
+    }
+    if has_field_ids {
+        args.push(format!("field_ids := [{}]", field_ids.join(", ")));
     }
     Ok(format!("SELECT * FROM delta_load({})", args.join(", ")))
 }
@@ -544,30 +564,87 @@ fn expr_sql(e: &Expression, expected: Option<&DataType>, input: Option<&StructTy
     })
 }
 
-/// Lower an (identity) `Transform`: a sparse struct restructure that, for scan plans, encodes a
-/// column-mapping rename of a struct column — the input struct's *physical* field names map, by
-/// position, to the output struct's *logical* names, recursing into nested structs and list
-/// elements. Mirrors the reference engine's `transform_to_df`. Non-identity transforms (prepended /
-/// replaced / inserted fields) are not produced by kernel scan plans and the reference rejects them
-/// too, so we do the same.
+/// Lower a `Transform` by densifying the sparse spec against the input schema, then emitting one
+/// output column per output-schema field — mirroring the kernel arrow engine's
+/// `evaluate_transform_expression`. Output columns, in order:
+///   1. each prepended field (an expression over the top-level input),
+///   2. for each input field (in input-struct order): a passthrough unless the field is *replaced*,
+///      followed by that field's transform expressions (insertions/replacement).
+/// Passthrough fields recurse through nested struct/list renames (column-mapping physical->logical).
+/// The result is NULL when the input struct is NULL (preserves the source null bitmap).
 fn transform_sql(t: &Transform, expected: Option<&DataType>, input: Option<&StructType>) -> R<String> {
-    if !t.is_identity() {
-        return Err(format!(
-            "non-identity Transform (prepended/replaced/inserted fields) is not supported: {t:?}"
-        ));
-    }
     let target = match expected {
         Some(DataType::Struct(st)) => st.as_ref(),
-        _ => return Err("identity Transform requires an expected struct output type".into()),
+        _ => return Err("Transform requires an expected struct output type".into()),
     };
-    let input = input.ok_or("identity Transform requires the input schema in context")?;
-    let input_path = t
-        .input_path
-        .as_ref()
-        .ok_or("top-level identity Transform without input_path is not supported")?;
-    let source = resolve_path_to_struct(input, input_path.path())?;
-    let base = column_sql(input_path.path());
-    rebuild_struct_sql(&base, &source, target)
+    let input = input.ok_or("Transform requires the input schema in context")?;
+    let tgt_fields: Vec<_> = target.fields().collect();
+    let mut ti = 0usize;
+    let mut next_tgt = |ti: &mut usize| -> R<&'_ delta_kernel::schema::StructField> {
+        let f = *tgt_fields
+            .get(*ti)
+            .ok_or("Transform: too few fields in output schema")?;
+        *ti += 1;
+        Ok(f)
+    };
+    let mut parts: Vec<String> = Vec::new();
+
+    // 1. Prepended fields are expressions evaluated over the top-level input relation.
+    for e in &t.prepended_fields {
+        let tf = next_tgt(&mut ti)?;
+        parts.push(format!("{} := {}", quote_ident(tf.name()), expr_sql(e, Some(&tf.data_type), Some(input))?));
+    }
+
+    // 2. Walk the source struct's fields in order (input_path struct, or the top-level input).
+    let (base, source_struct) = match &t.input_path {
+        Some(p) => (Some(column_sql(p.path())), Some(resolve_path_to_struct(input, p.path())?)),
+        None => (None, None),
+    };
+    let source: &StructType = source_struct.as_ref().unwrap_or(input);
+
+    let mut used_field_transforms = 0usize;
+    for sf in source.fields() {
+        let ft = t.field_transforms.get(sf.name());
+        // Passthrough unless this field is replaced.
+        if !ft.is_some_and(|x| x.is_replace) {
+            let tf = next_tgt(&mut ti)?;
+            let child = match &base {
+                Some(b) => format!("{b}['{}']", sf.name().replace('\'', "''")),
+                None => quote_ident(sf.name()),
+            };
+            parts.push(format!(
+                "{} := {}",
+                quote_ident(tf.name()),
+                rebuild_field_sql(&child, &sf.data_type, &tf.data_type)?
+            ));
+        }
+        // Insertions/replacement: this field's transform expressions, in order.
+        if let Some(ft) = ft {
+            for e in &ft.exprs {
+                let tf = next_tgt(&mut ti)?;
+                parts.push(format!("{} := {}", quote_ident(tf.name()), expr_sql(e, Some(&tf.data_type), Some(input))?));
+            }
+            used_field_transforms += 1;
+        }
+    }
+
+    let required = t.field_transforms.values().filter(|ft| !ft.optional).count();
+    if used_field_transforms < required {
+        return Err("Transform: some non-optional field transforms reference invalid input fields".into());
+    }
+    if ti != tgt_fields.len() {
+        return Err(format!(
+            "Transform: output arity mismatch (produced {ti}, output schema has {})",
+            tgt_fields.len()
+        ));
+    }
+
+    let body = format!("struct_pack({})", parts.join(", "));
+    // NULL-guard on the source struct (a NULL input struct yields a NULL output struct).
+    match &base {
+        Some(b) => Ok(format!("CASE WHEN ({b}) IS NOT NULL THEN {body} ELSE NULL END")),
+        None => Ok(body),
+    }
 }
 
 /// Navigate a column path through nested structs of `schema`, returning the struct it resolves to.
