@@ -344,8 +344,11 @@ fn delta_load_sql(node: &PlanNode, n: &delta_kernel::plans::ir::nodes::LoadNode)
     if path_col.len() != 1 {
         return Err("delta_load path_column must be a top-level column".into());
     }
+    // The table-valued argument must be a subquery expression for DuckDB to bind it as a relation
+    // (a bare CTE name binds as a scalar). `(FROM n)` is a trivial CTE reference the optimizer
+    // flattens — NOT an inlined subplan.
     let mut args = vec![
-        cte(node.inputs[0]),
+        format!("(FROM {})", cte(node.inputs[0])),
         format!("file_type := '{file_type}'"),
         format!("file_schema := '{file_schema}'"),
         format!("path_column := '{}'", path_col[0].replace('\'', "''")),
