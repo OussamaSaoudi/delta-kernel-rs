@@ -342,6 +342,22 @@ fn load_sql(node: &PlanNode, n: &delta_kernel::plans::ir::nodes::LoadNode, plan:
     Ok(selects.join("\nUNION ALL BY NAME\n"))
 }
 
+/// Collect Delta column-mapping field ids (delta.columnMapping.id) in DFS pre-order over a struct:
+/// each field's id (or "NULL"), then recurse into struct-typed children. Order matches the operator's
+/// recursive column rename, so the ids line up with both top-level and nested columns.
+fn collect_field_ids_dfs(st: &StructType, out: &mut Vec<String>) {
+    use delta_kernel::schema::{ColumnMetadataKey, MetadataValue};
+    for f in st.fields() {
+        out.push(match f.get_config_value(&ColumnMetadataKey::ColumnMappingId) {
+            Some(MetadataValue::Number(id)) => id.to_string(),
+            _ => "NULL".to_string(),
+        });
+        if let DataType::Struct(s) = &f.data_type {
+            collect_field_ids_dfs(s, out);
+        }
+    }
+}
+
 /// Lower a `Load` with a runtime-relation input to the `delta_load` table function. The input CTE
 /// streams one file-descriptor row per file; `delta_load` opens each file (`file_type` / `base_url`),
 /// reads `file_schema`, applies the per-row deletion vector (`dv_column`/`dv_kind`), and broadcasts
@@ -365,17 +381,12 @@ fn delta_load_sql(node: &PlanNode, n: &delta_kernel::plans::ir::nodes::LoadNode)
     let file_schema = format!("STRUCT({fields})").replace('\'', "''");
 
     // Per-column Delta column-mapping field ids (delta.columnMapping.id) from the read schema's
-    // field metadata, in file_schema order. Emitted only when present (column-mapping tables); the
-    // operator sets these as the read columns' identifiers so the parquet read maps by field id.
-    use delta_kernel::schema::{ColumnMetadataKey, MetadataValue};
-    let field_ids: Vec<String> = n
-        .file_schema
-        .fields()
-        .map(|f| match f.get_config_value(&ColumnMetadataKey::ColumnMappingId) {
-            Some(MetadataValue::Number(id)) => id.to_string(),
-            _ => "NULL".to_string(),
-        })
-        .collect();
+    // field metadata, in DFS pre-order over file_schema (each field's id, then recurse into struct
+    // children) — matching the operator's recursive column rename. Emitted only when present
+    // (column-mapping tables); the operator sets these as the read columns' identifiers (top-level
+    // AND nested) so the parquet read maps by field id and emits physical names the Transform renames.
+    let mut field_ids: Vec<String> = Vec::new();
+    collect_field_ids_dfs(&n.file_schema, &mut field_ids);
     let has_field_ids = field_ids.iter().any(|s| s != "NULL");
     let path_col = n.file_meta.path_column.path();
     if path_col.len() != 1 {
