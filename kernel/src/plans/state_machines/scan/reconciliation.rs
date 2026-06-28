@@ -64,7 +64,7 @@ pub(super) static SCAN_BASE: LazyLock<SchemaRef> = LazyLock::new(|| {
 });
 
 /// FSR pipeline base: all six action slots.
-pub(super) static FSR_BASE: LazyLock<SchemaRef> = LazyLock::new(|| {
+pub(crate) static FSR_BASE: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(StructType::new_unchecked([
         StructField::nullable(ADD_NAME, Add::to_schema()),
         StructField::nullable(REMOVE_NAME, Remove::to_schema()),
@@ -469,7 +469,7 @@ impl ReconciliationPlanBuilder for PlanBuilder {
 /// Building the schema from `base` (rather than the full action schema) lets the caller
 /// recover the action stream by `drop_col(SIDECAR_NAME)` regardless of pipeline width
 /// (scan = 2, FSR = 6).
-fn manifest_action_schema(base: &SchemaRef) -> SchemaRef {
+pub(crate) fn manifest_action_schema(base: &SchemaRef) -> SchemaRef {
     let mut fields: Vec<StructField> = base.fields().cloned().collect();
     fields.push(StructField::nullable(SIDECAR_NAME, Sidecar::to_schema()));
     Arc::new(StructType::new_unchecked(fields))
@@ -510,7 +510,7 @@ fn stats_parsed_file_schema(
 }
 
 /// `{path, size, version}` Values upstream schema for commit_load.
-fn commit_load_schema() -> SchemaRef {
+pub(crate) fn commit_load_schema() -> SchemaRef {
     Arc::new(StructType::new_unchecked([
         StructField::not_null("path", DataType::STRING),
         StructField::not_null("size", DataType::LONG),
@@ -538,7 +538,7 @@ fn retention_timestamps(snapshot: &Snapshot) -> Result<(i64, Option<i64>), Delta
 /// Convert Delta-log files (commit/compaction JSON) under `log_root` into Values rows
 /// aligned to [`commit_load_schema`]: `{path, size, version}`. `path` is resolved relative
 /// to `log_root`; `version` is recovered via [`ParsedLogPath`].
-fn log_files_to_rows(log_root: &Url, files: Vec<FileMeta>) -> Result<Vec<Vec<Scalar>>, DeltaError> {
+pub(crate) fn log_files_to_rows(log_root: &Url, files: Vec<FileMeta>) -> Result<Vec<Vec<Scalar>>, DeltaError> {
     files
         .into_iter()
         .map(|file| {

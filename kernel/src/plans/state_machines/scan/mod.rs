@@ -6,7 +6,7 @@
 
 mod file_scan;
 pub mod full_state;
-mod reconciliation;
+pub(crate) mod reconciliation;
 mod scan_plan;
 mod shape;
 

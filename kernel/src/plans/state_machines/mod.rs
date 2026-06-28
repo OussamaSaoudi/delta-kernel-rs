@@ -10,3 +10,4 @@
 
 pub mod framework;
 pub mod scan;
+pub mod snapshot;

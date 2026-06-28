@@ -25,7 +25,8 @@ use delta_kernel::plans::state_machines::framework::coroutine::CoroutineSM;
 use delta_kernel::plans::state_machines::framework::state_machine::{
     EngineRequest, EngineResponse, NextStep, StateMachine,
 };
-use delta_kernel::{Engine, Snapshot};
+use delta_kernel::plans::state_machines::snapshot::snapshot_state_machine_for;
+use delta_kernel::Engine;
 use delta_kernel_datafusion_engine::DataFusionExecutor;
 
 use super::{build_local_engine, finalize_result_plan_to_sql, table_url, write_err};
@@ -63,25 +64,29 @@ impl KdfSM {
     fn open(path: &str, version: i64) -> Result<KdfSM, String> {
         let engine = build_local_engine();
         let url = table_url(path)?;
-        let mut builder = Snapshot::builder_for(url);
-        if version >= 0 {
-            builder = builder.at_version(version as u64);
-        }
-        let snapshot = builder
-            .build(engine.as_ref())
-            .map_err(|e| format!("build snapshot: {e}"))?;
-        let scan = snapshot
-            .scan_builder()
-            .build()
-            .map_err(|e| format!("build scan: {e}"))?;
         let executor = DataFusionExecutor::try_new_with_engine(Arc::clone(&engine))
             .map_err(|e| format!("build datafusion executor: {e}"))?;
-        // The scan SM future is `!Send`; `block_on` drives it on the calling thread (one step at a
+        // The SM futures are `!Send`; `block_on` drives them on the calling thread (one step at a
         // time), while DataFusion's `Send` work spawns to the runtime's worker pool.
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("build tokio runtime: {e}"))?;
+        // Snapshot construction is itself driven through a state machine: the snapshot SM resolves
+        // protocol+metadata via an engine Reduce over the log (the eager directory listing happens
+        // in `snapshot_state_machine_for`), and the scan SM is then built from that snapshot.
+        let version_opt = if version >= 0 { Some(version as u64) } else { None };
+        let snapshot_sm = snapshot_state_machine_for(url, version_opt, engine.as_ref())
+            .map_err(|e| format!("build snapshot SM: {e}"))?;
+        let snapshot = Arc::new(
+            runtime
+                .block_on(executor.drive_to_completion(snapshot_sm))
+                .map_err(|e| format!("drive snapshot SM: {e}"))?,
+        );
+        let scan = snapshot
+            .scan_builder()
+            .build()
+            .map_err(|e| format!("build scan: {e}"))?;
         let sm = scan
             .scan_state_machine()
             .map_err(|e| format!("build scan SM: {e}"))?;
