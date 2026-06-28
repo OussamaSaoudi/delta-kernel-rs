@@ -104,6 +104,7 @@ fn do_data_stage(scan: &Scan, live_actions: PlanBuilder) -> Result<PlanBuilder, 
             column: ColumnName::new(["deletionVector"]),
             kind: DvKind::Descriptor,
         }),
+        version: Some(scan.snapshot().version()),
     };
     let raw_data = live_actions.load(load)?;
 

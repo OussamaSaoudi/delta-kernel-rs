@@ -342,6 +342,11 @@ pub struct LoadNode {
     pub metadata_derived_columns: Vec<ColumnName>,
     pub file_meta: LoadColumnInfo,
     pub dv_ref: Option<DvRef>,
+    /// The table version this load reads at, when `base_url` is a Delta table root resolved at a
+    /// specific snapshot version (time travel). Consumers that resolve column mapping per the table
+    /// snapshot (e.g. the DuckDB `delta_load` reader) must bind that exact version so the physical
+    /// schema matches `file_schema`. `None` when reading concrete files directly (commit/sidecar loads).
+    pub version: Option<u64>,
 }
 
 // === MaxByVersion ===========================================================

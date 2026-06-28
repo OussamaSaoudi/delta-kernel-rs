@@ -257,6 +257,7 @@ pub(super) fn build_reconciliation(
             num_records_column: None,
         },
         dv_ref: None,
+        version: None,
     };
     let commit_raw = ctx
         .values(commit_load_schema(), commit_rows)?
@@ -334,6 +335,7 @@ pub(super) fn build_reconciliation(
                         num_records_column: None,
                     },
                     dv_ref: None,
+                    version: None,
                 })?;
             let sidecar_aligned = match shape.stats.as_ref() {
                 Some(s) if s.has_parsed_stats => sidecar_load.with_partitions_parsed(parts)?,

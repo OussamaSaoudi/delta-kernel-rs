@@ -404,6 +404,12 @@ fn delta_load_sql(node: &PlanNode, n: &delta_kernel::plans::ir::nodes::LoadNode)
     if let Some(u) = &n.base_url {
         args.push(format!("base_url := '{}'", u.as_str().replace('\'', "''")));
     }
+    // Time travel: bind the data reader at the snapshot version this load reads at, so its
+    // column-mapping (physical) schema matches file_schema (which differs across schema-evolution
+    // versions, e.g. before/after a column drop).
+    if let Some(v) = n.version {
+        args.push(format!("version := {v}"));
+    }
     if let Some(dv) = &n.dv_ref {
         let dvc = dv.column.path();
         if dvc.len() != 1 {
