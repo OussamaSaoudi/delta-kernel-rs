@@ -515,8 +515,36 @@ fn expr_sql(e: &Expression, expected: Option<&DataType>) -> R<String> {
             }
             format!("struct_pack({})", parts.join(", "))
         }
-        Expression::Transform(_) => {
-            return Err("Transform not yet lowered to SQL (P2 follow-up)".into())
+        Expression::Transform(t) => {
+            // Sparse struct transform. We handle the identity/projection case: no field_transforms and
+            // no prepended fields, so the output is the input struct (at input_path) passed through.
+            // Rebuild the expected struct by extracting each output field from the input struct path —
+            // robust to field reordering/projection. (General replace/insert transforms: follow-up.)
+            if !t.field_transforms.is_empty() || !t.prepended_fields.is_empty() {
+                return Err(format!(
+                    "Transform with field_transforms/prepended_fields not yet lowered to SQL: {t:?}"
+                ));
+            }
+            let base = match &t.input_path {
+                Some(p) => p.path().to_vec(),
+                None => return Err("Transform without input_path not yet lowered to SQL".into()),
+            };
+            let st = match expected {
+                Some(DataType::Struct(st)) => st,
+                _ => return Err("Transform requires an expected struct output type".into()),
+            };
+            let fields = st
+                .fields()
+                .map(|f| {
+                    let mut p = base.clone();
+                    p.push(f.name().to_string());
+                    format!("{} := {}", quote_ident(f.name()), column_sql(&p))
+                })
+                .collect::<Vec<_>>();
+            if fields.is_empty() {
+                return Err("Transform with an empty expected struct".into());
+            }
+            format!("struct_pack({})", fields.join(", "))
         }
         Expression::Opaque(_) => return Err("Opaque expression cannot be lowered".into()),
         Expression::Unknown(s) => return Err(format!("Unknown expression cannot be lowered: {s}")),
