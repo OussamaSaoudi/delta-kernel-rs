@@ -8,10 +8,10 @@
 
 use delta_kernel::expressions::{
     BinaryExpressionOp, BinaryPredicateOp, Expression, JunctionPredicateOp, Predicate, Scalar,
-    UnaryExpressionOp, UnaryPredicateOp, VariadicExpressionOp,
+    Transform, UnaryExpressionOp, UnaryPredicateOp, VariadicExpressionOp,
 };
 use delta_kernel::plans::ir::nodes::{FileType, JoinKind, NodeKind};
-use delta_kernel::plans::ir::plan::{PlanNode, RefId, ResultPlan};
+use delta_kernel::plans::ir::plan::{Plan, PlanNode, RefId, ResultPlan};
 use delta_kernel::schema::{DataType, PrimitiveType, StructType};
 
 type R<T> = Result<T, String>;
@@ -47,6 +47,23 @@ fn cte(r: RefId) -> String {
     format!("n{}", r.0)
 }
 
+/// The output schema (relation column types) of a node, used to resolve a child relation's columns
+/// when lowering identity `Transform` expressions. Filter passes its input's schema through; returns
+/// None for nodes whose schema we don't track (no Transform is lowered against those).
+fn node_output_schema(plan: &Plan, r: RefId) -> Option<&StructType> {
+    let node = plan.nodes.get(r.0 as usize)?;
+    match &node.kind {
+        NodeKind::Project(n) => Some(n.output_schema.as_ref()),
+        NodeKind::MaxByVersion(n) => Some(n.output_schema.as_ref()),
+        NodeKind::Load(n) => Some(n.file_schema.as_ref()),
+        NodeKind::Values(n) => Some(n.schema.as_ref()),
+        NodeKind::ScanParquet(n) => Some(n.schema.as_ref()),
+        NodeKind::ScanJson(n) => Some(n.schema.as_ref()),
+        NodeKind::Filter(_) => node.inputs.first().and_then(|i| node_output_schema(plan, *i)),
+        _ => None,
+    }
+}
+
 fn node_sql(node: &PlanNode, plan: &delta_kernel::plans::ir::plan::Plan) -> R<String> {
     match &node.kind {
         NodeKind::Values(n) => {
@@ -77,13 +94,16 @@ fn node_sql(node: &PlanNode, plan: &delta_kernel::plans::ir::plan::Plan) -> R<St
         NodeKind::Load(n) => load_sql(node, n, plan),
         NodeKind::Filter(n) => {
             let input = cte(node.inputs[0]);
-            Ok(format!("SELECT * FROM {input} WHERE {}", predicate_sql(&n.predicate)?))
+            Ok(format!("SELECT * FROM {input} WHERE {}", predicate_sql(&n.predicate, None)?))
         }
         NodeKind::Project(n) => {
             let input = cte(node.inputs[0]);
+            // The input relation's schema, needed to lower identity Transform expressions (which
+            // rename the input struct's physical field names to the output's logical names).
+            let in_schema = node.inputs.first().and_then(|i| node_output_schema(plan, *i));
             let mut sel = Vec::new();
             for ((name, expr), field) in n.named_exprs.iter().zip(n.output_schema.fields()) {
-                let e = expr_sql(expr, Some(&field.data_type()))?;
+                let e = expr_sql(expr, Some(&field.data_type()), in_schema)?;
                 sel.push(format!("{e} AS {}", quote_ident(name)));
             }
             Ok(format!("SELECT {} FROM {input}", sel.join(", ")))
@@ -93,10 +113,10 @@ fn node_sql(node: &PlanNode, plan: &delta_kernel::plans::ir::plan::Plan) -> R<St
             let part = n
                 .group_by
                 .iter()
-                .map(|e| expr_sql(e, None))
+                .map(|e| expr_sql(e, None, None))
                 .collect::<R<Vec<_>>>()?
                 .join(", ");
-            let order = expr_sql(&n.version_column, None)?;
+            let order = expr_sql(&n.version_column, None, None)?;
             let out_cols = n
                 .output_schema
                 .fields()
@@ -119,8 +139,8 @@ fn node_sql(node: &PlanNode, plan: &delta_kernel::plans::ir::plan::Plan) -> R<St
                 .map(|(l, r)| {
                     Ok(format!(
                         "({} IS NOT DISTINCT FROM {})",
-                        qualify("l_side", &expr_sql(l, None)?),
-                        qualify("r_side", &expr_sql(r, None)?)
+                        qualify("l_side", &expr_sql(l, None, None)?),
+                        qualify("r_side", &expr_sql(r, None, None)?)
                     ))
                 })
                 .collect::<R<Vec<_>>>()?
@@ -428,21 +448,24 @@ fn qualify(alias: &str, expr_sql: &str) -> String {
 // Expressions / predicates
 // ============================================================================
 
-fn expr_sql(e: &Expression, expected: Option<&DataType>) -> R<String> {
+/// Lower an expression to SQL. `expected` is the output type (drives struct/cast shaping); `input`
+/// is the schema of the relation the expression is evaluated against (needed only to lower identity
+/// `Transform` expressions, which rename the input struct's physical field names to logical ones).
+fn expr_sql(e: &Expression, expected: Option<&DataType>, input: Option<&StructType>) -> R<String> {
     Ok(match e {
         Expression::Literal(s) => scalar_sql(s)?,
         Expression::Column(c) => column_sql(c.path()),
-        Expression::Predicate(p) => format!("({})", predicate_sql(p)?),
+        Expression::Predicate(p) => format!("({})", predicate_sql(p, input)?),
         Expression::Variadic(v) => {
-            let args = v.exprs.iter().map(|e| expr_sql(e, None)).collect::<R<Vec<_>>>()?;
+            let args = v.exprs.iter().map(|e| expr_sql(e, None, input)).collect::<R<Vec<_>>>()?;
             match v.op {
                 VariadicExpressionOp::Coalesce => format!("coalesce({})", args.join(", ")),
                 VariadicExpressionOp::Array => format!("[{}]", args.join(", ")),
             }
         }
         Expression::Binary(b) => {
-            let l = expr_sql(&b.left, None)?;
-            let r = expr_sql(&b.right, None)?;
+            let l = expr_sql(&b.left, None, input)?;
+            let r = expr_sql(&b.right, None, input)?;
             let op = match b.op {
                 BinaryExpressionOp::Plus => "+",
                 BinaryExpressionOp::Minus => "-",
@@ -452,15 +475,15 @@ fn expr_sql(e: &Expression, expected: Option<&DataType>) -> R<String> {
             format!("({l} {op} {r})")
         }
         Expression::Unary(u) => {
-            let inner = expr_sql(&u.expr, None)?;
+            let inner = expr_sql(&u.expr, None, input)?;
             match u.op {
                 UnaryExpressionOp::ToJson => format!("to_json({inner})"),
             }
         }
         Expression::If(i) => {
-            let cond = predicate_sql(&i.condition)?;
-            let then = expr_sql(&i.then_expr, expected)?;
-            let els = expr_sql(&i.else_expr, expected)?;
+            let cond = predicate_sql(&i.condition, input)?;
+            let then = expr_sql(&i.then_expr, expected, input)?;
+            let els = expr_sql(&i.else_expr, expected, input)?;
             format!("CASE WHEN {cond} THEN {then} ELSE {els} END")
         }
         Expression::Struct(exprs, _nullability) => {
@@ -480,13 +503,13 @@ fn expr_sql(e: &Expression, expected: Option<&DataType>) -> R<String> {
                 .iter()
                 .zip(fields.iter())
                 .map(|(e, (name, ty))| {
-                    Ok(format!("{} := {}", quote_ident(name), expr_sql(e, Some(ty))?))
+                    Ok(format!("{} := {}", quote_ident(name), expr_sql(e, Some(ty), input)?))
                 })
                 .collect::<R<Vec<_>>>()?;
             format!("struct_pack({})", parts.join(", "))
         }
         Expression::ParseJson(p) => {
-            let json = expr_sql(&p.json_expr, None)?;
+            let json = expr_sql(&p.json_expr, None, input)?;
             let ty = datatype_sql(&DataType::Struct(Box::new((*p.output_schema).clone())))?;
             format!("from_json({json}, '{ty}')")
         }
@@ -496,7 +519,7 @@ fn expr_sql(e: &Expression, expected: Option<&DataType>) -> R<String> {
             let st = expected
                 .and_then(strip_struct)
                 .ok_or("MapToStruct needs an expected struct type")?;
-            let map = expr_sql(&m.map_expr, None)?;
+            let map = expr_sql(&m.map_expr, None, input)?;
             let parts = st
                 .fields()
                 .map(|f| {
@@ -515,55 +538,120 @@ fn expr_sql(e: &Expression, expected: Option<&DataType>) -> R<String> {
             }
             format!("struct_pack({})", parts.join(", "))
         }
-        Expression::Transform(t) => {
-            // Sparse struct transform. We handle the identity/projection case: no field_transforms and
-            // no prepended fields, so the output is the input struct (at input_path) passed through.
-            // Rebuild the expected struct by extracting each output field from the input struct path —
-            // robust to field reordering/projection. (General replace/insert transforms: follow-up.)
-            if !t.field_transforms.is_empty() || !t.prepended_fields.is_empty() {
-                return Err(format!(
-                    "Transform with field_transforms/prepended_fields not yet lowered to SQL: {t:?}"
-                ));
-            }
-            let base = match &t.input_path {
-                Some(p) => p.path().to_vec(),
-                None => return Err("Transform without input_path not yet lowered to SQL".into()),
-            };
-            let st = match expected {
-                Some(DataType::Struct(st)) => st,
-                _ => return Err("Transform requires an expected struct output type".into()),
-            };
-            let fields = st
-                .fields()
-                .map(|f| {
-                    let mut p = base.clone();
-                    p.push(f.name().to_string());
-                    format!("{} := {}", quote_ident(f.name()), column_sql(&p))
-                })
-                .collect::<Vec<_>>();
-            if fields.is_empty() {
-                return Err("Transform with an empty expected struct".into());
-            }
-            format!("struct_pack({})", fields.join(", "))
-        }
+        Expression::Transform(t) => transform_sql(t, expected, input)?,
         Expression::Opaque(_) => return Err("Opaque expression cannot be lowered".into()),
         Expression::Unknown(s) => return Err(format!("Unknown expression cannot be lowered: {s}")),
     })
 }
 
-fn predicate_sql(p: &Predicate) -> R<String> {
+/// Lower an (identity) `Transform`: a sparse struct restructure that, for scan plans, encodes a
+/// column-mapping rename of a struct column — the input struct's *physical* field names map, by
+/// position, to the output struct's *logical* names, recursing into nested structs and list
+/// elements. Mirrors the reference engine's `transform_to_df`. Non-identity transforms (prepended /
+/// replaced / inserted fields) are not produced by kernel scan plans and the reference rejects them
+/// too, so we do the same.
+fn transform_sql(t: &Transform, expected: Option<&DataType>, input: Option<&StructType>) -> R<String> {
+    if !t.is_identity() {
+        return Err(format!(
+            "non-identity Transform (prepended/replaced/inserted fields) is not supported: {t:?}"
+        ));
+    }
+    let target = match expected {
+        Some(DataType::Struct(st)) => st.as_ref(),
+        _ => return Err("identity Transform requires an expected struct output type".into()),
+    };
+    let input = input.ok_or("identity Transform requires the input schema in context")?;
+    let input_path = t
+        .input_path
+        .as_ref()
+        .ok_or("top-level identity Transform without input_path is not supported")?;
+    let source = resolve_path_to_struct(input, input_path.path())?;
+    let base = column_sql(input_path.path());
+    rebuild_struct_sql(&base, &source, target)
+}
+
+/// Navigate a column path through nested structs of `schema`, returning the struct it resolves to.
+fn resolve_path_to_struct(schema: &StructType, path: &[String]) -> R<StructType> {
+    let mut current = schema.clone();
+    for seg in path {
+        let dt = {
+            let f = current
+                .fields()
+                .find(|f| f.name() == seg)
+                .ok_or_else(|| format!("Transform input_path segment '{seg}' not found in input schema"))?;
+            f.data_type.clone()
+        };
+        match dt {
+            DataType::Struct(s) => current = *s,
+            other => {
+                return Err(format!("Transform input_path segment '{seg}' is not a struct: {other:?}"))
+            }
+        }
+    }
+    Ok(current)
+}
+
+/// Rebuild a struct value `base` (typed `source`) as `target`, mapping fields by position: each
+/// source (physical) field name is extracted and emitted under the target (logical) name, recursing
+/// for nested struct/list element renames. NULL-guarded: a NULL input struct yields NULL.
+fn rebuild_struct_sql(base: &str, source: &StructType, target: &StructType) -> R<String> {
+    let src: Vec<_> = source.fields().collect();
+    let tgt: Vec<_> = target.fields().collect();
+    if src.len() != tgt.len() {
+        return Err(format!(
+            "identity Transform field count mismatch: source struct has {} fields, target has {}",
+            src.len(),
+            tgt.len()
+        ));
+    }
+    let mut parts = Vec::with_capacity(src.len());
+    for (sf, tf) in src.iter().zip(tgt.iter()) {
+        let child = format!("{base}['{}']", sf.name().replace('\'', "''"));
+        let renamed = rebuild_field_sql(&child, &sf.data_type(), &tf.data_type())?;
+        parts.push(format!("{} := {}", quote_ident(tf.name()), renamed));
+    }
+    Ok(format!(
+        "CASE WHEN ({base}) IS NOT NULL THEN struct_pack({}) ELSE NULL END",
+        parts.join(", ")
+    ))
+}
+
+/// Rebuild one field for the target type: recurse into struct fields and list elements; primitives
+/// (and anything not needing a name change) pass through unchanged.
+fn rebuild_field_sql(base: &str, source_dt: &DataType, target_dt: &DataType) -> R<String> {
+    match (source_dt, target_dt) {
+        (DataType::Struct(s), DataType::Struct(t)) => rebuild_struct_sql(base, s, t),
+        (DataType::Array(s), DataType::Array(t)) => {
+            rebuild_list_sql(base, s.element_type(), t.element_type())
+        }
+        _ => Ok(base.to_string()),
+    }
+}
+
+/// Rebuild a list value by renaming its element fields. Uses DuckDB's `list_transform` lambda (the
+/// reference DataFusion engine cannot do this; DuckDB can). Pass-through when the element needs no
+/// rename (e.g. a list of primitives).
+fn rebuild_list_sql(base: &str, source_elem: &DataType, target_elem: &DataType) -> R<String> {
+    let inner = rebuild_field_sql("__dk_x", source_elem, target_elem)?;
+    if inner == "__dk_x" {
+        return Ok(base.to_string()); // element needs no rename
+    }
+    Ok(format!("list_transform({base}, __dk_x -> {inner})"))
+}
+
+fn predicate_sql(p: &Predicate, input: Option<&StructType>) -> R<String> {
     Ok(match p {
-        Predicate::BooleanExpression(e) => expr_sql(e, None)?,
-        Predicate::Not(inner) => format!("(NOT ({}))", predicate_sql(inner)?),
+        Predicate::BooleanExpression(e) => expr_sql(e, None, input)?,
+        Predicate::Not(inner) => format!("(NOT ({}))", predicate_sql(inner, input)?),
         Predicate::Unary(u) => {
-            let inner = expr_sql(&u.expr, None)?;
+            let inner = expr_sql(&u.expr, None, input)?;
             match u.op {
                 UnaryPredicateOp::IsNull => format!("({inner} IS NULL)"),
             }
         }
         Predicate::Binary(b) => {
-            let l = expr_sql(&b.left, None)?;
-            let r = expr_sql(&b.right, None)?;
+            let l = expr_sql(&b.left, None, input)?;
+            let r = expr_sql(&b.right, None, input)?;
             match b.op {
                 BinaryPredicateOp::LessThan => format!("({l} < {r})"),
                 BinaryPredicateOp::GreaterThan => format!("({l} > {r})"),
@@ -577,7 +665,7 @@ fn predicate_sql(p: &Predicate) -> R<String> {
                 JunctionPredicateOp::And => " AND ",
                 JunctionPredicateOp::Or => " OR ",
             };
-            let parts = j.preds.iter().map(|p| predicate_sql(p)).collect::<R<Vec<_>>>()?;
+            let parts = j.preds.iter().map(|p| predicate_sql(p, input)).collect::<R<Vec<_>>>()?;
             if parts.is_empty() {
                 match j.op {
                     JunctionPredicateOp::And => "TRUE".to_string(),
