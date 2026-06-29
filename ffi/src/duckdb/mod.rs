@@ -765,6 +765,111 @@ pub fn materialize_runtime_loads(
     Ok(())
 }
 
+/// DuckDB twin of [`materialize_runtime_loads`]: resolve each runtime `Load` input's concrete file
+/// list by lowering its subplan to SQL and executing it **in DuckDB** (via the SM driver's
+/// `exec_sql` callback), then bake the result as a static `Values` list. No DataFusion involved.
+pub(crate) fn materialize_runtime_loads_duckdb(
+    plan: &mut delta_kernel::plans::ir::plan::Plan,
+    exec: sm::DuckdbExec,
+    up_to: delta_kernel::plans::ir::plan::RefId,
+) -> Result<(), String> {
+    use delta_kernel::plans::ir::nodes::{NodeKind, ValuesNode};
+    use delta_kernel::schema::{StructField, StructType};
+
+    let last = (up_to.0 as usize).min(plan.nodes.len().saturating_sub(1));
+    for i in 0..=last {
+        let NodeKind::Load(load) = plan.nodes[i].kind.clone() else {
+            continue;
+        };
+        let Some(&in_ref) = plan.nodes[i].inputs.first() else {
+            continue;
+        };
+        if matches!(plan.nodes[in_ref.0 as usize].kind, NodeKind::Values(_)) {
+            continue; // already a static file list
+        }
+
+        // Columns load_sql reads from the input relation: path, size, and broadcast columns.
+        let mut col_names = vec![single_col(&load.file_meta.path_column)?];
+        if let Some(c) = &load.file_meta.file_size_column {
+            col_names.push(single_col(c)?);
+        }
+        if let Some(c) = &load.file_meta.num_records_column {
+            col_names.push(single_col(c)?);
+        }
+        for c in &load.metadata_derived_columns {
+            col_names.push(single_col(c)?);
+        }
+
+        // Execute the input subplan IN DUCKDB to resolve the concrete file list.
+        let sub_sql = plan_to_sql::result_plan_to_sql_until(plan, in_ref)
+            .map_err(|e| format!("materialize Load input: lower subplan to SQL: {e}"))?;
+        let batch = exec.run_sql(&sub_sql)?;
+
+        // Determine column types from the batch (or default to string-typed empties).
+        let mut fields: Vec<StructField> = Vec::new();
+        if batch.num_rows() > 0 || batch.num_columns() > 0 {
+            for name in &col_names {
+                let col = batch
+                    .column_by_name(name)
+                    .ok_or_else(|| format!("materialize: column {name} missing in subplan output"))?;
+                fields.push(StructField::nullable(
+                    name.clone(),
+                    arrow_type_to_kernel(col.data_type())?,
+                ));
+            }
+        } else {
+            for name in &col_names {
+                fields.push(StructField::nullable(name.clone(), delta_kernel::schema::DataType::STRING));
+            }
+        }
+        let schema = std::sync::Arc::new(StructType::new_unchecked(fields));
+
+        let mut rows = Vec::new();
+        let cols: Vec<&std::sync::Arc<dyn delta_kernel::arrow::array::Array>> = col_names
+            .iter()
+            .map(|name| batch.column_by_name(name).ok_or_else(|| format!("materialize: column {name} missing")))
+            .collect::<Result<Vec<_>, _>>()?;
+        for r in 0..batch.num_rows() {
+            let mut row = Vec::with_capacity(cols.len());
+            for col in &cols {
+                row.push(arrow_to_scalar(col.as_ref(), r)?);
+            }
+            rows.push(row);
+        }
+
+        plan.nodes[in_ref.0 as usize].kind = NodeKind::Values(ValuesNode { schema, rows });
+        plan.nodes[in_ref.0 as usize].inputs = Vec::new();
+    }
+    Ok(())
+}
+
+/// DuckDB twin of [`finalize_result_plan_to_sql`]: materialize the scan plan's runtime file-list
+/// Load in DuckDB, then lower the whole `ResultPlan` to the data-stage DuckDB SQL.
+pub(crate) fn finalize_result_plan_to_sql_duckdb(
+    rp: delta_kernel::plans::ir::plan::ResultPlan,
+    exec: sm::DuckdbExec,
+) -> Result<String, String> {
+    use delta_kernel::plans::ir::nodes::NodeKind;
+    let nodes = &rp.plan.nodes;
+    let term = nodes
+        .get(rp.result.0 as usize)
+        .ok_or("missing terminal node")?;
+    if !matches!(term.kind, NodeKind::Project(_)) {
+        return Err(format!("expected data-stage terminal Project, got {}", term.kind));
+    }
+    let load_ref = *term.inputs.first().ok_or("terminal Project has no input")?;
+    let load = nodes.get(load_ref.0 as usize).ok_or("missing data Load node")?;
+    if !matches!(load.kind, NodeKind::Load(_)) {
+        return Err(format!("expected data-stage Load, got {}", load.kind));
+    }
+    let scan_file_row_ref = *load.inputs.first().ok_or("data Load has no input")?;
+
+    let result_ref = rp.result;
+    let mut plan = rp.plan;
+    materialize_runtime_loads_duckdb(&mut plan, exec, scan_file_row_ref)?;
+    plan_to_sql::result_plan_to_sql_until(&plan, result_ref)
+}
+
 /// Drive the scan-metadata SM for the Delta table at `path` and return the DuckDB SQL that
 /// executes the resulting plan (NUL-terminated C string; free with [`kdf_string_free`]).
 ///
