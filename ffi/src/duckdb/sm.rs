@@ -30,7 +30,48 @@ use delta_kernel::Engine;
 use url::Url;
 
 use super::plan_to_sql::result_plan_to_sql_until;
-use super::{build_local_engine, finalize_result_plan_to_sql_duckdb, table_url, write_err};
+use super::{
+    build_engine_for_url, build_local_engine, finalize_result_plan_to_sql_duckdb, table_url,
+    write_err,
+};
+
+/// Build a kernel data-skipping predicate from the `DELTA_SM_PREDICATE` env var, formatted
+/// `"col OP literal"` (OP one of `>= <= != > < =`; the literal is parsed as i32, then i64, then f64,
+/// else a string with surrounding quotes stripped). Returns `None` when unset or unparseable, so the
+/// scan runs without data skipping. Benchmark hook: set it to skip files, unset to read all.
+fn predicate_from_env() -> Option<delta_kernel::expressions::Predicate> {
+    use delta_kernel::expressions::{Expression, Scalar};
+    let spec = std::env::var("DELTA_SM_PREDICATE").ok()?;
+    let spec = spec.trim();
+    for sym in [">=", "<=", "!=", ">", "<", "="] {
+        let Some(idx) = spec.find(sym) else { continue };
+        let col = spec[..idx].trim();
+        let rhs = spec[idx + sym.len()..].trim();
+        if col.is_empty() || rhs.is_empty() {
+            return None;
+        }
+        let scalar: Scalar = if let Ok(i) = rhs.parse::<i32>() {
+            i.into()
+        } else if let Ok(i) = rhs.parse::<i64>() {
+            i.into()
+        } else if let Ok(f) = rhs.parse::<f64>() {
+            f.into()
+        } else {
+            rhs.trim_matches(|c| c == '\'' || c == '"').to_string().into()
+        };
+        let col_expr = Expression::column([col]);
+        let lit = Expression::literal(scalar);
+        return Some(match sym {
+            ">=" => col_expr.ge(lit),
+            "<=" => col_expr.le(lit),
+            "!=" => col_expr.ne(lit),
+            ">" => col_expr.gt(lit),
+            "<" => col_expr.lt(lit),
+            _ => col_expr.eq(lit),
+        });
+    }
+    None
+}
 
 /// C callback that executes `sql` in DuckDB and hands the *entire* result back as one Arrow C Data
 /// batch, moved into `*out_array` / `*out_schema`. Returns 0 on success; nonzero leaves the
@@ -204,8 +245,10 @@ impl KdfSM {
         exec_sql: KdfExecSqlFn,
         exec_ctx: *mut c_void,
     ) -> Result<KdfSM, String> {
-        let engine = build_local_engine();
         let url = table_url(path)?;
+        // Scheme-aware engine: local for file://, S3 for s3:// (AWS_* env creds). Lets the SM list
+        // the log / read footers on cloud tables; DuckDB (httpfs) does the data + reduce I/O.
+        let engine = build_engine_for_url(&url)?;
         let exec = DuckdbExec::new(exec_sql, exec_ctx);
         let version_opt = if version >= 0 { Some(version as u64) } else { None };
 
@@ -216,9 +259,13 @@ impl KdfSM {
         let snapshot = std::sync::Arc::new(drive_via_duckdb(snapshot_sm, engine.as_ref(), exec)?);
 
         // 2) Scan SM: resolve the scan shape (sidecar Reduce + footer SchemaQueries, all in DuckDB)
-        //    into a ResultPlan.
-        let scan = snapshot
-            .scan_builder()
+        //    into a ResultPlan. An optional predicate (DELTA_SM_PREDICATE="col op literal") is passed
+        //    to the scan builder so the kernel performs stats-based data skipping (file pruning).
+        let mut scan_builder = snapshot.scan_builder();
+        if let Some(predicate) = predicate_from_env() {
+            scan_builder = scan_builder.with_predicate(Some(std::sync::Arc::new(predicate)));
+        }
+        let scan = scan_builder
             .build()
             .map_err(|e| format!("build scan: {e}"))?;
         let scan_sm = scan

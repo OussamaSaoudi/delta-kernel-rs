@@ -117,16 +117,32 @@ fn node_sql(node: &PlanNode, plan: &delta_kernel::plans::ir::plan::Plan) -> R<St
                 .collect::<R<Vec<_>>>()?
                 .join(", ");
             let order = expr_sql(&n.version_column, None, None)?;
-            let out_cols = n
+            // "Keep the latest row per group" = an `arg_max(row, version)` hash aggregate, NOT a
+            // ROW_NUMBER window. The window forces a full partition-sort of every input row; the
+            // aggregate streams and parallelizes across threads (no sort), which matters a lot when
+            // the input is millions of log actions. Pack the output columns into a struct so a
+            // single `arg_max` keeps a consistent row, then unpack. Ties (same version in a group)
+            // resolve arbitrarily — as before, since neither form had a stable tiebreaker.
+            let packs = n
                 .output_schema
                 .fields()
-                .map(|f| quote_ident(f.name()))
+                .map(|f| {
+                    let q = quote_ident(f.name());
+                    format!("{q} := {q}")
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
-            // ROW_NUMBER over the group ordered by version desc; keep rn=1. A stable tiebreaker
-            // would need a synthesized input index; the kernel breaks ties by input order.
+            let projected = n
+                .output_schema
+                .fields()
+                .map(|f| {
+                    let q = quote_ident(f.name());
+                    format!("__mbv.{q} AS {q}")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             Ok(format!(
-                "SELECT {out_cols} FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY {part} ORDER BY {order} DESC) AS __dk_rn FROM {input}) WHERE __dk_rn = 1"
+                "SELECT {projected} FROM (SELECT arg_max(struct_pack({packs}), {order}) AS __mbv FROM {input} GROUP BY {part})"
             ))
         }
         NodeKind::EquiJoin(n) => {
@@ -546,9 +562,14 @@ fn expr_sql(e: &Expression, expected: Option<&DataType>, input: Option<&StructTy
             format!("struct_pack({})", parts.join(", "))
         }
         Expression::ParseJson(p) => {
+            // Parse a JSON-text column (e.g. the add `stats` string) into a struct for stats-based
+            // data skipping. Use `from_json` with the structure in JSON-schema notation: unlike a
+            // strict `VARCHAR/JSON -> STRUCT` cast, `from_json` is LENIENT — it ignores JSON keys not
+            // in the requested schema (real Delta stats carry extra keys like `tightBounds`) and
+            // parses nested structs.
             let json = expr_sql(&p.json_expr, None, input)?;
-            let ty = datatype_sql(&DataType::Struct(Box::new((*p.output_schema).clone())))?;
-            format!("from_json({json}, '{ty}')")
+            let structure = parse_json_structure(&DataType::Struct(Box::new((*p.output_schema).clone())))?;
+            format!("from_json({json}, '{}')", structure.replace('\'', "''"))
         }
         Expression::MapToStruct(m) => {
             // Delta partition values live in a MAP(VARCHAR,VARCHAR); parse each target field by
@@ -823,6 +844,29 @@ fn strip_struct(dt: &DataType) -> Option<&StructType> {
 }
 
 /// A DuckDB type string for a kernel `DataType` (used in casts and `read_json` column specs).
+/// Serialize a DataType to DuckDB `from_json`'s structure notation: a struct becomes a JSON object
+/// `{"field": <type>, ...}` (recursing), and any leaf (primitive / list / map) becomes its quoted
+/// DuckDB type string. This is what `from_json(json, structure)` expects, and it parses leniently
+/// (ignores JSON keys absent from the structure).
+fn parse_json_structure(dt: &DataType) -> R<String> {
+    Ok(match dt {
+        DataType::Struct(s) => {
+            let fields = s
+                .fields()
+                .map(|f| {
+                    Ok(format!(
+                        "\"{}\":{}",
+                        f.name().replace('\\', "\\\\").replace('"', "\\\""),
+                        parse_json_structure(&f.data_type())?
+                    ))
+                })
+                .collect::<R<Vec<_>>>()?;
+            format!("{{{}}}", fields.join(","))
+        }
+        other => format!("\"{}\"", datatype_sql(other)?),
+    })
+}
+
 fn datatype_sql(dt: &DataType) -> R<String> {
     Ok(match dt {
         DataType::Primitive(p) => match p {

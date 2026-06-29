@@ -27,18 +27,50 @@ pub mod proto;
 pub mod sm;
 pub mod proto_convert;
 
-/// Build a local-filesystem-backed kernel default engine. M1 targets on-disk tables; cloud
-/// credential threading (reusing duckdb-delta's `CreateBuilder`) lands in a later milestone.
+/// Build a local-filesystem-backed kernel default engine.
 pub(crate) fn build_local_engine() -> Arc<dyn Engine> {
     Arc::new(DefaultEngineBuilder::new(Arc::new(LocalFileSystem::new())).build())
+}
+
+/// Build a kernel default engine whose object store is chosen by the table URL's scheme — local
+/// for `file://`, S3 for `s3://`/`s3a://` (creds read from the standard `AWS_*` env vars and passed
+/// as object_store options). Used by the SM driver so it can list the log / read footers on cloud
+/// tables; DuckDB (httpfs) handles the data + reduce-query I/O separately.
+pub(crate) fn build_engine_for_url(url: &Url) -> Result<Arc<dyn Engine>, String> {
+    use delta_kernel::engine::default::storage::store_from_url_opts;
+    let mut opts: Vec<(String, String)> = Vec::new();
+    if matches!(url.scheme(), "s3" | "s3a") {
+        if let Ok(v) = std::env::var("AWS_REGION").or_else(|_| std::env::var("AWS_DEFAULT_REGION")) {
+            opts.push(("region".into(), v));
+        }
+        if let Ok(v) = std::env::var("AWS_ACCESS_KEY_ID") {
+            opts.push(("access_key_id".into(), v));
+        }
+        if let Ok(v) = std::env::var("AWS_SECRET_ACCESS_KEY") {
+            opts.push(("secret_access_key".into(), v));
+        }
+        if let Ok(v) = std::env::var("AWS_SESSION_TOKEN") {
+            opts.push(("session_token".into(), v));
+        }
+    }
+    let store = store_from_url_opts(url, opts)
+        .map_err(|e| format!("build object store for {url}: {e}"))?;
+    Ok(Arc::new(DefaultEngineBuilder::new(store).build()))
 }
 
 /// Resolve a user-supplied table location to a `Url`. Accepts an existing URL (e.g. `file://`,
 /// `s3://`) or a local filesystem path, which is canonicalized into a `file://` directory URL.
 pub(crate) fn table_url(path: &str) -> Result<Url, String> {
-    if let Ok(url) = Url::parse(path) {
+    if let Ok(mut url) = Url::parse(path) {
         // Treat single-character "schemes" as Windows drive letters, not URL schemes.
         if url.scheme().len() > 1 {
+            // The table root is a directory: ensure a trailing slash so the kernel's
+            // `Url::join("_delta_log/")` appends rather than replacing the last path segment
+            // (without it, `s3://b/a/tbl` + `_delta_log/` resolves to `s3://b/a/_delta_log/`).
+            if !url.path().ends_with('/') {
+                let with_slash = format!("{}/", url.path());
+                url.set_path(&with_slash);
+            }
             return Ok(url);
         }
     }
