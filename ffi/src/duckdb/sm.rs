@@ -16,20 +16,140 @@
 //! is in flight at a time. Callers that move the handle across threads must serialize access (a
 //! per-handle mutex) — the mutex is also the happens-before fence for the non-atomic refcounts.
 
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::ptr;
 use std::sync::Arc;
 
-use delta_kernel::plans::ir::plan::ResultPlan;
+use delta_kernel::arrow::array::ffi::{from_ffi, FFI_ArrowArray, FFI_ArrowSchema};
+use delta_kernel::arrow::array::{RecordBatch, StructArray};
+use delta_kernel::engine::arrow_data::ArrowEngineData;
+use delta_kernel::plans::ir::plan::{Plan, ResultPlan};
+use delta_kernel::plans::kernel_reducers::KdfControl;
 use delta_kernel::plans::state_machines::framework::coroutine::CoroutineSM;
 use delta_kernel::plans::state_machines::framework::state_machine::{
     EngineRequest, EngineResponse, NextStep, StateMachine,
 };
 use delta_kernel::plans::state_machines::snapshot::snapshot_state_machine_for;
+use delta_kernel::snapshot::Snapshot;
 use delta_kernel::Engine;
 use delta_kernel_datafusion_engine::DataFusionExecutor;
 
+use super::plan_to_sql::result_plan_to_sql_until;
 use super::{build_local_engine, finalize_result_plan_to_sql, table_url, write_err};
+
+/// C callback that executes `sql` in the engine's query executor (DuckDB) and hands the *entire*
+/// result back as one Arrow C Data batch, moved into `*out_array` / `*out_schema`. Returns 0 on
+/// success; nonzero leaves the out-params untouched and fails the driving SM. This is how DuckDB
+/// — not the kernel's DataFusion executor — runs an [`EngineRequest::Reduce`]'s lowered plan.
+///
+/// # Safety
+/// `sql_ptr` points to `sql_len` valid UTF-8 bytes; `out_array`/`out_schema` are writable and
+/// uninitialized (the callback initializes them via Arrow's C Data export). `ctx` is opaque to
+/// the kernel and passed through verbatim.
+pub type KdfExecSqlFn = unsafe extern "C" fn(
+    ctx: *mut c_void,
+    sql_ptr: *const c_char,
+    sql_len: usize,
+    out_array: *mut FFI_ArrowArray,
+    out_schema: *mut FFI_ArrowSchema,
+) -> i32;
+
+/// Drive a snapshot-construction SM to completion, executing each [`EngineRequest::Reduce`] in
+/// DuckDB via `exec_sql`: lower the reduce's plan to SQL, run it in DuckDB, import the Arrow
+/// result, and drain it through the kernel reducer. The SM bodies are `!Send`; this runs them
+/// step-by-step on the calling thread.
+fn drive_snapshot_via_duckdb(
+    mut sm: CoroutineSM<Snapshot>,
+    exec_sql: KdfExecSqlFn,
+    ctx: *mut c_void,
+) -> Result<Snapshot, String> {
+    loop {
+        let response = match sm.get_step() {
+            Ok(EngineRequest::Reduce {
+                nodes,
+                terminal,
+                sink,
+            }) => {
+                let plan = Plan { nodes };
+                let sql = result_plan_to_sql_until(&plan, terminal)
+                    .map_err(|e| format!("lower snapshot reduce to SQL: {e}"))?;
+                // Run the reduce's plan in DuckDB and import the result as a single Arrow batch.
+                let csql = CString::new(sql).map_err(|_| "reduce SQL contains NUL".to_string())?;
+                let mut out_array = FFI_ArrowArray::empty();
+                let mut out_schema = FFI_ArrowSchema::empty();
+                let rc = unsafe {
+                    exec_sql(
+                        ctx,
+                        csql.as_ptr(),
+                        csql.as_bytes().len(),
+                        &mut out_array,
+                        &mut out_schema,
+                    )
+                };
+                if rc != 0 {
+                    return Err(format!("DuckDB exec of snapshot reduce SQL failed (rc={rc})"));
+                }
+                let array_data = unsafe { from_ffi(out_array, &out_schema) }
+                    .map_err(|e| format!("import reduce result from Arrow C Data: {e}"))?;
+                let batch: RecordBatch = StructArray::from(array_data).into();
+                // Drain the single batch through the reducer (mirrors the DataFusion executor's
+                // `drain_reduce_sink`, but the rows came from DuckDB).
+                let mut handle = sink.new_handle();
+                let engine_data = ArrowEngineData::new(batch);
+                match handle
+                    .apply(&engine_data)
+                    .map_err(|e| format!("reducer apply: {e}"))?
+                {
+                    KdfControl::Continue | KdfControl::Break => {}
+                }
+                EngineResponse::Reducer(handle.finish())
+            }
+            Ok(EngineRequest::SchemaQuery(q)) => {
+                return Err(format!(
+                    "snapshot SM issued an unexpected SchemaQuery (path {}); only Reduce is supported",
+                    q.file_path
+                ));
+            }
+            // A zero-yield/terminal SM returns Err from get_step; prime the trampoline with Empty.
+            Err(_) => EngineResponse::Empty,
+        };
+        match sm
+            .submit(Ok(response))
+            .map_err(|e| format!("snapshot SM submit: {e}"))?
+        {
+            NextStep::Continue => {}
+            NextStep::Done(snapshot) => return Ok(snapshot),
+        }
+    }
+}
+
+#[cfg(test)]
+mod pm_sql_dump {
+    //! Diagnostic: lower the snapshot SM's first (P&M) reduce request to DuckDB SQL so it can be
+    //! run directly in DuckDB. `DUMP_PM_TABLE=<table> cargo test -p delta_kernel_ffi --features
+    //! duckdb pm_sql -- --nocapture`.
+    use super::*;
+    use delta_kernel::plans::ir::plan::Plan;
+
+    #[test]
+    fn dump_pm_sql() {
+        let Ok(path) = std::env::var("DUMP_PM_TABLE") else {
+            return;
+        };
+        let engine = build_local_engine();
+        let url = table_url(&path).expect("table_url");
+        let mut sm = snapshot_state_machine_for(url, None, engine.as_ref()).expect("snapshot SM");
+        match sm.get_step().expect("get_step") {
+            EngineRequest::Reduce { nodes, terminal, .. } => {
+                let plan = Plan { nodes };
+                let sql = super::super::plan_to_sql::result_plan_to_sql_until(&plan, terminal)
+                    .expect("lower P&M plan to SQL");
+                println!("\n===PM_SQL_BEGIN===\n{sql}\n===PM_SQL_END===\n");
+            }
+            other => panic!("expected Reduce, got {other:?}"),
+        }
+    }
+}
 
 /// Request kind returned by [`kdf_sm_get_step`].
 pub const KDF_REQ_SCHEMA_QUERY: i32 = 0;
@@ -61,7 +181,12 @@ pub struct KdfSM {
 }
 
 impl KdfSM {
-    fn open(path: &str, version: i64) -> Result<KdfSM, String> {
+    fn open(
+        path: &str,
+        version: i64,
+        exec_sql: KdfExecSqlFn,
+        exec_ctx: *mut c_void,
+    ) -> Result<KdfSM, String> {
         let engine = build_local_engine();
         let url = table_url(path)?;
         let executor = DataFusionExecutor::try_new_with_engine(Arc::clone(&engine))
@@ -74,15 +199,13 @@ impl KdfSM {
             .map_err(|e| format!("build tokio runtime: {e}"))?;
         // Snapshot construction is itself driven through a state machine: the snapshot SM resolves
         // protocol+metadata via an engine Reduce over the log (the eager directory listing happens
-        // in `snapshot_state_machine_for`), and the scan SM is then built from that snapshot.
+        // in `snapshot_state_machine_for`). The Reduce's plan is executed *in DuckDB* through the
+        // `exec_sql` callback — not the kernel's DataFusion executor — and the resulting Arrow rows
+        // are drained through the kernel reducer. The scan SM is then built from that snapshot.
         let version_opt = if version >= 0 { Some(version as u64) } else { None };
         let snapshot_sm = snapshot_state_machine_for(url, version_opt, engine.as_ref())
             .map_err(|e| format!("build snapshot SM: {e}"))?;
-        let snapshot = Arc::new(
-            runtime
-                .block_on(executor.drive_to_completion(snapshot_sm))
-                .map_err(|e| format!("drive snapshot SM: {e}"))?,
-        );
+        let snapshot = Arc::new(drive_snapshot_via_duckdb(snapshot_sm, exec_sql, exec_ctx)?);
         let scan = snapshot
             .scan_builder()
             .build()
@@ -115,6 +238,8 @@ pub unsafe extern "C" fn kdf_sm_scan_open(
     path_ptr: *const c_char,
     path_len: usize,
     version: i64,
+    exec_sql: KdfExecSqlFn,
+    exec_ctx: *mut c_void,
     out_err: *mut *mut c_char,
 ) -> *mut KdfSM {
     if !out_err.is_null() {
@@ -124,10 +249,11 @@ pub unsafe extern "C" fn kdf_sm_scan_open(
         unsafe { write_err(out_err, "kdf_sm_scan_open: null path pointer") };
         return ptr::null_mut();
     }
-    let outcome = std::panic::catch_unwind(|| {
+    let exec_ctx_addr = exec_ctx as usize;
+    let outcome = std::panic::catch_unwind(move || {
         let bytes = unsafe { std::slice::from_raw_parts(path_ptr as *const u8, path_len) };
         let path = std::str::from_utf8(bytes).map_err(|e| format!("table path is not UTF-8: {e}"))?;
-        KdfSM::open(path, version)
+        KdfSM::open(path, version, exec_sql, exec_ctx_addr as *mut c_void)
     });
     match outcome {
         Ok(Ok(sm)) => Box::into_raw(Box::new(sm)),

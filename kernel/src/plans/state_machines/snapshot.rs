@@ -18,13 +18,14 @@ use super::scan::reconciliation::{
     commit_load_schema, log_files_to_rows, FSR_BASE,
 };
 use crate::crc::LazyCrc;
+use crate::expressions::{col, column_expr, lit, Expression};
 use crate::log_segment::LogSegment;
 use crate::metrics::MetricId;
 use crate::plans::errors::{DeltaError, DeltaErrorCode, KernelErrAsDelta};
 use crate::{delta_error, Engine};
 use crate::plans::ir::nodes::{FileType, LoadColumnInfo, LoadNode};
 use crate::plans::kernel_reducers::MetadataProtocolReader;
-use crate::schema::ColumnName;
+use crate::schema::{ColumnName, DataType, StructField};
 use crate::snapshot::Snapshot;
 use crate::table_configuration::TableConfiguration;
 use crate::FileMeta;
@@ -74,7 +75,7 @@ pub fn snapshot_state_machine(
                 file_schema: Arc::clone(&base),
                 file_type: FileType::Json,
                 base_url: Some(log_root.clone()),
-                metadata_derived_columns: vec![],
+                metadata_derived_columns: vec![ColumnName::new(["version"])],
                 file_meta: LoadColumnInfo {
                     path_column: ColumnName::new(["path"]),
                     file_size_column: Some(ColumnName::new(["size"])),
@@ -83,6 +84,9 @@ pub fn snapshot_state_machine(
                 dv_ref: None,
                 version: None,
             })?;
+            let version_field = StructField::nullable("version", DataType::LONG);
+            let cp_version =
+                log_segment.checkpoint_version.unwrap_or(log_segment.end_version) as i64;
 
             // Checkpoint manifest, if present — protocol / metaData live in the manifest (not in
             // sidecars), so no sidecar chase is needed for P&M. A checkpoint may be parquet or (V2)
@@ -109,10 +113,16 @@ pub fn snapshot_state_machine(
                 arms.push(commits);
             }
             if !cp_parquet.is_empty() {
-                arms.push(ctx.scan_parquet(cp_parquet, Arc::clone(&base))?);
+                arms.push(
+                    ctx.scan_parquet(cp_parquet, Arc::clone(&base))?
+                        .append_col_typed(version_field.clone(), lit(cp_version))?,
+                );
             }
             if !cp_json.is_empty() {
-                arms.push(ctx.scan_json(cp_json, Arc::clone(&base))?);
+                arms.push(
+                    ctx.scan_json(cp_json, Arc::clone(&base))?
+                        .append_col_typed(version_field.clone(), lit(cp_version))?,
+                );
             }
             let mut arms = arms.into_iter();
             let source = arms.next().ok_or_else(|| {
@@ -128,12 +138,21 @@ pub fn snapshot_state_machine(
                 source.union_all(&rest)?
             };
 
-            // Engine reads the log actions and drains them into the P&M reducer.
-            //
-            // NOTE: this is first-seen over an (unordered) union, so for tables that CHANGE protocol
-            // or metadata across versions it can pick a stale P&M. Correct for the common case (P&M at
-            // a single version); the version-aware refinement (max-by-version per action) is a
-            // follow-up. Behind DELTA_KERNEL_PLAN_SM (experimental), so the default path is unaffected.
+            // Max-by-version: keep the latest protocol and latest metaData (PARTITION BY a scalar
+            // action kind, ORDER BY version DESC, rn=1). kind passed as the group-by expression
+            // directly (no appended column).
+            let value_columns: Vec<String> = base.fields().map(|f| f.name().clone()).collect();
+            let kind_expr = Expression::case_when(
+                vec![
+                    (col(["protocol", "minReaderVersion"]).is_not_null(), lit(1i64)),
+                    (col(["metaData", "id"]).is_not_null(), lit(2i64)),
+                ],
+                lit(0i64),
+            );
+            let source =
+                source.max_by_version([kind_expr], column_expr!("version"), value_columns)?;
+
+            // Engine reads the deduped (latest-per-kind) actions and drains P&M into the reducer.
             let (protocol, metadata) = ctx
                 .reduce(
                     &mut engine,
