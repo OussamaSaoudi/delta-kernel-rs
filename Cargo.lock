@@ -2020,7 +2020,6 @@ name = "delta_kernel_ffi"
 version = "0.21.0"
 dependencies = [
  "cbindgen",
- "delta-kernel-datafusion-engine",
  "delta-kernel-unity-catalog",
  "delta_kernel",
  "delta_kernel_ffi_macros",

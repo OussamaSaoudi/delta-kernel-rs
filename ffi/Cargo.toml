@@ -28,9 +28,6 @@ delta_kernel = { path = "../kernel", default-features = false, features = [
 delta_kernel_ffi_macros = { path = "../ffi-proc-macros", version = "0.21.0" }
 delta-kernel-unity-catalog = { path = "../delta-kernel-unity-catalog", optional = true }
 unity-catalog-delta-client-api = { path = "../unity-catalog-delta-client-api", optional = true }
-# Phase-1 DuckDB plan-driven scan shim (feature = "duckdb"): execute the scan-metadata
-# ResultPlan via the DataFusion engine and a tokio runtime to drive the `!Send` SM future.
-delta-kernel-datafusion-engine = { path = "../delta-kernel-datafusion-engine", optional = true }
 tokio = { version = "1.47", optional = true, features = ["full"] }
 # Phase-2: proto-encoded ResultPlan over FFI (prost runtime for the generated plan-IR types).
 prost = { version = "0.13", optional = true }
@@ -76,7 +73,6 @@ test-ffi = []
 # declarative scan-metadata state machine through the DataFusion engine. Pulls in the
 # declarative-plans IR, the default (rustls) engine for IO, and a tokio runtime.
 duckdb = [
-  "dep:delta-kernel-datafusion-engine",
   "dep:tokio",
   "dep:prost",
   "delta_kernel/declarative-plans",
