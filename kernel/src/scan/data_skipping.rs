@@ -395,14 +395,14 @@ fn adjust_scalar_for_max_stat_truncation(val: &Scalar) -> Scalar {
 /// `stats_parsed.nullCount.*`.
 /// For partition columns, rewrites to `partitionValues_parsed.*` since the partition value is
 /// the exact value for every row in the file (serving as both min and max).
-struct DataSkippingPredicateCreator<'a> {
+pub(crate) struct DataSkippingPredicateCreator<'a> {
     /// Physical names of partition columns. For these columns, stats come from
     /// `partitionValues.<col>` (exact values) instead of min/max ranges.
     partition_columns: &'a HashSet<String>,
 }
 
 impl<'a> DataSkippingPredicateCreator<'a> {
-    fn new(partition_columns: &'a HashSet<String>) -> Self {
+    pub(crate) fn new(partition_columns: &'a HashSet<String>) -> Self {
         Self { partition_columns }
     }
 

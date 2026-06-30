@@ -65,6 +65,7 @@ impl FullState {
                 stats,
                 /* parts= */ None,
                 Arc::new(fsr_dedup_key()),
+                /* predicate= */ None,
             )
             .await?;
             ctx.into_result_plan(reconciled)

@@ -58,6 +58,7 @@ pub(super) async fn build_scan_plan(
         stats,
         parts.clone(),
         Arc::new(scan_file_dedup_key()),
+        scan.physical_predicate(),
     )
     .await?;
 

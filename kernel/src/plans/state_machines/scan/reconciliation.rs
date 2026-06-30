@@ -24,6 +24,8 @@
 //! ([`retention_filter`]) all live here -- they are inputs to the same canonical pipeline and
 //! share its lifetime.
 
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 
 use url::Url;
@@ -40,7 +42,10 @@ use crate::actions::{
 use crate::expressions::{
     col, column_expr, lit, ColumnName, Expression, ExpressionRef, Predicate, PredicateRef, Scalar,
 };
+use crate::kernel_predicates::KernelPredicateEvaluator;
 use crate::path::ParsedLogPath;
+use crate::scan::data_skipping::DataSkippingPredicateCreator;
+use crate::transforms::ExpressionTransform;
 use crate::plans::errors::{DeltaError, DeltaErrorCode, KernelErrAsDelta};
 use crate::plans::ir::nodes::{FileType, LoadColumnInfo, LoadNode};
 use crate::plans::state_machines::framework::coroutine::Engine;
@@ -221,6 +226,76 @@ fn retention_filter(min_file_ts: i64, txn_expiry: Option<i64>) -> Predicate {
 }
 
 // ============================================================================
+// Data-skipping (file pruning by column stats)
+// ============================================================================
+
+/// Re-roots every column reference in a data-skipping predicate under a fixed prefix path.
+///
+/// [`DataSkippingPredicateCreator`] emits column references rooted at the stats layout it
+/// owns -- e.g. `stats_parsed.minValues.value`, `stats_parsed.nullCount.value`,
+/// `stats_parsed.numRecords`, and `partitionValues_parsed.<col>`. In the reconciliation
+/// pipeline those parsed structs live one level deeper, under the `add` action slot (see
+/// [`ReconciliationPlanBuilder::with_json_stats_parsed`] /
+/// [`ReconciliationPlanBuilder::with_partitions_parsed`], which install
+/// `add.stats_parsed` / `add.partitionValues_parsed`). Prefixing every column with `["add"]`
+/// rewrites e.g. `stats_parsed.minValues.value` into `add.stats_parsed.minValues.value`.
+struct PrefixColumns {
+    prefix: ColumnName,
+}
+
+impl<'a> ExpressionTransform<'a> for PrefixColumns {
+    fn transform_expr_column(&mut self, name: &'a ColumnName) -> Option<Cow<'a, ColumnName>> {
+        Some(Cow::Owned(self.prefix.join(name)))
+    }
+}
+
+/// Build the conservative data-skipping filter predicate from the scan's physical predicate.
+///
+/// Returns `None` (emit no filter) when there is no predicate, when `add.stats_parsed` is not
+/// present in the plan (`shape.stats` is `None`), or when the predicate rewrites to nothing
+/// data-skippable (e.g. a bare column-column comparison).
+///
+/// The rewrite mirrors the live-scan [`crate::scan::data_skipping::DataSkippingFilter`]:
+/// 1. [`DataSkippingPredicateCreator::eval_sql_where`] rewrites the user predicate over the
+///    stats layout (`stats_parsed.{minValues,maxValues,nullCount,numRecords}.*`), treating
+///    partition columns specially (their exact value lives in `partitionValues_parsed.*`).
+/// 2. [`PrefixColumns`] re-roots those columns under the `add` action slot, matching where the
+///    reconciliation installs the parsed structs.
+/// 3. The result is wrapped as `DISTINCT(skip_pred, false)` so a file is kept when the skip
+///    predicate is TRUE **or** NULL (NULL = missing/indeterminate stats => cannot prove a
+///    non-match => must keep). Only files the stats prove cannot match (skip_pred = FALSE) are
+///    dropped. Correctness over aggressiveness.
+fn data_skipping_filter(
+    predicate: Option<&PredicateRef>,
+    shape: &ScanShape,
+) -> Option<Predicate> {
+    let predicate = predicate?;
+    // Only prune when the parsed stats struct actually exists in the plan.
+    shape.stats.as_ref()?;
+
+    // Physical names of partition columns referenced by the predicate. The creator routes these
+    // to `partitionValues_parsed.<col>` (exact value) and excludes them from stats lookups.
+    let partition_columns: HashSet<String> = shape
+        .partition_schema
+        .as_ref()
+        .map(|s| s.fields().map(|f| f.name().to_string()).collect())
+        .unwrap_or_default();
+
+    let skip_pred = DataSkippingPredicateCreator::new(&partition_columns).eval_sql_where(predicate)?;
+
+    let mut prefixer = PrefixColumns {
+        prefix: ColumnName::new(["add"]),
+    };
+    let rerooted = prefixer.transform_pred(&skip_pred)?.into_owned();
+
+    // Keep when TRUE or NULL; drop only when provably FALSE.
+    Some(Predicate::distinct(
+        Expression::from(rerooted),
+        Expression::literal(false),
+    ))
+}
+
+// ============================================================================
 // Reconciliation builder
 // ============================================================================
 
@@ -233,6 +308,7 @@ pub(super) fn build_reconciliation(
     shape: &ScanShape,
     base: &SchemaRef,
     dedup_key: ExpressionRef,
+    predicate: Option<&PredicateRef>,
 ) -> Result<PlanBuilder, DeltaError> {
     let stats = shape.stats.as_ref().map(|s| &s.schema);
     let parts = shape.partition_schema.as_ref();
@@ -370,13 +446,20 @@ pub(super) fn build_reconciliation(
         commit_dedup
     };
 
-    terminal_input
-        .filter(retention_filter(min_file_ts, txn_expiry))?
-        .drop_col(FSR_JOIN_KEY_COL)
+    // Apply tombstone/txn retention, then (conditionally) data skipping. The skip filter is
+    // emitted only when a predicate is present AND `add.stats_parsed` exists in the plan; when
+    // absent, the plan is unchanged (the no-predicate corpus stays byte-identical).
+    let retained = terminal_input.filter(retention_filter(min_file_ts, txn_expiry))?;
+    let skipped = match data_skipping_filter(predicate, shape) {
+        Some(skip) => retained.filter(Arc::new(skip))?,
+        None => retained,
+    };
+    skipped.drop_col(FSR_JOIN_KEY_COL)
 }
 
 /// Async wrapper: resolve the scan shape (yielding `SchemaQuery` / `Reduce` phases as
 /// needed) and then delegate to [`build_reconciliation`].
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_reconciliation(
     ctx: &Context,
     engine: &mut Engine,
@@ -385,9 +468,10 @@ pub(super) async fn execute_reconciliation(
     stats: Option<SchemaRef>,
     parts: Option<SchemaRef>,
     dedup_key: ExpressionRef,
+    predicate: Option<PredicateRef>,
 ) -> Result<PlanBuilder, DeltaError> {
     let shape = ScanShape::resolve(ctx, engine, snapshot, stats.as_ref(), parts).await?;
-    build_reconciliation(ctx, snapshot, &shape, base, dedup_key)
+    build_reconciliation(ctx, snapshot, &shape, base, dedup_key, predicate.as_ref())
 }
 
 /// Helper: scan a leaf checkpoint and align it to the expected post-checkpoint shape.

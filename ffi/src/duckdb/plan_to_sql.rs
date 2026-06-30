@@ -408,11 +408,42 @@ fn delta_load_sql(node: &PlanNode, n: &delta_kernel::plans::ir::nodes::LoadNode)
     if path_col.len() != 1 {
         return Err("delta_load path_column must be a top-level column".into());
     }
-    // The table-valued argument must be a subquery expression for DuckDB to bind it as a relation
-    // (a bare CTE name binds as a scalar). `(FROM n)` is a trivial CTE reference the optimizer
-    // flattens — NOT an inlined subplan.
+    // The Load reads EXACTLY these columns from its input relation: path, size, rowcount, dv, and
+    // the metadata-derived (broadcast) columns. Project the input to just those — `SELECT <cols>
+    // FROM input` — so nothing downstream forces reading more (and DuckDB can push the projection
+    // toward the read). The table-valued argument must be a subquery expression for DuckDB to bind
+    // it as a relation (a bare CTE name binds as a scalar).
+    let mut input_cols: Vec<String> = Vec::new();
+    let mut push = |c: &str| {
+        let q = quote_ident(c);
+        if !input_cols.contains(&q) {
+            input_cols.push(q);
+        }
+    };
+    push(&path_col[0]);
+    if let Some(c) = &n.file_meta.file_size_column {
+        if let [name] = c.path() {
+            push(name);
+        }
+    }
+    if let Some(c) = &n.file_meta.num_records_column {
+        if let [name] = c.path() {
+            push(name);
+        }
+    }
+    if let Some(dv) = &n.dv_ref {
+        if let [name] = dv.column.path() {
+            push(name);
+        }
+    }
+    for c in &n.metadata_derived_columns {
+        if let [name] = c.path() {
+            push(name);
+        }
+    }
+    let load_input = format!("(SELECT {} FROM {})", input_cols.join(", "), cte(node.inputs[0]));
     let mut args = vec![
-        format!("(FROM {})", cte(node.inputs[0])),
+        load_input,
         format!("file_type := '{file_type}'"),
         format!("file_schema := '{file_schema}'"),
         format!("path_column := '{}'", path_col[0].replace('\'', "''")),
@@ -581,7 +612,16 @@ fn expr_sql(e: &Expression, expected: Option<&DataType>, input: Option<&StructTy
             let parts = st
                 .fields()
                 .map(|f| {
-                    let raw = format!("map_extract(({map}), {})[1]", sql_string(f.name()));
+                    use delta_kernel::schema::{ColumnMetadataKey, MetadataValue};
+                    // The partitionValues map in the log is keyed by the *physical* column name on
+                    // column-mapping tables (logical name otherwise); extract by physical name when
+                    // the field carries one. The output field stays under the logical name (the
+                    // terminal Transform expects logical names here).
+                    let key = match f.get_config_value(&ColumnMetadataKey::ColumnMappingPhysicalName) {
+                        Some(MetadataValue::String(name)) => name.as_str(),
+                        _ => f.name(),
+                    };
+                    let raw = format!("map_extract(({map}), {})[1]", sql_string(key));
                     // Delta stores partition values as strings. Binary values become the UTF-8
                     // bytes of the string (CAST string->BLOB rejects non-ASCII); others cast.
                     let val = match f.data_type() {
@@ -827,7 +867,25 @@ fn scalar_sql(s: &Scalar) -> R<String> {
         Scalar::TimestampNtz(v) => format!("make_timestamp({v})"),
         Scalar::Null(dt) => format!("NULL::{}", datatype_sql(dt)?),
         Scalar::Binary(_) => return Err("binary scalar literal not lowered (P2 follow-up)".into()),
-        Scalar::Decimal(_) => return Err("decimal scalar literal not lowered (P2 follow-up)".into()),
+        Scalar::Decimal(d) => {
+            // A kernel Decimal carries the unscaled i128 `bits` plus precision/scale. Render the
+            // decimal point at `scale` and CAST to the matching DuckDB DECIMAL(p,s) type.
+            let (precision, scale) = (d.precision(), d.scale());
+            let bits = d.bits();
+            let negative = bits < 0;
+            let digits = bits.unsigned_abs().to_string();
+            let literal = if scale == 0 {
+                digits
+            } else {
+                let scale = scale as usize;
+                // Left-pad so there are at least `scale` fractional digits (plus a leading int digit).
+                let padded = format!("{digits:0>width$}", width = scale + 1);
+                let point = padded.len() - scale;
+                format!("{}.{}", &padded[..point], &padded[point..])
+            };
+            let sign = if negative { "-" } else { "" };
+            format!("CAST('{sign}{literal}' AS DECIMAL({precision},{scale}))")
+        }
         other => return Err(format!("scalar literal not lowered: {other:?}")),
     })
 }
