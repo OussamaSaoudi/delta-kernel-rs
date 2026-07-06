@@ -48,42 +48,6 @@ pub const KDF_STEP_REDUCE: i32 = 1;
 /// `kdf_sm_get_step` result: the state machine is finished; call `kdf_sm_result_sql`.
 pub const KDF_STEP_DONE: i32 = 0;
 
-/// Build a data-skipping predicate from `DELTA_SM_PREDICATE` ("col OP literal"; OP one of
-/// `>= <= != > < =`; literal parsed i32 → i64 → f64 → quoted string). `None` ⇒ no skipping.
-fn predicate_from_env() -> Option<delta_kernel::expressions::Predicate> {
-    use delta_kernel::expressions::{Expression, Scalar};
-    let spec = std::env::var("DELTA_SM_PREDICATE").ok()?;
-    let spec = spec.trim();
-    for sym in [">=", "<=", "!=", ">", "<", "="] {
-        let Some(idx) = spec.find(sym) else { continue };
-        let col = spec[..idx].trim();
-        let rhs = spec[idx + sym.len()..].trim();
-        if col.is_empty() || rhs.is_empty() {
-            return None;
-        }
-        let scalar: Scalar = if let Ok(i) = rhs.parse::<i32>() {
-            i.into()
-        } else if let Ok(i) = rhs.parse::<i64>() {
-            i.into()
-        } else if let Ok(f) = rhs.parse::<f64>() {
-            f.into()
-        } else {
-            rhs.trim_matches(|c| c == '\'' || c == '"').to_string().into()
-        };
-        let col_expr = Expression::column([col]);
-        let lit = Expression::literal(scalar);
-        return Some(match sym {
-            ">=" => col_expr.ge(lit),
-            "<=" => col_expr.le(lit),
-            "!=" => col_expr.ne(lit),
-            ">" => col_expr.gt(lit),
-            "<" => col_expr.lt(lit),
-            _ => col_expr.eq(lit),
-        });
-    }
-    None
-}
-
 /// Decode an [`EnginePredicate`] into a kernel [`Predicate`] using the SAME visitor logic
 /// `apply_predicate` uses (run the engine's visitor, then `unwrap_kernel_predicate`). The engine
 /// state behind the predicate must remain valid for the duration of this call.
@@ -140,7 +104,7 @@ pub struct KdfSM {
     phase: Phase,
     /// Data-skipping predicate supplied by the engine at `open` (visited once there, while the
     /// engine state it borrows is alive). Applied to the scan builder when the snapshot SM finishes.
-    /// `None` ⇒ fall back to `predicate_from_env()` (debug escape hatch).
+    /// `None` ⇒ no data-skipping predicate.
     predicate: Option<Arc<delta_kernel::expressions::Predicate>>,
     /// The pending `Reduce`'s sink, set when `get_step` returns `KDF_STEP_REDUCE`; consumed by the
     /// matching `submit_reduce` to drain the kernel reducer.
@@ -182,12 +146,9 @@ impl KdfSM {
                 NextStep::Continue => Phase::Snapshot(sm),
                 NextStep::Done(snapshot) => {
                     let mut sb = Arc::new(snapshot).scan_builder();
-                    // Prefer the engine-supplied predicate (visited at `open`); fall back to the
-                    // `DELTA_SM_PREDICATE` env var as a debug escape hatch when none was supplied.
+                    // Apply the engine-supplied data-skipping predicate (visited at `open`), if any.
                     if let Some(pred) = self.predicate.clone() {
                         sb = sb.with_predicate(Some(pred));
-                    } else if let Some(pred) = predicate_from_env() {
-                        sb = sb.with_predicate(Some(Arc::new(pred)));
                     }
                     let scan = sb.build().map_err(|e| format!("build scan: {e}"))?;
                     let scan_sm = if self.metadata_only {
@@ -270,9 +231,6 @@ impl KdfSM {
             Phase::Done(rp) => {
                 let sql = result_plan_to_sql_until(&rp.plan, rp.result)
                     .map_err(|e| format!("lower result plan to SQL: {e}"))?;
-                if std::env::var("KDF_DUMP_SQL").is_ok() {
-                    eprintln!("==== KDF result SQL ====\n{sql}\n========================");
-                }
                 Ok(sql)
             }
             _ => Err("kdf_sm_result_sql: SM not finished (drive get_step/submit until DONE)".into()),
@@ -287,7 +245,7 @@ impl KdfSM {
 /// `predicate`, if non-null, is a data-skipping predicate the engine wants applied to the scan
 /// (used to emit the kernel's stats-based file-skip filter). It is visited ONCE here — the engine
 /// state it borrows need only outlive this (synchronous) call — and stashed on the handle for the
-/// scan builder. When null, the SM falls back to the `DELTA_SM_PREDICATE` env var (debug only).
+/// scan builder. When null, no data-skipping predicate is applied.
 ///
 /// # Safety
 /// `path_ptr` points to `path_len` valid UTF-8 bytes. `out_err`, if non-null, is writable.
