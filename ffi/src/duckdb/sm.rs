@@ -14,9 +14,14 @@
 //!
 //! [`Reduce`]: EngineRequest::Reduce
 //!
-//! # Threading
-//! [`KdfSM`] wraps `!Send` coroutine SMs; it is a single-owner cursor. Never call two `kdf_sm_*`
-//! entry points for one handle concurrently.
+//! # Threading & error contract (applies to every `kdf_sm_*` export)
+//! [`KdfSM`] wraps `!Send` coroutine SMs; it is a **single-owner cursor**. Never call two `kdf_sm_*`
+//! entry points for one handle concurrently, and never share a handle across threads without external
+//! synchronization — there is no internal locking.
+//!
+//! The handle is **single-shot on error**: any export that signals failure (a `-1` / null return with
+//! `out_err` set) leaves the handle poisoned. Do not call further `kdf_sm_*` entry points on a poisoned
+//! handle (they just return the poison error); free it with [`kdf_sm_free`].
 
 use std::ffi::{c_char, CString};
 use std::ptr;
@@ -196,7 +201,10 @@ impl KdfSM {
                     let schema = footer_schema(self.engine.as_ref(), &q.file_path)?;
                     self.submit_response(EngineResponse::Schema(schema))?;
                 }
-                // Zero-yield / terminal: prime the trampoline; submit handles the Done transition.
+                // A `CoroutineSM` returns `Err` from `get_step` only at a zero-yield boundary — it has
+                // no pending request, so its terminal result is delivered on the next `submit`. We
+                // prime that submit with `Empty` and let it drive the SM to `Done`. If `submit` itself
+                // errors, that is a genuine SM failure and propagates via `?` (we do NOT mask it).
                 Err(_) => self.submit_response(EngineResponse::Empty)?,
             }
         }
@@ -218,6 +226,10 @@ impl KdfSM {
             unsafe { from_ffi(array, &schema) }.map_err(|e| format!("import reduce result: {e}"))?;
         let batch: RecordBatch = StructArray::from(array_data).into();
         let mut handle = sink.new_handle();
+        // Contract: DuckDB runs the whole Reduce query and hands back its result as exactly ONE Arrow
+        // batch, so we apply once and finish. `KdfControl::Break` ("stop pulling input") is therefore a
+        // no-op here — there is no further input to withhold. If this ever fed a reducer more than one
+        // batch per Reduce, Break would have to short-circuit before applying the rest.
         match handle.apply(&ArrowEngineData::new(batch)).map_err(|e| format!("reducer apply: {e}"))? {
             KdfControl::Continue | KdfControl::Break => {}
         }
