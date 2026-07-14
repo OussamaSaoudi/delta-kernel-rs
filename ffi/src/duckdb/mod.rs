@@ -186,10 +186,10 @@ pub unsafe extern "C" fn kdf_resolve_dv(
     }
 }
 
-/// Free an error string produced by [`kdf_scan_open`].
+/// Free an error string produced by any `kdf_*` export's `*out_err` path (or a `*_sql` return).
 ///
 /// # Safety
-/// `s` must be null or a pointer produced by this crate's `*out_err` path, freed at most once.
+/// `s` must be null or a pointer produced by this crate's `*out_err`/`*_sql` path, freed at most once.
 #[no_mangle]
 pub unsafe extern "C" fn kdf_string_free(s: *mut c_char) {
     if !s.is_null() {

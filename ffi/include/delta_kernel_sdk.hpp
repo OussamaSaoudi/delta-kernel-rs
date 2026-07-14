@@ -149,67 +149,72 @@ private:
 };
 
 //===----------------------------------------------------------------------===//
-// The scan state machine
+// The state machines
+//
+// The read path is two steppable SMs driven in sequence, mirroring the kernel's domain model:
+//   Snapshot::Open(path, version) -> drive to Done -> Snapshot::Scan(...) -> Scan -> drive to Done.
+// Both are driven identically (GetStep/ReduceSql/ReducePlan/SubmitReduce until Done); they differ in
+// their terminal — a Snapshot yields a built snapshot (queryable version, scan factory), a Scan
+// yields the ResultPlan the engine executes.
 //===----------------------------------------------------------------------===//
 
-//! What `ScanStateMachine::GetStep()` returned: the kernel needs a Reduce run, or the SM is done.
+//! What a `GetStep()` returned: the kernel needs a Reduce run, or the SM is done.
 enum class Step {
 	Reduce, //! KDF_STEP_REDUCE: fetch the pending reduce (SQL or plan), run it, SubmitReduce the Arrow.
-	Done,   //! KDF_STEP_DONE: fetch the terminal result (SQL or plan) and execute the scan.
+	Done,   //! KDF_STEP_DONE: the SM finished; fetch its terminal.
 };
 
-//! Move-only RAII owner of a `KdfSM*`. Opens (`Open`), drives (`GetStep`/`Submit*`), and yields the
-//! terminal plan (`Result*`). The kernel is passive: DuckDB owns the loop and calls these; no engine
-//! callback is ever passed into the kernel. Frees the SM with `kdf_sm_free` on scope exit — including
-//! on any exception thrown by a member, so the driver loop needs no manual cleanup.
-class ScanStateMachine {
-public:
-	ScanStateMachine() = default;
-	~ScanStateMachine() { reset(); }
+class Scan; // defined below; Snapshot::Scan() returns one.
 
-	ScanStateMachine(ScanStateMachine &&o) noexcept : sm_(o.sm_) { o.sm_ = nullptr; }
-	ScanStateMachine &operator=(ScanStateMachine &&o) noexcept {
+//! Move-only RAII owner of a `KdfSnapshot*`. Opens the snapshot SM (`Open`), is driven to a built
+//! point-in-time snapshot (`GetStep`/`Reduce*`/`SubmitReduce` until Done), then reports its `Version`
+//! and builds `Scan`s (`Scan(...)`). Frees with `kdf_snapshot_free` on scope exit — including on any
+//! thrown exception, so the driver loop needs no manual cleanup. No engine callback passes into the
+//! kernel; the engine drives.
+class Snapshot {
+public:
+	Snapshot() = default;
+	~Snapshot() { reset(); }
+
+	Snapshot(Snapshot &&o) noexcept : h_(o.h_) { o.h_ = nullptr; }
+	Snapshot &operator=(Snapshot &&o) noexcept {
 		if (this != &o) {
 			reset();
-			sm_ = o.sm_;
-			o.sm_ = nullptr;
+			h_ = o.h_;
+			o.h_ = nullptr;
 		}
 		return *this;
 	}
-	ScanStateMachine(const ScanStateMachine &) = delete;
-	ScanStateMachine &operator=(const ScanStateMachine &) = delete;
+	Snapshot(const Snapshot &) = delete;
+	Snapshot &operator=(const Snapshot &) = delete;
 
-	//! Open a steppable scan SM over the Delta table at `path` (`version` < 0 = latest).
-	//! `metadata_only` selects the file-list-terminal SM. `predicate`, if non-null, is a
-	//! data-skipping `ffi::EnginePredicate` the kernel visits ONCE here (its borrowed engine state
-	//! need only outlive this call). Throws `KernelException` on failure.
-	static ScanStateMachine Open(const std::string &path, int64_t version, bool metadata_only,
-	                             ffi::EnginePredicate *predicate = nullptr) {
+	//! Open a steppable snapshot SM over the Delta table at `path` (`version` < 0 = latest).
+	//! Throws `KernelException` on failure.
+	static Snapshot Open(const std::string &path, int64_t version) {
 		char *err = nullptr;
-		ffi::KdfSM *sm =
-		    ffi::kdf_scan_open(path.c_str(), path.size(), version, metadata_only, predicate, &err);
-		if (!sm) {
-			detail::ThrowKernelError("kdf_scan_open", err);
+		ffi::KdfSnapshot *h = ffi::kdf_snapshot_open(path.c_str(), path.size(), version, &err);
+		if (!h) {
+			detail::ThrowKernelError("kdf_snapshot_open", err);
 		}
-		return ScanStateMachine(sm);
+		return Snapshot(h);
 	}
 
-	//! Advance the SM to the next Reduce or to Done. Throws on error.
+	//! Advance the snapshot SM to the next Reduce or to Done. Throws on error.
 	Step GetStep() {
 		char *err = nullptr;
-		int32_t kind = ffi::kdf_sm_get_step(sm_, &err);
+		int32_t kind = ffi::kdf_snapshot_get_step(h_, &err);
 		if (kind < 0) {
-			detail::ThrowKernelError("kdf_sm_get_step", err);
+			detail::ThrowKernelError("kdf_snapshot_get_step", err);
 		}
 		return kind == ffi::KDF_STEP_DONE ? Step::Done : Step::Reduce;
 	}
 
-	//! The pending Reduce lowered to DuckDB SQL (legacy transport). Valid after GetStep()==Reduce.
+	//! The pending Reduce lowered to DuckDB SQL. Valid after GetStep()==Reduce.
 	KernelString ReduceSql() {
 		char *err = nullptr;
-		char *sql = ffi::kdf_sm_reduce_sql(sm_, &err);
+		char *sql = ffi::kdf_snapshot_reduce_sql(h_, &err);
 		if (!sql) {
-			detail::ThrowKernelError("kdf_sm_reduce_sql", err);
+			detail::ThrowKernelError("kdf_snapshot_reduce_sql", err);
 		}
 		return KernelString(sql);
 	}
@@ -218,28 +223,121 @@ public:
 	KernelBytes ReducePlan() {
 		char *err = nullptr;
 		size_t len = 0;
-		uint8_t *buf = ffi::kdf_sm_reduce_plan(sm_, &len, &err);
+		uint8_t *buf = ffi::kdf_snapshot_reduce_plan(h_, &len, &err);
 		if (!buf) {
-			detail::ThrowKernelError("kdf_sm_reduce_plan", err);
+			detail::ThrowKernelError("kdf_snapshot_reduce_plan", err);
 		}
 		return KernelBytes(buf, len);
 	}
 
-	//! Hand the pending Reduce's result back as one Arrow C Data batch (ownership moves into the
-	//! kernel; the structs are emptied). Throws on error.
+	//! Hand the pending Reduce's result back as one Arrow C Data batch (ownership moves in; the
+	//! structs are emptied). Throws on error.
 	void SubmitReduce(ffi::FFI_ArrowArray *array, ffi::FFI_ArrowSchema *schema) {
 		char *err = nullptr;
-		if (ffi::kdf_sm_submit_reduce(sm_, array, schema, &err) != 0) {
-			detail::ThrowKernelError("kdf_sm_submit_reduce", err);
+		if (ffi::kdf_snapshot_submit_reduce(h_, array, schema, &err) != 0) {
+			detail::ThrowKernelError("kdf_snapshot_submit_reduce", err);
 		}
 	}
 
-	//! The terminal ResultPlan lowered to DuckDB SQL (legacy transport). Valid after GetStep()==Done.
+	//! The finished snapshot's version. Valid after the SM reached Done. Throws on error.
+	int64_t Version() {
+		char *err = nullptr;
+		int64_t v = ffi::kdf_snapshot_version(h_, &err);
+		if (v < 0) {
+			detail::ThrowKernelError("kdf_snapshot_version", err);
+		}
+		return v;
+	}
+
+	//! Build a scan off the finished snapshot. `metadata_only` selects the file-list-terminal SM;
+	//! `predicate`, if non-null, is a data-skipping `ffi::EnginePredicate` the kernel visits ONCE here
+	//! (its borrowed engine state need only outlive this call). The snapshot is unchanged and can
+	//! build further scans. Throws on error. (Defined out-of-line below, after `Scan`.)
+	class Scan Scan(bool metadata_only, ffi::EnginePredicate *predicate = nullptr);
+
+	ffi::KdfSnapshot *get() const { return h_; }
+	bool valid() const { return h_ != nullptr; }
+
+private:
+	explicit Snapshot(ffi::KdfSnapshot *h) : h_(h) {}
+	void reset() {
+		if (h_) {
+			ffi::kdf_snapshot_free(h_);
+			h_ = nullptr;
+		}
+	}
+	ffi::KdfSnapshot *h_ = nullptr;
+};
+
+//! Move-only RAII owner of a `KdfScan*` (built from a `Snapshot`). Driven to a terminal ResultPlan
+//! (`GetStep`/`Reduce*`/`SubmitReduce` until Done), then yields it as SQL (`ResultSql`) or proto
+//! bytes (`ResultPlan`). Frees with `kdf_scan_free` on scope exit, incl. on throw.
+class Scan {
+public:
+	Scan() = default;
+	~Scan() { reset(); }
+
+	Scan(Scan &&o) noexcept : h_(o.h_) { o.h_ = nullptr; }
+	Scan &operator=(Scan &&o) noexcept {
+		if (this != &o) {
+			reset();
+			h_ = o.h_;
+			o.h_ = nullptr;
+		}
+		return *this;
+	}
+	Scan(const Scan &) = delete;
+	Scan &operator=(const Scan &) = delete;
+
+	//! Wrap a raw `KdfScan*` (from `kdf_snapshot_scan`); takes ownership. Prefer `Snapshot::Scan`.
+	explicit Scan(ffi::KdfScan *h) : h_(h) {}
+
+	//! Advance the scan SM to the next Reduce or to Done. Throws on error.
+	Step GetStep() {
+		char *err = nullptr;
+		int32_t kind = ffi::kdf_scan_get_step(h_, &err);
+		if (kind < 0) {
+			detail::ThrowKernelError("kdf_scan_get_step", err);
+		}
+		return kind == ffi::KDF_STEP_DONE ? Step::Done : Step::Reduce;
+	}
+
+	//! The pending Reduce lowered to DuckDB SQL. Valid after GetStep()==Reduce.
+	KernelString ReduceSql() {
+		char *err = nullptr;
+		char *sql = ffi::kdf_scan_reduce_sql(h_, &err);
+		if (!sql) {
+			detail::ThrowKernelError("kdf_scan_reduce_sql", err);
+		}
+		return KernelString(sql);
+	}
+
+	//! The pending Reduce subplan as proto bytes (IR transport). Valid after GetStep()==Reduce.
+	KernelBytes ReducePlan() {
+		char *err = nullptr;
+		size_t len = 0;
+		uint8_t *buf = ffi::kdf_scan_reduce_plan(h_, &len, &err);
+		if (!buf) {
+			detail::ThrowKernelError("kdf_scan_reduce_plan", err);
+		}
+		return KernelBytes(buf, len);
+	}
+
+	//! Hand the pending Reduce's result back as one Arrow C Data batch (ownership moves in; the
+	//! structs are emptied). Throws on error.
+	void SubmitReduce(ffi::FFI_ArrowArray *array, ffi::FFI_ArrowSchema *schema) {
+		char *err = nullptr;
+		if (ffi::kdf_scan_submit_reduce(h_, array, schema, &err) != 0) {
+			detail::ThrowKernelError("kdf_scan_submit_reduce", err);
+		}
+	}
+
+	//! The terminal ResultPlan lowered to DuckDB SQL. Valid after GetStep()==Done.
 	KernelString ResultSql() {
 		char *err = nullptr;
-		char *sql = ffi::kdf_sm_result_sql(sm_, &err);
+		char *sql = ffi::kdf_scan_result_sql(h_, &err);
 		if (!sql) {
-			detail::ThrowKernelError("kdf_sm_result_sql", err);
+			detail::ThrowKernelError("kdf_scan_result_sql", err);
 		}
 		return KernelString(sql);
 	}
@@ -248,27 +346,34 @@ public:
 	KernelBytes ResultPlan() {
 		char *err = nullptr;
 		size_t len = 0;
-		uint8_t *buf = ffi::kdf_sm_result_plan(sm_, &len, &err);
+		uint8_t *buf = ffi::kdf_scan_result_plan(h_, &len, &err);
 		if (!buf) {
-			detail::ThrowKernelError("kdf_sm_result_plan", err);
+			detail::ThrowKernelError("kdf_scan_result_plan", err);
 		}
 		return KernelBytes(buf, len);
 	}
 
-	//! Borrow the raw handle (e.g. for an ABI the SDK doesn't wrap yet). The SDK still owns it.
-	ffi::KdfSM *get() const { return sm_; }
-	bool valid() const { return sm_ != nullptr; }
+	ffi::KdfScan *get() const { return h_; }
+	bool valid() const { return h_ != nullptr; }
 
 private:
-	explicit ScanStateMachine(ffi::KdfSM *sm) : sm_(sm) {}
 	void reset() {
-		if (sm_) {
-			ffi::kdf_sm_free(sm_);
-			sm_ = nullptr;
+		if (h_) {
+			ffi::kdf_scan_free(h_);
+			h_ = nullptr;
 		}
 	}
-	ffi::KdfSM *sm_ = nullptr;
+	ffi::KdfScan *h_ = nullptr;
 };
+
+inline Scan Snapshot::Scan(bool metadata_only, ffi::EnginePredicate *predicate) {
+	char *err = nullptr;
+	ffi::KdfScan *h = ffi::kdf_snapshot_scan(h_, metadata_only, predicate, &err);
+	if (!h) {
+		detail::ThrowKernelError("kdf_snapshot_scan", err);
+	}
+	return sdk::Scan(h);
+}
 
 } // namespace sdk
 } // namespace delta_kernel
