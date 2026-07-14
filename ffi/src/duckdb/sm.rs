@@ -248,6 +248,21 @@ impl KdfSM {
             _ => Err("kdf_sm_result_sql: SM not finished (drive get_step/submit until DONE)".into()),
         }
     }
+
+    /// Serialize the terminal `ResultPlan` (the SSA IR DAG) to protobuf bytes — the engine-neutral
+    /// plan transport. Only valid after the SM reached `Done`. The engine decodes these into the
+    /// kernel-generated proto structs and lowers them itself; the kernel emits no engine dialect.
+    fn result_plan_proto(&self) -> Result<Vec<u8>, String> {
+        use prost::Message;
+        match &self.phase {
+            Phase::Done(rp) => {
+                let proto = super::proto_convert::result_plan_to_proto(rp)
+                    .map_err(|e| format!("serialize result plan to proto: {e}"))?;
+                Ok(proto.encode_to_vec())
+            }
+            _ => Err("kdf_sm_result_plan: SM not finished (drive get_step/submit until DONE)".into()),
+        }
+    }
 }
 
 /// Open a steppable scan state machine over the Delta table at `path` (`version` < 0 = latest).
@@ -444,5 +459,56 @@ pub unsafe extern "C" fn kdf_sm_result_sql(sm: *mut KdfSM, out_err: *mut *mut c_
             unsafe { write_err(out_err, &msg) };
             ptr::null_mut()
         }
+    }
+}
+
+/// Serialize the finished SM's terminal `ResultPlan` to protobuf bytes (the engine-neutral plan IR
+/// transport). Only valid after `kdf_sm_get_step` returned [`KDF_STEP_DONE`]. Writes the byte length
+/// to `*out_len` and returns a malloc'd buffer the caller frees with [`kdf_bytes_free`], or null on
+/// error (with `out_err` set).
+///
+/// # Safety
+/// `sm` is a valid [`KdfSM`]; `out_len` and `out_err`, if non-null, are writable.
+#[no_mangle]
+pub unsafe extern "C" fn kdf_sm_result_plan(
+    sm: *mut KdfSM,
+    out_len: *mut usize,
+    out_err: *mut *mut c_char,
+) -> *mut u8 {
+    if !out_err.is_null() {
+        unsafe { *out_err = ptr::null_mut() };
+    }
+    if !out_len.is_null() {
+        unsafe { *out_len = 0 };
+    }
+    if sm.is_null() || out_len.is_null() {
+        unsafe { write_err(out_err, "kdf_sm_result_plan: null pointer argument") };
+        return ptr::null_mut();
+    }
+    let sm = unsafe { &*sm };
+    match sm.result_plan_proto() {
+        Ok(mut buf) => {
+            buf.shrink_to_fit();
+            let len = buf.len();
+            let ptr = buf.as_mut_ptr();
+            std::mem::forget(buf);
+            unsafe { *out_len = len };
+            ptr
+        }
+        Err(msg) => {
+            unsafe { write_err(out_err, &msg) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Free a byte buffer returned by [`kdf_sm_result_plan`] (or another `kdf_*` proto-bytes emitter).
+///
+/// # Safety
+/// `ptr`/`len` are exactly what such an emitter returned (or `ptr` is null). Call at most once.
+#[no_mangle]
+pub unsafe extern "C" fn kdf_bytes_free(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() {
+        unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
     }
 }

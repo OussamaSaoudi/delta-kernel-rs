@@ -39,6 +39,23 @@ fn main() {
             &["proto"],
         )
         .expect("prost-build: failed to compile plan-IR proto schema");
+
+        // Also generate the C++ proto structs so the plan IR is a KERNEL-owned SDK artifact (single
+        // source of truth, no encoder/decoder version skew). They land in target/ffi-headers next to
+        // the cbindgen header; the DuckDB engine consumes them transitively (include + link
+        // libprotobuf) and never runs protoc itself. Uses the same `protoc` prost-build resolves.
+        let crate_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
+        let cpp_out = get_target_dir(&crate_dir).join("proto-cpp");
+        std::fs::create_dir_all(&cpp_out).expect("create proto-cpp out dir");
+        // Same protoc prost-build uses: honor $PROTOC, else fall back to PATH.
+        let protoc = env::var("PROTOC").unwrap_or_else(|_| "protoc".to_string());
+        let status = std::process::Command::new(&protoc)
+            .arg(format!("--cpp_out={}", cpp_out.display()))
+            .arg("--proto_path=proto")
+            .args(["proto/plan.proto", "proto/expressions.proto", "proto/schema.proto"])
+            .status()
+            .expect("failed to run protoc for C++ codegen");
+        assert!(status.success(), "protoc --cpp_out failed with {status}");
     }
 
     let crate_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
