@@ -109,15 +109,15 @@ fn footer_schema(engine: &dyn Engine, path: &str) -> Result<SchemaRef, String> {
 //===----------------------------------------------------------------------===//
 
 /// The lifecycle of the SM inside a driver: still running, finished (holding its terminal `R`), or
-/// poisoned by a prior error.
-enum DriverPhase<R> {
+/// poisoned by a prior error. `R: 'static` because `CoroutineSM<R>` requires it.
+enum DriverPhase<R: 'static> {
     Running(CoroutineSM<R>),
     Done(R),
     Poisoned,
 }
 
 /// Drives one `CoroutineSM<R>` to its terminal `R`, brokering Reduce steps to the engine.
-struct ReduceDriver<R> {
+struct ReduceDriver<R: 'static> {
     engine: Arc<dyn Engine>,
     phase: DriverPhase<R>,
     /// The pending `Reduce`'s sink, set when `get_step` returns `KDF_STEP_REDUCE`; consumed by the
@@ -132,7 +132,7 @@ struct ReduceDriver<R> {
     pending_reduce_proto: Option<Vec<u8>>,
 }
 
-impl<R> ReduceDriver<R> {
+impl<R: 'static> ReduceDriver<R> {
     fn new(engine: Arc<dyn Engine>, sm: CoroutineSM<R>) -> Self {
         ReduceDriver {
             engine,
