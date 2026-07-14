@@ -85,4 +85,13 @@ fn main() {
     cbindgen::generate_with_config(&crate_dir, config)
         .expect("generate_with_config should have worked for C")
         .write_to_file(output_file_h);
+
+    // Ship the hand-written RAII C++ SDK header alongside the generated bindings. It layers typed,
+    // move-only owners (ScanStateMachine, KernelString, KernelBytes) over the flat `kdf_*` C ABI so
+    // the engine drives the scan SM without hand-managing owning pointers or error strings. Copied
+    // (not generated) — it's authored source under ffi/include, and the kernel is its single owner.
+    let sdk_src = Path::new(&crate_dir).join("include").join("delta_kernel_sdk.hpp");
+    println!("cargo:rerun-if-changed={}", sdk_src.display());
+    std::fs::copy(&sdk_src, target_dir.join("delta_kernel_sdk.hpp"))
+        .expect("copy delta_kernel_sdk.hpp into ffi-headers");
 }
