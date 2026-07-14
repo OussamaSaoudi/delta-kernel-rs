@@ -116,6 +116,11 @@ pub struct KdfSM {
     pending_sink: Option<ReduceSink>,
     /// Lowered SQL for the pending `Reduce` (handed to DuckDB via `kdf_sm_reduce_sql`).
     pending_sql: Option<String>,
+    /// The pending `Reduce`'s subplan serialized to protobuf bytes (handed to DuckDB via
+    /// `kdf_sm_reduce_plan`) — the engine-neutral analogue of `pending_sql`. Set alongside it in
+    /// `get_step`, cleared in `submit_reduce`. Stage 1 of the IR transport: additive, so the SQL and
+    /// proto forms of the same Reduce coexist while the engine migrates from one to the other.
+    pending_reduce_proto: Option<Vec<u8>>,
 }
 
 impl KdfSM {
@@ -139,6 +144,7 @@ impl KdfSM {
             predicate,
             pending_sink: None,
             pending_sql: None,
+            pending_reduce_proto: None,
         })
     }
 
@@ -188,10 +194,21 @@ impl KdfSM {
             };
             match req {
                 Ok(EngineRequest::Reduce { nodes, terminal, sink }) => {
+                    // A Reduce subplan has the same shape as a terminal ResultPlan ({plan, result}).
+                    // Build it once, then emit BOTH forms: SQL (legacy path) and proto bytes (Stage-1
+                    // IR transport). The engine picks whichever it drives with; they describe the same
+                    // computation.
+                    let rp = ResultPlan { plan: Plan { nodes }, result: terminal };
                     self.pending_sql = Some(
-                        result_plan_to_sql_until(&Plan { nodes }, terminal)
+                        result_plan_to_sql_until(&rp.plan, rp.result)
                             .map_err(|e| format!("lower reduce plan to SQL: {e}"))?,
                     );
+                    self.pending_reduce_proto = Some({
+                        use prost::Message;
+                        super::proto_convert::result_plan_to_proto(&rp)
+                            .map_err(|e| format!("serialize reduce plan to proto: {e}"))?
+                            .encode_to_vec()
+                    });
                     self.pending_sink = Some(sink);
                     return Ok(KDF_STEP_REDUCE);
                 }
@@ -222,6 +239,7 @@ impl KdfSM {
     ) -> Result<(), String> {
         let sink = self.pending_sink.take().ok_or("submit_reduce without a pending reduce")?;
         self.pending_sql = None;
+        self.pending_reduce_proto = None;
         let array_data =
             unsafe { from_ffi(array, &schema) }.map_err(|e| format!("import reduce result: {e}"))?;
         let batch: RecordBatch = StructArray::from(array_data).into();
@@ -387,6 +405,48 @@ pub unsafe extern "C" fn kdf_sm_reduce_sql(sm: *mut KdfSM, out_err: *mut *mut c_
         },
         None => {
             unsafe { write_err(out_err, "kdf_sm_reduce_sql: no pending reduce") };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// The pending `Reduce`'s subplan as protobuf bytes (the engine-neutral analogue of
+/// [`kdf_sm_reduce_sql`]; valid after `kdf_sm_get_step` returned [`KDF_STEP_REDUCE`]). The engine
+/// decodes these into the kernel-generated proto structs and lowers them itself. Writes the byte
+/// length to `*out_len` and returns a malloc'd buffer the caller frees with [`kdf_bytes_free`], or
+/// null on error (with `out_err` set).
+///
+/// # Safety
+/// `sm` is a valid [`KdfSM`]; `out_len` and `out_err`, if non-null, are writable.
+#[no_mangle]
+pub unsafe extern "C" fn kdf_sm_reduce_plan(
+    sm: *mut KdfSM,
+    out_len: *mut usize,
+    out_err: *mut *mut c_char,
+) -> *mut u8 {
+    if !out_err.is_null() {
+        unsafe { *out_err = ptr::null_mut() };
+    }
+    if !out_len.is_null() {
+        unsafe { *out_len = 0 };
+    }
+    if sm.is_null() || out_len.is_null() {
+        unsafe { write_err(out_err, "kdf_sm_reduce_plan: null pointer argument") };
+        return ptr::null_mut();
+    }
+    let sm = unsafe { &*sm };
+    match &sm.pending_reduce_proto {
+        Some(buf) => {
+            let mut buf = buf.clone();
+            buf.shrink_to_fit();
+            let len = buf.len();
+            let ptr = buf.as_mut_ptr();
+            std::mem::forget(buf);
+            unsafe { *out_len = len };
+            ptr
+        }
+        None => {
+            unsafe { write_err(out_err, "kdf_sm_reduce_plan: no pending reduce") };
             ptr::null_mut()
         }
     }
