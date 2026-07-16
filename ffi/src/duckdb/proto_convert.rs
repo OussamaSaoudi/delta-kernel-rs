@@ -38,6 +38,13 @@ pub fn result_plan_to_proto(rp: &ResultPlan) -> R<pplan::ResultPlan> {
     })
 }
 
+/// Convert a kernel schema (a top-level [`StructType`]) into its proto representation. A Delta
+/// table schema is a struct of fields, so the proto transport is the same `StructType` message the
+/// plan nodes already use. Backs `delta_snapshot_schema`.
+pub fn schema_to_proto(schema: &StructType) -> R<pschema::StructType> {
+    struct_type_to_proto(schema)
+}
+
 fn plan_node_to_proto(node: &delta_kernel::plans::ir::plan::PlanNode) -> R<pplan::PlanNode> {
     Ok(pplan::PlanNode {
         op: Some(pplan::Operator {

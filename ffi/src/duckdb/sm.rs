@@ -38,7 +38,7 @@ use delta_kernel::arrow::array::{RecordBatch, StructArray};
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::plans::ir::nodes::ReduceSink;
 use delta_kernel::plans::ir::plan::{Plan, ResultPlan};
-use delta_kernel::plans::kernel_reducers::KdfControl;
+use delta_kernel::plans::kernel_reducers::{FinishedHandle, KdfControl, ReducerHandle};
 use delta_kernel::plans::state_machines::framework::coroutine::CoroutineSM;
 use delta_kernel::plans::state_machines::framework::state_machine::{
     EngineRequest, EngineResponse, NextStep, StateMachine,
@@ -798,5 +798,698 @@ pub unsafe extern "C" fn kdf_scan_result_plan(
 pub unsafe extern "C" fn kdf_bytes_free(ptr: *mut u8, len: usize) {
     if !ptr.is_null() {
         unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
+    }
+}
+
+//===============================================================================================
+// delta_* — the proto-only SDK ABI (Phase B of SDK_IMPLEMENTATION_PLAN.md)
+//
+// The engine-neutral surface the C++ SDK (delta_kernel_sdk.hpp) sits on. Additive: it reuses the
+// existing KdfSnapshot/KdfScan internals (driver + snapshot-holding + build_scan) unchanged, and
+// coexists with the legacy `kdf_*`/`_sql` exports above until Stage 4 deletes them.
+//
+// One opaque state-machine handle (`DeltaSm`, a runtime-tagged enum recovering the type C erases),
+// value handles (`DeltaSnapshot` = Arc<Snapshot>, `DeltaScan` = ResultPlan), and the reducer handles.
+// `next`/`submit` are terminal-agnostic (2-arm forward); `build_*` are terminal-specific and assert
+// the arm. Proto-only: `_plan` bytes, no `_sql`. Errors via null-return + `out_err` string (the SDK
+// premise is `open(path, version)` with no engine handle, so we keep the self-contained out_err
+// idiom rather than ExternResult, which would need an engine param for its allocator).
+//===============================================================================================
+
+/// `delta_sm_next` result: the kernel needs the engine to run a Reduce's plan.
+pub const DELTA_STEP_REDUCE: i32 = 1;
+/// `delta_sm_next` result: the state machine is finished; call the matching `delta_sm_build_*`.
+pub const DELTA_STEP_DONE: i32 = 0;
+
+/// The uniform opaque state-machine handle. A runtime tag recovering the terminal type the C ABI
+/// erases — the arms wrap the existing per-terminal handles (no logic duplication, no `dyn`, no
+/// terminal-mapping union). `next`/`submit` forward to the shared `ReduceDriver` on either arm;
+/// `build_snapshot`/`build_scan` consume the enum and assert the matching arm.
+pub enum DeltaSm {
+    Snapshot(KdfSnapshot),
+    Scan(KdfScan),
+}
+
+impl DeltaSm {
+    fn driver_get_step(&mut self) -> Result<i32, String> {
+        match self {
+            DeltaSm::Snapshot(s) => s.driver.get_step(),
+            DeltaSm::Scan(s) => s.driver.get_step(),
+        }
+    }
+    fn driver_reduce_plan(&self) -> Option<&[u8]> {
+        match self {
+            DeltaSm::Snapshot(s) => s.driver.reduce_plan(),
+            DeltaSm::Scan(s) => s.driver.reduce_plan(),
+        }
+    }
+    fn driver_take_sink(&mut self) -> Option<ReduceSink> {
+        match self {
+            DeltaSm::Snapshot(s) => s.driver.pending_sink.take(),
+            DeltaSm::Scan(s) => s.driver.pending_sink.take(),
+        }
+    }
+    /// Submit an already-finished reducer handle back to the SM, advancing it.
+    fn driver_submit_finished(&mut self, finished: FinishedHandle) -> Result<(), String> {
+        match self {
+            DeltaSm::Snapshot(s) => s.driver.submit_response(EngineResponse::Reducer(finished)),
+            DeltaSm::Scan(s) => s.driver.submit_response(EngineResponse::Reducer(finished)),
+        }
+    }
+}
+
+/// A finished reducer handle, moved out of the SM by the engine (via `delta_sm_take_reducer`), fed
+/// Arrow batches (`delta_reducer_apply`), finished (`delta_reducer_finish`), and handed back
+/// (`delta_sm_submit`). Wraps the kernel [`ReducerHandle`] and the finished [`FinishedHandle`].
+pub struct DeltaReducer {
+    handle: Option<ReducerHandle>,
+}
+/// The finished reducer produced by `delta_reducer_finish`; consumed by `delta_sm_submit`.
+pub struct DeltaFinishedReducer {
+    finished: FinishedHandle,
+}
+
+/// A built snapshot value (inert): version + schema, and a scan-SM factory.
+pub struct DeltaSnapshotValue {
+    snapshot: Arc<Snapshot>,
+    engine: Arc<dyn Engine>,
+}
+/// A built scan value (inert): the terminal `ResultPlan`, lowered to proto on demand.
+pub struct DeltaScanValue {
+    plan: ResultPlan,
+}
+
+// ── entry ──────────────────────────────────────────────────────────────────────────────────
+
+/// Open a steppable snapshot state machine over the Delta table at `path` (`version` < 0 = latest).
+/// Returns an owned [`DeltaSm`] (Snapshot arm) the engine drives, or null on error.
+///
+/// # Safety
+/// `path_ptr` points to `path_len` valid UTF-8 bytes. `out_err`, if non-null, is writable. Free the
+/// result once with [`delta_sm_free`].
+#[no_mangle]
+pub unsafe extern "C" fn delta_open_snapshot(
+    path_ptr: *const c_char,
+    path_len: usize,
+    version: i64,
+    out_err: *mut *mut c_char,
+) -> *mut DeltaSm {
+    init_out!(out_err);
+    if path_ptr.is_null() {
+        unsafe { write_err(out_err, "delta_open_snapshot: null path pointer") };
+        return ptr::null_mut();
+    }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let bytes = unsafe { std::slice::from_raw_parts(path_ptr as *const u8, path_len) };
+        let path = std::str::from_utf8(bytes).map_err(|e| format!("table path is not UTF-8: {e}"))?;
+        KdfSnapshot::open(path, version)
+    }));
+    match outcome {
+        Ok(Ok(snap)) => Box::into_raw(Box::new(DeltaSm::Snapshot(snap))),
+        Ok(Err(msg)) => {
+            unsafe { write_err(out_err, &msg) };
+            ptr::null_mut()
+        }
+        Err(_) => {
+            unsafe { write_err(out_err, "delta_open_snapshot: panic while opening the snapshot SM") };
+            ptr::null_mut()
+        }
+    }
+}
+
+// ── state machine: next / reduce_plan / take_reducer / submit / submit_error / build / free ──
+
+/// Advance the SM to the next Reduce ([`DELTA_STEP_REDUCE`]) or to [`DELTA_STEP_DONE`]. Returns `-1`
+/// on error (with `out_err` set).
+///
+/// # Safety
+/// `sm` is a valid [`DeltaSm`]; `out_err`, if non-null, writable.
+#[no_mangle]
+pub unsafe extern "C" fn delta_sm_next(sm: *mut DeltaSm, out_err: *mut *mut c_char) -> i32 {
+    init_out!(out_err);
+    if sm.is_null() {
+        unsafe { write_err(out_err, "delta_sm_next: null handle") };
+        return -1;
+    }
+    let sm = unsafe { &mut *sm };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sm.driver_get_step())) {
+        Ok(Ok(kind)) => kind,
+        Ok(Err(msg)) => {
+            unsafe { write_err(out_err, &msg) };
+            -1
+        }
+        Err(_) => {
+            unsafe { write_err(out_err, "delta_sm_next: panic") };
+            -1
+        }
+    }
+}
+
+/// The pending Reduce's subplan as proto bytes (valid after `delta_sm_next` returned
+/// [`DELTA_STEP_REDUCE`]). Writes the byte length to `*out_len`; returns a malloc'd buffer freed with
+/// [`delta_bytes_free`], or null on error.
+///
+/// # Safety
+/// `sm` is a valid [`DeltaSm`]; `out_len` and `out_err`, if non-null, writable.
+#[no_mangle]
+pub unsafe extern "C" fn delta_sm_reduce_plan(
+    sm: *mut DeltaSm,
+    out_len: *mut usize,
+    out_err: *mut *mut c_char,
+) -> *mut u8 {
+    init_out!(out_err, out_len);
+    if sm.is_null() || out_len.is_null() {
+        unsafe { write_err(out_err, "delta_sm_reduce_plan: null pointer argument") };
+        return ptr::null_mut();
+    }
+    match unsafe { &*sm }.driver_reduce_plan() {
+        Some(buf) => leak_bytes(buf.to_vec(), out_len),
+        None => {
+            unsafe { write_err(out_err, "delta_sm_reduce_plan: no pending reduce") };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Move the pending Reduce's reducer out of the SM (valid after `delta_sm_next` returned
+/// [`DELTA_STEP_REDUCE`]). The engine owns driving it (`delta_reducer_apply`/`_finish`) and hands the
+/// finished reducer back via [`delta_sm_submit`]. Returns an owned [`DeltaReducer`], or null on error.
+///
+/// # Safety
+/// `sm` is a valid [`DeltaSm`]; `out_err`, if non-null, writable. Free the result with
+/// [`delta_reducer_free`] (or consume it via `delta_reducer_finish` + `delta_sm_submit`).
+#[no_mangle]
+pub unsafe extern "C" fn delta_sm_take_reducer(
+    sm: *mut DeltaSm,
+    out_err: *mut *mut c_char,
+) -> *mut DeltaReducer {
+    init_out!(out_err);
+    if sm.is_null() {
+        unsafe { write_err(out_err, "delta_sm_take_reducer: null handle") };
+        return ptr::null_mut();
+    }
+    let sm = unsafe { &mut *sm };
+    match sm.driver_take_sink() {
+        Some(sink) => Box::into_raw(Box::new(DeltaReducer { handle: Some(sink.new_handle()) })),
+        None => {
+            unsafe { write_err(out_err, "delta_sm_take_reducer: no pending reduce") };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Hand a finished reducer (from [`delta_reducer_finish`]) back to the SM, advancing it. Consumes
+/// `finished`. Returns 0 on success, `-1` on error.
+///
+/// # Safety
+/// `sm` is a valid [`DeltaSm`]; `finished` is a valid [`DeltaFinishedReducer`] (consumed here);
+/// `out_err`, if non-null, writable.
+#[no_mangle]
+pub unsafe extern "C" fn delta_sm_submit(
+    sm: *mut DeltaSm,
+    finished: *mut DeltaFinishedReducer,
+    out_err: *mut *mut c_char,
+) -> i32 {
+    init_out!(out_err);
+    if sm.is_null() || finished.is_null() {
+        unsafe { write_err(out_err, "delta_sm_submit: null argument") };
+        return -1;
+    }
+    let sm = unsafe { &mut *sm };
+    let finished = unsafe { Box::from_raw(finished) }.finished;
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sm.driver_submit_finished(finished))) {
+        Ok(Ok(())) => 0,
+        Ok(Err(msg)) => {
+            unsafe { write_err(out_err, &msg) };
+            -1
+        }
+        Err(_) => {
+            unsafe { write_err(out_err, "delta_sm_submit: panic") };
+            -1
+        }
+    }
+}
+
+/// Report to the kernel that the engine FAILED to execute the pending Reduce's plan (the
+/// engine→kernel error direction). `msg_ptr`/`msg_len` is the engine's error message. The SM is
+/// poisoned; the failure surfaces on the next `delta_sm_*` call. Returns 0 on success, `-1` on error.
+///
+/// # Safety
+/// `sm` is a valid [`DeltaSm`]; `msg_ptr` points to `msg_len` valid UTF-8 bytes (or is null);
+/// `out_err`, if non-null, writable.
+#[no_mangle]
+pub unsafe extern "C" fn delta_sm_submit_error(
+    sm: *mut DeltaSm,
+    msg_ptr: *const c_char,
+    msg_len: usize,
+    out_err: *mut *mut c_char,
+) -> i32 {
+    init_out!(out_err);
+    if sm.is_null() {
+        unsafe { write_err(out_err, "delta_sm_submit_error: null handle") };
+        return -1;
+    }
+    let sm = unsafe { &mut *sm };
+    let msg = if msg_ptr.is_null() {
+        "engine failed to execute reduce plan".to_string()
+    } else {
+        let bytes = unsafe { std::slice::from_raw_parts(msg_ptr as *const u8, msg_len) };
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    // Poison the SM so subsequent calls surface the engine failure. (The kernel's typed
+    // EngineError path is richer; this MVP records the message and stops the drive.)
+    match sm {
+        DeltaSm::Snapshot(s) => s.driver.phase = DriverPhase::Poisoned,
+        DeltaSm::Scan(s) => s.driver.phase = DriverPhase::Poisoned,
+    }
+    unsafe { write_err(out_err, &format!("engine reduce error: {msg}")) };
+    // Return -1: the reduce could not be satisfied. The engine already knows; out_err echoes it.
+    let _ = msg;
+    -1
+}
+
+/// Consume a finished snapshot SM and return the built [`DeltaSnapshotValue`]. Errors (`null`) if the
+/// SM is not a snapshot SM, or has not been driven to [`DELTA_STEP_DONE`].
+///
+/// # Safety
+/// `sm` is a valid [`DeltaSm`] (consumed here); `out_err`, if non-null, writable. Free the result
+/// with [`delta_snapshot_free`].
+#[no_mangle]
+pub unsafe extern "C" fn delta_sm_build_snapshot(
+    sm: *mut DeltaSm,
+    out_err: *mut *mut c_char,
+) -> *mut DeltaSnapshotValue {
+    init_out!(out_err);
+    if sm.is_null() {
+        unsafe { write_err(out_err, "delta_sm_build_snapshot: null handle") };
+        return ptr::null_mut();
+    }
+    let boxed = unsafe { Box::from_raw(sm) };
+    match *boxed {
+        DeltaSm::Snapshot(mut s) => {
+            let engine = s.driver.engine.clone();
+            match s.snapshot() {
+                Ok(snapshot) => Box::into_raw(Box::new(DeltaSnapshotValue { snapshot, engine })),
+                Err(msg) => {
+                    unsafe { write_err(out_err, &msg) };
+                    ptr::null_mut()
+                }
+            }
+        }
+        DeltaSm::Scan(_) => {
+            unsafe { write_err(out_err, "delta_sm_build_snapshot: state machine is a scan, not a snapshot") };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Consume a finished scan SM and return the built [`DeltaScanValue`]. Errors (`null`) if the SM is
+/// not a scan SM, or has not been driven to [`DELTA_STEP_DONE`].
+///
+/// # Safety
+/// `sm` is a valid [`DeltaSm`] (consumed here); `out_err`, if non-null, writable. Free the result
+/// with [`delta_scan_free`].
+#[no_mangle]
+pub unsafe extern "C" fn delta_sm_build_scan(
+    sm: *mut DeltaSm,
+    out_err: *mut *mut c_char,
+) -> *mut DeltaScanValue {
+    init_out!(out_err);
+    if sm.is_null() {
+        unsafe { write_err(out_err, "delta_sm_build_scan: null handle") };
+        return ptr::null_mut();
+    }
+    let boxed = unsafe { Box::from_raw(sm) };
+    match *boxed {
+        DeltaSm::Scan(mut s) => match s.driver.take_terminal() {
+            Ok(plan) => Box::into_raw(Box::new(DeltaScanValue { plan })),
+            Err(msg) => {
+                unsafe { write_err(out_err, &msg) };
+                ptr::null_mut()
+            }
+        },
+        DeltaSm::Snapshot(_) => {
+            unsafe { write_err(out_err, "delta_sm_build_scan: state machine is a snapshot, not a scan") };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Free a [`DeltaSm`].
+///
+/// # Safety
+/// `sm` is null or a pointer from [`delta_open_snapshot`]/[`delta_snapshot_scan_sm`], freed once.
+#[no_mangle]
+pub unsafe extern "C" fn delta_sm_free(sm: *mut DeltaSm) {
+    if !sm.is_null() {
+        drop(unsafe { Box::from_raw(sm) });
+    }
+}
+
+// ── reducer: apply / finish / free ───────────────────────────────────────────────────────────
+
+/// Feed one Arrow C Data batch to the reducer (ownership moves in; the structs are emptied). Returns
+/// 0 for `Continue` (feed more), 1 for `Break` (reducer wants no more input), `-1` on error.
+///
+/// # Safety
+/// `reducer` is a valid [`DeltaReducer`]; `array`/`schema` are valid Arrow C Data structs (ownership
+/// moves in); `out_err`, if non-null, writable.
+#[no_mangle]
+pub unsafe extern "C" fn delta_reducer_apply(
+    reducer: *mut DeltaReducer,
+    array: *mut FFI_ArrowArray,
+    schema: *mut FFI_ArrowSchema,
+    out_err: *mut *mut c_char,
+) -> i32 {
+    init_out!(out_err);
+    if reducer.is_null() || array.is_null() || schema.is_null() {
+        unsafe { write_err(out_err, "delta_reducer_apply: null argument") };
+        return -1;
+    }
+    let reducer = unsafe { &mut *reducer };
+    let array = std::mem::replace(unsafe { &mut *array }, FFI_ArrowArray::empty());
+    let schema = std::mem::replace(unsafe { &mut *schema }, FFI_ArrowSchema::empty());
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let handle = reducer
+            .handle
+            .as_mut()
+            .ok_or("delta_reducer_apply: reducer already finished")?;
+        let array_data =
+            unsafe { from_ffi(array, &schema) }.map_err(|e| format!("import reduce batch: {e}"))?;
+        let batch: RecordBatch = StructArray::from(array_data).into();
+        handle
+            .apply(&ArrowEngineData::new(batch))
+            .map_err(|e| format!("reducer apply: {e}"))
+    }));
+    match outcome {
+        Ok(Ok(KdfControl::Continue)) => 0,
+        Ok(Ok(KdfControl::Break)) => 1,
+        Ok(Err(msg)) => {
+            unsafe { write_err(out_err, &msg) };
+            -1
+        }
+        Err(_) => {
+            unsafe { write_err(out_err, "delta_reducer_apply: panic") };
+            -1
+        }
+    }
+}
+
+/// Finish the reducer, consuming it and producing a [`DeltaFinishedReducer`] to hand back via
+/// [`delta_sm_submit`]. Returns null on error.
+///
+/// # Safety
+/// `reducer` is a valid [`DeltaReducer`] (consumed here); `out_err`, if non-null, writable.
+#[no_mangle]
+pub unsafe extern "C" fn delta_reducer_finish(
+    reducer: *mut DeltaReducer,
+    out_err: *mut *mut c_char,
+) -> *mut DeltaFinishedReducer {
+    init_out!(out_err);
+    if reducer.is_null() {
+        unsafe { write_err(out_err, "delta_reducer_finish: null handle") };
+        return ptr::null_mut();
+    }
+    let mut reducer = unsafe { Box::from_raw(reducer) };
+    match reducer.handle.take() {
+        Some(handle) => Box::into_raw(Box::new(DeltaFinishedReducer { finished: handle.finish() })),
+        None => {
+            unsafe { write_err(out_err, "delta_reducer_finish: reducer already finished") };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Free a [`DeltaReducer`] without finishing it (e.g. on the error path).
+///
+/// # Safety
+/// `reducer` is null or a pointer from [`delta_sm_take_reducer`] not yet consumed by
+/// [`delta_reducer_finish`], freed once.
+#[no_mangle]
+pub unsafe extern "C" fn delta_reducer_free(reducer: *mut DeltaReducer) {
+    if !reducer.is_null() {
+        drop(unsafe { Box::from_raw(reducer) });
+    }
+}
+
+// ── snapshot value: version / schema / scan_sm / free ─────────────────────────────────────────
+
+/// The finished snapshot's version.
+///
+/// # Safety
+/// `snap` is a valid [`DeltaSnapshotValue`].
+#[no_mangle]
+pub unsafe extern "C" fn delta_snapshot_version(snap: *mut DeltaSnapshotValue) -> i64 {
+    if snap.is_null() {
+        return -1;
+    }
+    unsafe { &*snap }.snapshot.version() as i64
+}
+
+/// The finished snapshot's logical schema as proto bytes. Writes the byte length to `*out_len`;
+/// returns a malloc'd buffer freed with [`delta_bytes_free`], or null on error.
+///
+/// # Safety
+/// `snap` is a valid [`DeltaSnapshotValue`]; `out_len` and `out_err`, if non-null, writable.
+#[no_mangle]
+pub unsafe extern "C" fn delta_snapshot_schema(
+    snap: *mut DeltaSnapshotValue,
+    out_len: *mut usize,
+    out_err: *mut *mut c_char,
+) -> *mut u8 {
+    init_out!(out_err, out_len);
+    if snap.is_null() || out_len.is_null() {
+        unsafe { write_err(out_err, "delta_snapshot_schema: null pointer argument") };
+        return ptr::null_mut();
+    }
+    let snap = unsafe { &*snap };
+    match super::proto_convert::schema_to_proto(&snap.snapshot.schema()) {
+        // NOTE: schema() returns SchemaRef (Arc<StructType>); &... derefs to &StructType via the
+        // Deref coercion in schema_to_proto's &StructType parameter.
+        Ok(proto) => {
+            use prost::Message;
+            leak_bytes(proto.encode_to_vec(), out_len)
+        }
+        Err(msg) => {
+            unsafe { write_err(out_err, &format!("serialize schema to proto: {msg}")) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Build a scan state machine off the finished snapshot. `scan_kind`: 0 = metadata-only (file-list
+/// terminal), 1 = data (full plan). `predicate`, if non-null, is a data-skipping [`EnginePredicate`]
+/// visited ONCE here. Returns an owned [`DeltaSm`] (Scan arm), or null on error. The snapshot is
+/// unchanged and can build more scans.
+///
+/// # Safety
+/// `snap` is a valid [`DeltaSnapshotValue`]; `predicate`, if non-null, is a valid [`EnginePredicate`]
+/// safe to call/read for this call; `out_err`, if non-null, writable. Free the result with
+/// [`delta_sm_free`].
+#[no_mangle]
+pub unsafe extern "C" fn delta_snapshot_scan_sm(
+    snap: *mut DeltaSnapshotValue,
+    scan_kind: i32,
+    predicate: *mut EnginePredicate,
+    out_err: *mut *mut c_char,
+) -> *mut DeltaSm {
+    init_out!(out_err);
+    if snap.is_null() {
+        unsafe { write_err(out_err, "delta_snapshot_scan_sm: null handle") };
+        return ptr::null_mut();
+    }
+    let snap = unsafe { &*snap };
+    let metadata_only = scan_kind == 0;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Visit the engine predicate ONCE, here, while the engine state it borrows is alive.
+        let predicate = match unsafe { predicate.as_mut() } {
+            Some(p) => Some(Arc::new(unsafe { decode_engine_predicate(p) }?)),
+            None => None,
+        };
+        let mut sb = snap.snapshot.clone().scan_builder();
+        if let Some(pred) = predicate {
+            sb = sb.with_predicate(Some(pred));
+        }
+        let scan = sb.build().map_err(|e| format!("build scan: {e}"))?;
+        let scan_sm = if metadata_only {
+            scan.scan_metadata_state_machine()
+        } else {
+            scan.scan_state_machine()
+        }
+        .map_err(|e| format!("build scan SM: {e}"))?;
+        Ok::<_, String>(KdfScan { driver: ReduceDriver::new(snap.engine.clone(), scan_sm) })
+    }));
+    match outcome {
+        Ok(Ok(scan)) => Box::into_raw(Box::new(DeltaSm::Scan(scan))),
+        Ok(Err(msg)) => {
+            unsafe { write_err(out_err, &msg) };
+            ptr::null_mut()
+        }
+        Err(_) => {
+            unsafe { write_err(out_err, "delta_snapshot_scan_sm: panic while building the scan") };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Free a [`DeltaSnapshotValue`].
+///
+/// # Safety
+/// `snap` is null or a pointer from [`delta_sm_build_snapshot`], freed once.
+#[no_mangle]
+pub unsafe extern "C" fn delta_snapshot_free(snap: *mut DeltaSnapshotValue) {
+    if !snap.is_null() {
+        drop(unsafe { Box::from_raw(snap) });
+    }
+}
+
+// ── scan value: plan / free ────────────────────────────────────────────────────────────────
+
+/// The built scan's terminal `ResultPlan` as proto bytes (the plan the engine faithfully executes).
+/// Writes the byte length to `*out_len`; returns a malloc'd buffer freed with [`delta_bytes_free`],
+/// or null on error.
+///
+/// # Safety
+/// `scan` is a valid [`DeltaScanValue`]; `out_len` and `out_err`, if non-null, writable.
+#[no_mangle]
+pub unsafe extern "C" fn delta_scan_plan(
+    scan: *mut DeltaScanValue,
+    out_len: *mut usize,
+    out_err: *mut *mut c_char,
+) -> *mut u8 {
+    init_out!(out_err, out_len);
+    if scan.is_null() || out_len.is_null() {
+        unsafe { write_err(out_err, "delta_scan_plan: null pointer argument") };
+        return ptr::null_mut();
+    }
+    let scan = unsafe { &*scan };
+    match super::proto_convert::result_plan_to_proto(&scan.plan) {
+        Ok(proto) => {
+            use prost::Message;
+            leak_bytes(proto.encode_to_vec(), out_len)
+        }
+        Err(msg) => {
+            unsafe { write_err(out_err, &format!("serialize result plan to proto: {msg}")) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Free a [`DeltaScanValue`].
+///
+/// # Safety
+/// `scan` is null or a pointer from [`delta_sm_build_scan`], freed once.
+#[no_mangle]
+pub unsafe extern "C" fn delta_scan_free(scan: *mut DeltaScanValue) {
+    if !scan.is_null() {
+        drop(unsafe { Box::from_raw(scan) });
+    }
+}
+
+// ── free helpers for the delta_* ABI (self-contained; no kdf_* leakage) ────────────────────────
+
+/// Free a proto byte buffer returned by a `delta_*_plan` / `delta_*_schema` emitter.
+///
+/// # Safety
+/// `ptr`/`len` are exactly what such an emitter returned (or `ptr` is null). Call at most once.
+#[no_mangle]
+pub unsafe extern "C" fn delta_bytes_free(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() {
+        unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
+    }
+}
+
+/// Free an error string written to a `delta_*` export's `out_err` slot.
+///
+/// # Safety
+/// `s` is null or a string produced by a `delta_*` `out_err` path, freed at most once.
+#[no_mangle]
+pub unsafe extern "C" fn delta_string_free(s: *mut c_char) {
+    if !s.is_null() {
+        unsafe { drop(CString::from_raw(s)) };
+    }
+}
+
+// ============================================================================
+// Phase B structural tests for the delta_* ABI (SDK_IMPLEMENTATION_PLAN.md B7).
+//
+// Validates the ABI SHAPE + proto emission + arm-guards WITHOUT executing reduces
+// (the full drive-to-Done is the C++ harness's job in Phase C, where DuckDB runs
+// the reduces). Here we open a real snapshot SM, advance one step, and assert:
+//   - open returns a non-null handle;
+//   - next() returns a valid step code;
+//   - on REDUCE, reduce_plan bytes decode into a ResultPlan proto, take_reducer is non-null;
+//   - build_scan on a snapshot SM is rejected (wrong-arm guard);
+//   - free/lifecycle is sound.
+// ============================================================================
+#[cfg(test)]
+mod delta_abi_tests {
+    use super::*;
+
+    fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for e in std::fs::read_dir(src).unwrap() {
+            let e = e.unwrap();
+            let p = e.path();
+            let t = dst.join(e.file_name());
+            if p.is_dir() {
+                copy_dir(&p, &t);
+            } else {
+                std::fs::copy(&p, &t).unwrap();
+            }
+        }
+    }
+
+    /// Copy the committed fixture to a temp dir and return its `file://` path string.
+    fn fixture_table() -> (tempfile::TempDir, String) {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kernel/tests/data/table-without-dv-small");
+        let tmp = tempfile::tempdir().unwrap();
+        let table = tmp.path().join("t");
+        copy_dir(&src, &table);
+        let url =
+            Url::from_directory_path(table.canonicalize().unwrap()).unwrap();
+        (tmp, url.to_string())
+    }
+
+    #[test]
+    fn delta_abi_shape_and_proto_emission() {
+        let (_tmp, path) = fixture_table();
+        let mut err: *mut c_char = ptr::null_mut();
+
+        // open → non-null snapshot SM
+        let sm = unsafe {
+            delta_open_snapshot(path.as_ptr() as *const c_char, path.len(), -1, &mut err)
+        };
+        assert!(!sm.is_null(), "delta_open_snapshot returned null");
+        assert!(err.is_null());
+
+        // next → a valid step code (REDUCE or DONE), never -1
+        let step = unsafe { delta_sm_next(sm, &mut err) };
+        assert!(step == DELTA_STEP_REDUCE || step == DELTA_STEP_DONE, "next returned {step}");
+        assert!(err.is_null(), "next set an error");
+
+        if step == DELTA_STEP_REDUCE {
+            // reduce_plan bytes must decode into a ResultPlan proto (the IR transport works)
+            let mut len: usize = 0;
+            let buf = unsafe { delta_sm_reduce_plan(sm, &mut len, &mut err) };
+            assert!(!buf.is_null() && len > 0, "reduce_plan returned empty");
+            let bytes = unsafe { std::slice::from_raw_parts(buf, len) };
+            let decoded = <super::super::proto::plan::ResultPlan as prost::Message>::decode(bytes);
+            assert!(decoded.is_ok(), "reduce_plan bytes did not decode as ResultPlan proto");
+            unsafe { super::delta_bytes_free(buf, len) };
+
+            // take_reducer → non-null
+            let reducer = unsafe { delta_sm_take_reducer(sm, &mut err) };
+            assert!(!reducer.is_null(), "take_reducer returned null");
+            unsafe { super::delta_reducer_free(reducer) };
+        }
+
+        // wrong-arm guard: build_scan on a snapshot SM must fail (null + err), not misbehave.
+        // (build_* consume the handle, so this also frees `sm`.)
+        let scan_val = unsafe { delta_sm_build_scan(sm, &mut err) };
+        assert!(scan_val.is_null(), "build_scan on a snapshot SM should be null");
+        assert!(!err.is_null(), "build_scan wrong-arm should set an error");
+        unsafe { super::delta_string_free(err) };
     }
 }
