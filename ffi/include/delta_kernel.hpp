@@ -218,8 +218,13 @@ private:
 
 /// The kernel needs the engine to run this reduce plan, then hand back the reduced result. Carries
 /// the parsed plan and the reducer (moved out of the SM).
+///
+/// The plan is a `ResultPlan` — an SSA DAG (`plan`) *plus* the terminal RefId (`result`) that names
+/// the node whose rows are the reduce's output. A bare `Plan` (nodes only) is not executable: the
+/// engine needs `result` to know which node's relation to materialize. This is the SAME shape the
+/// kernel uses for the terminal scan plan (`Scan::plan()`), so an engine executes both with one path.
 struct Reduce {
-	plan::Plan plan;
+	plan::ResultPlan plan;
 	Reducer reducer;
 };
 /// The state machine is finished; call `build()`.
@@ -242,9 +247,10 @@ using EngineResult = std::variant<ReduceResult>;
 class Engine {
 public:
 	virtual ~Engine() = default;
-	//! Execute an IR plan and yield its output as a lazy Arrow batch stream. Knows nothing of
-	//! reducers or state machines.
-	virtual ArrowStream execute_to_arrow(const plan::Plan &) = 0;
+	//! Execute an IR result plan (DAG + terminal RefId) and yield its output as a lazy Arrow batch
+	//! stream. Knows nothing of reducers or state machines. Same type the terminal scan plan uses, so
+	//! one executor serves both the reduce subplans and the final scan plan.
+	virtual ArrowStream execute_to_arrow(const plan::ResultPlan &) = 0;
 };
 
 //===----------------------------------------------------------------------===//
@@ -383,10 +389,12 @@ public:
 		if (step == detail::kStepDone) {
 			return Done{};
 		}
-		// Reduce: pull the plan bytes + the reducer.
+		// Reduce: pull the plan bytes + the reducer. The kernel serializes the reduce subplan as a
+		// ResultPlan ({plan, result}) — decode it as such so the terminal RefId is preserved (the
+		// engine needs it to know which node is the reduce's output).
 		size_t len = 0;
 		uint8_t *buf = ffi::delta_sm_reduce_plan(h_, &len, &err);
-		plan::Plan p = detail::DecodeBytes<plan::Plan>("delta_sm_reduce_plan", buf, len, err);
+		plan::ResultPlan p = detail::DecodeBytes<plan::ResultPlan>("delta_sm_reduce_plan", buf, len, err);
 		char *rerr = nullptr;
 		ffi::DeltaReducer *rd = ffi::delta_sm_take_reducer(h_, &rerr);
 		if (!rd) {
