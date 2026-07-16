@@ -86,12 +86,16 @@ fn main() {
         .expect("generate_with_config should have worked for C")
         .write_to_file(output_file_h);
 
-    // Ship the hand-written RAII C++ SDK header alongside the generated bindings. It layers typed,
-    // move-only owners (ScanStateMachine, KernelString, KernelBytes) over the flat `kdf_*` C ABI so
-    // the engine drives the scan SM without hand-managing owning pointers or error strings. Copied
-    // (not generated) — it's authored source under ffi/include, and the kernel is its single owner.
-    let sdk_src = Path::new(&crate_dir).join("include").join("delta_kernel_sdk.hpp");
-    println!("cargo:rerun-if-changed={}", sdk_src.display());
-    std::fs::copy(&sdk_src, target_dir.join("delta_kernel_sdk.hpp"))
-        .expect("copy delta_kernel_sdk.hpp into ffi-headers");
+    // Ship the hand-written C++ headers alongside the generated bindings. Copied (not generated) —
+    // authored source under ffi/include, kernel-owned. Two headers coexist during the migration:
+    //   - delta_kernel.hpp     : the NEW ergonomic C++ API (open_snapshot, StateMachine<T>, Engine,
+    //                            drive, Snapshot, Scan, Reducer) over the proto-only `delta_*` ABI.
+    //   - delta_kernel_sdk.hpp : the LEGACY RAII adapters over the `kdf_*`/`_sql` ABI, still driving
+    //                            the live SQL scan path. Deleted at cutover (Stage 4).
+    for hdr in ["delta_kernel.hpp", "delta_kernel_sdk.hpp"] {
+        let src = Path::new(&crate_dir).join("include").join(hdr);
+        println!("cargo:rerun-if-changed={}", src.display());
+        std::fs::copy(&src, target_dir.join(hdr))
+            .unwrap_or_else(|e| panic!("copy {hdr} into ffi-headers: {e}"));
+    }
 }
