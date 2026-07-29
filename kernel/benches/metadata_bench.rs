@@ -193,6 +193,29 @@ fn scan_metadata_declarative_sync_benchmark(c: &mut Criterion) {
         }
     }
 
+    if std::env::var_os("ALLOC_SWEEP_ONCE").is_some() {
+        for query_count in [1, 2, 4, 8, 16, 32, 64, 128, 256] {
+            reset_peak();
+            std::thread::scope(|scope| {
+                let handles = (0..query_count)
+                    .map(|_| {
+                        let snapshot = snapshot.clone();
+                        let engine = engine.clone();
+                        scope.spawn(|| execute_scan(snapshot, engine))
+                    })
+                    .collect::<Vec<_>>();
+                for handle in handles {
+                    handle.join().expect("Declarative scan panicked");
+                }
+            });
+            println!(
+                "[alloc-sweep] queries={query_count} peak={} KiB",
+                peak_delta() / 1024
+            );
+        }
+        return;
+    }
+
     let last_peak = AtomicUsize::new(0);
     c.bench_function("scan_metadata_declarative_sync", |b| {
         b.iter(|| {
