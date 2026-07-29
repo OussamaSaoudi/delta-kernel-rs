@@ -14,8 +14,10 @@ use crate::engine::arrow_utils::{
 use crate::engine_data::FilteredEngineData;
 use crate::object_store::DynObjectStore;
 use crate::schema::SchemaRef;
+#[cfg(test)]
+use crate::Error;
 use crate::{
-    DeltaResult, DeltaResultIterator, EngineData, Error, FileDataReadResultIterator, FileMeta,
+    DeltaResult, DeltaResultIterator, EngineData, FileDataReadResultIterator, FileMeta,
     JsonHandler, PredicateRef,
 };
 

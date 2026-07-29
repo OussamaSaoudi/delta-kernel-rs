@@ -48,8 +48,8 @@ pub use self::arrow_utils::{parse_json, to_json_bytes};
 #[cfg(all(feature = "declarative-plans", feature = "default-engine-base"))]
 pub mod plans;
 
-#[cfg(test)]
-pub(crate) mod sync;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod sync;
 
 #[cfg(feature = "default-engine-base")]
 pub mod arrow_data;

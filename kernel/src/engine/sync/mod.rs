@@ -41,7 +41,7 @@ pub(crate) mod plan;
 use plan::SyncPlanExecutor;
 
 /// A simple (test-only) implementation of [`Engine`]. See module docs for supported stores.
-pub(crate) struct SyncEngine {
+pub struct SyncEngine {
     storage_handler: Arc<storage::SyncStorageHandler>,
     json_handler: Arc<json::SyncJsonHandler>,
     parquet_handler: Arc<parquet::SyncParquetHandler>,
@@ -52,14 +52,14 @@ pub(crate) struct SyncEngine {
 
 impl SyncEngine {
     /// Create a SyncEngine that reads from the local filesystem via [`LocalFileSystem`].
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::new_inner(None)
     }
 
     /// Create a SyncEngine backed by `store`. All I/O is performed synchronously via
     /// [`futures::executor::block_on`]. See module docs for the deadlock caveat on
     /// reactor-dependent stores.
-    pub(crate) fn new_with_store(store: Arc<DynObjectStore>) -> Self {
+    pub fn new_with_store(store: Arc<DynObjectStore>) -> Self {
         Self::new_inner(Some(store))
     }
 
