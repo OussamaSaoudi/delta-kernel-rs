@@ -6,7 +6,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::iter::{DoubleEndedIterator, FusedIterator};
 use std::ops::Deref;
 use std::str::FromStr;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use delta_kernel_derive::internal_api;
 use indexmap::IndexMap;
@@ -49,6 +49,29 @@ pub type SchemaRef = Arc<StructType>;
 /// Cloning a field reference allows the same immutable field definition to be reused across
 /// multiple [`StructType`]s without cloning the field's nested data type and metadata.
 pub type StructFieldRef = Arc<StructField>;
+
+static STRUCT_FIELD_CACHE: LazyLock<Mutex<Vec<Weak<StructField>>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn intern_struct_field(field: StructFieldRef) -> StructFieldRef {
+    let mut cache = STRUCT_FIELD_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut matching = None;
+    cache.retain(|candidate| {
+        let Some(candidate) = candidate.upgrade() else {
+            return false;
+        };
+        if candidate.as_ref() == field.as_ref() {
+            matching = Some(candidate);
+        }
+        true
+    });
+    matching.unwrap_or_else(|| {
+        cache.push(Arc::downgrade(&field));
+        field
+    })
+}
 
 /// Sugar for `LazyLock::new(|| `[`schema_ref!`](schema_ref)` { ... })`, yielding a lazy
 /// [`SchemaRef`].
@@ -916,6 +939,7 @@ impl StructType {
 
         // Validate each field during insertion
         for (i, field) in fields.into_iter().enumerate() {
+            let field = intern_struct_field(field);
             // Verify that there are no nested metadata columns
             if !matches!(field.data_type, DataType::Primitive(_)) {
                 Self::ensure_no_metadata_columns_in_field(&field)?;
@@ -983,6 +1007,7 @@ impl StructType {
         let mut metadata_columns = HashMap::new();
 
         for (i, field) in fields.into_iter().enumerate() {
+            let field = intern_struct_field(field);
             if let Some(metadata_column_spec) = field.get_metadata_column_spec() {
                 metadata_columns.insert(metadata_column_spec, i);
             }
@@ -4700,6 +4725,17 @@ mod tests {
         assert!(Arc::ptr_eq(second.field("id").unwrap(), &shared));
         assert!(Arc::ptr_eq(projected.field("id").unwrap(), &shared));
         assert!(Arc::ptr_eq(extended.field("id").unwrap(), &shared));
+    }
+
+    #[test]
+    fn structurally_equal_fields_are_interned_across_schema_construction() {
+        let first = StructType::try_new([StructField::nullable("id", DataType::INTEGER)]).unwrap();
+        let second = StructType::try_new([StructField::nullable("id", DataType::INTEGER)]).unwrap();
+
+        assert!(Arc::ptr_eq(
+            first.field("id").unwrap(),
+            second.field("id").unwrap()
+        ));
     }
 
     #[test]
