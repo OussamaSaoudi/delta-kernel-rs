@@ -7,12 +7,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use datafusion_common::error::DataFusionError;
-use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::Result as DfResult;
 use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::equivalence::EquivalenceProperties;
-use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion_physical_plan::{

@@ -247,14 +247,12 @@ pub(crate) fn make_not_in_dv_udf(dv: Arc<RoaringTreemap>) -> ScalarUDF {
     )
 }
 
-/// Build a [`FileSource`] for the load. Layout is `[file, partition, virtual]`: file fields
-/// are split off `full_schema`; passthrough fields become DataFusion *partition columns* (the
-/// per-file constant-broadcast mechanism via `PartitionedFile.partition_values`); the parquet
-/// `_row_number` virtual column is appended when `include_row_number` is set, declared via
-/// [`TableSchema::with_virtual_columns`] (apache/datafusion#22026) so it stays out of parquet's
-/// supplied-schema validation. Projection is pushed into the source via
-/// `with_projection_indices`; when row-number is enabled it gets appended for the predicate
-/// side.
+/// Build a [`FileSource`] for the load. File fields are split off `full_schema`; passthrough
+/// fields become DataFusion *partition columns* (the per-file constant-broadcast mechanism via
+/// `PartitionedFile.partition_values`). When `include_row_number` is set, the parquet virtual
+/// column is inserted between those groups, producing `[file, virtual, partition]`, and registered
+/// with [`ParquetSource::with_virtual_columns`]. Projection is pushed into the source via
+/// `with_projection_indices`; the row number is retained for the deletion-vector predicate.
 pub(crate) fn build_file_source(
     file_type: FileType,
     full_schema: &ArrowSchemaRef,
@@ -279,29 +277,47 @@ pub(crate) fn build_file_source(
         .iter()
         .map(|f| Arc::new(strip_nested_metadata_only(f.as_ref())))
         .collect();
+    let row_number_field = include_row_number.then(|| {
+        Arc::new(
+            ArrowField::new(ROW_NUMBER_COL, ArrowDataType::Int64, false)
+                .with_extension_type(RowNumber),
+        )
+    });
     let file_arrow_schema: ArrowSchemaRef = Arc::new(
-        ArrowSchema::new(stripped_file_fields).with_metadata(full_schema.metadata().clone()),
+        ArrowSchema::new(
+            stripped_file_fields
+                .into_iter()
+                .chain(row_number_field.iter().cloned())
+                .collect::<Vec<_>>(),
+        )
+        .with_metadata(full_schema.metadata().clone()),
     );
     let table_schema = TableSchema::new(file_arrow_schema, passthrough_fields.to_vec());
-    // TODO(duckdb M1): the dev datafusion fork exposed TableSchema::with_virtual_columns to
-    // register the parquet `_row_number` virtual column; the available fork moved virtual-column
-    // wiring onto the parquet source / FileScanConfigBuilder. The row-number virtual column is
-    // only needed by the data/DV Load path, not the M1 metadata scan, so it is skipped here.
-    let _ = include_row_number;
     let source: Arc<dyn FileSource> = match file_type {
-        FileType::Parquet => Arc::new(ParquetSource::new(table_schema)),
+        FileType::Parquet => {
+            let source = ParquetSource::new(table_schema);
+            let source = match row_number_field {
+                Some(field) => source.with_virtual_columns(vec![field])?,
+                None => source,
+            };
+            Arc::new(source)
+        }
         FileType::Json => Arc::new(JsonSource::new(table_schema)),
     };
     let source = source.with_batch_size(DEFAULT_OPENER_BATCH_SIZE);
     let Some(proj) = projection else {
         return Ok(source);
     };
-    // Caller's projection indexes into [file ++ passthrough]. When row-number is enabled, the
-    // virtual sits at `file_field_count + passthrough_count`; append it for the predicate.
+    // Caller's projection indexes into [file ++ passthrough]. The parquet source indexes
+    // [file ++ virtual ++ passthrough], so shift passthrough indices and retain row-number for
+    // the DV predicate.
     let translated_proj: Vec<usize> = if include_row_number {
-        let row_number_idx = file_field_count + passthrough_fields.len();
+        let row_number_idx = file_field_count;
         let mut out = Vec::with_capacity(proj.len() + 1);
-        out.extend(proj.iter().copied());
+        out.extend(
+            proj.iter()
+                .map(|&idx| if idx < file_field_count { idx } else { idx + 1 }),
+        );
         out.push(row_number_idx);
         out
     } else {

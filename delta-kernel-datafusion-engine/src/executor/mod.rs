@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::context::SessionContext;
+use datafusion::object_store::ObjectStore as DataFusionObjectStore;
 use datafusion_common::error::DataFusionError;
 use datafusion_execution::config::SessionConfig;
 use datafusion_execution::TaskContext;
@@ -110,6 +111,18 @@ impl DataFusionExecutor {
     /// Reference to the kernel [`Engine`] this executor uses for IO helpers.
     pub fn engine(&self) -> &Arc<dyn Engine> {
         &self.engine
+    }
+
+    /// Registers the DataFusion object store used to read plan scan nodes for `url`.
+    ///
+    /// The store is separate from the kernel [`Engine`] store used by state-machine helpers.
+    /// Returns the previously registered store for the same URL prefix, if one existed.
+    pub fn register_object_store(
+        &self,
+        url: &Url,
+        store: Arc<dyn DataFusionObjectStore>,
+    ) -> Option<Arc<dyn DataFusionObjectStore>> {
+        self.session_ctx.register_object_store(url, store)
     }
 
     // ================================================================
