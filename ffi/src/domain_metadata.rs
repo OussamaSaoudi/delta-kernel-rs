@@ -46,6 +46,32 @@ fn get_domain_metadata_impl(
         .and_then(|config| allocate_fn(kernel_string_slice!(config))))
 }
 
+/// Get an active domain's raw configuration, including system-controlled `delta.*` domains.
+///
+/// Calls `allocate_fn` once with the configuration, or not at all if the domain is absent or
+/// removed. The returned pointer belongs to the caller; Kernel does not retain or free it.
+/// System-domain configuration formats are internal and may change between Kernel versions.
+///
+/// # Safety
+///
+/// The snapshot and engine handles must be valid for this call and remain owned by the caller.
+/// The domain slice must be readable for this call. `allocate_fn` must copy the configuration
+/// before returning if it needs to retain it; the string slice is valid only during the callback.
+#[no_mangle]
+pub unsafe extern "C" fn get_domain_metadata_internal(
+    snapshot: Handle<SharedSnapshot>,
+    domain: KernelStringSlice,
+    engine: Handle<SharedExternEngine>,
+    allocate_fn: AllocateStringFn,
+) -> ExternResult<NullableCvoid> {
+    let snapshot = unsafe { snapshot.as_ref() };
+    let engine = unsafe { engine.as_ref() };
+    let result = unsafe { String::try_from_slice(&domain) }
+        .and_then(|domain| snapshot.get_domain_metadata_internal(&domain, engine.engine().as_ref()))
+        .map(|config| config.and_then(|config| allocate_fn(kernel_string_slice!(config))));
+    result.into_extern_result(&engine)
+}
+
 /// Get the row-tracking high-water mark for this snapshot.
 ///
 /// Returns [`OptionalValue::None`] when the snapshot has no active `delta.rowTracking` domain
@@ -220,8 +246,9 @@ mod tests {
     };
     use crate::{engine_to_handle, free_engine, free_snapshot, kernel_string_slice};
 
+    #[rstest]
     #[tokio::test]
-    async fn test_domain_metadata() -> Result<()> {
+    async fn test_domain_metadata(#[values(false, true)] internal: bool) -> Result<()> {
         let storage = Arc::new(InMemory::new());
 
         let engine = DefaultEngineBuilder::new(storage.clone()).build();
@@ -303,8 +330,13 @@ mod tests {
         let snapshot =
             unsafe { build_snapshot(kernel_string_slice!(table_root), engine.shallow_copy()) };
 
+        let getter = if internal {
+            get_domain_metadata_internal
+        } else {
+            get_domain_metadata
+        };
         let get_domain_metadata_helper = |domain: &str| unsafe {
-            get_domain_metadata(
+            getter(
                 snapshot.shallow_copy(),
                 kernel_string_slice!(domain),
                 engine.shallow_copy(),
@@ -324,7 +356,12 @@ mod tests {
 
         let domain3 = "delta.domain3";
         let res = get_domain_metadata_helper(domain3);
-        assert_extern_result_error_with_message(res, FFIKernelError::GenericError, Some("Generic delta kernel error: User DomainMetadata are not allowed to use system-controlled 'delta.*' domain"));
+        if internal {
+            assert_eq!(recover_string(ok_or_panic(res).unwrap()), "domain3_commit1");
+        } else {
+            assert_extern_result_error_with_message(res, FFIKernelError::GenericError, Some("Generic delta kernel error: User DomainMetadata are not allowed to use system-controlled 'delta.*' domain"));
+        }
+        assert!(ok_or_panic(get_domain_metadata_helper("missing")).is_none());
 
         // Secondly, we visit the entire domain metadata
 
@@ -537,16 +574,29 @@ mod tests {
         (engine, snapshot)
     }
 
+    #[rstest]
+    #[case::absent(None, None)]
+    #[case::present(Some(r#"{ "clusteringColumns": [["id"]] }"#), None)]
+    #[case::updated(
+        Some(r#"{"clusteringColumns":[["id"]]}"#),
+        Some((r#"{"clusteringColumns":[["val"]]}"#, false))
+    )]
+    #[case::removed(
+        Some(r#"{"clusteringColumns":[["id"]]}"#),
+        Some((r#"{"clusteringColumns":[["id"]]}"#, true))
+    )]
     #[tokio::test]
-    async fn test_get_clustering_domain_metadata_user_facing_path_still_rejects() -> Result<()> {
+    async fn test_get_clustering_domain_metadata(
+        #[case] config: Option<&str>,
+        #[case] follow_up: Option<(&str, bool)>,
+    ) -> Result<()> {
         let table_root = "memory:///test_clustering_user_facing_rejected/";
-        let (engine, snapshot) = build_clustering_snapshot(
-            table_root,
-            true,
-            Some(r#"{"clusteringColumns":[["id"]]}"#),
-            &[],
-        )
-        .await;
+        let commits: Vec<_> = follow_up
+            .into_iter()
+            .map(|(config, removed)| clustering_domain_action(config, removed))
+            .collect();
+        let (engine, snapshot) =
+            build_clustering_snapshot(table_root, true, config, &commits).await;
 
         let domain = "delta.clustering";
         let rejected = unsafe {
@@ -566,8 +616,39 @@ mod tests {
             ),
         );
 
+        let configuration = unsafe {
+            ok_or_panic(get_domain_metadata_internal(
+                snapshot.shallow_copy(),
+                kernel_string_slice!(domain),
+                engine.shallow_copy(),
+                allocate_str,
+            ))
+        };
+
+        let invalid_domain = [0xffu8];
+        let invalid = unsafe {
+            get_domain_metadata_internal(
+                snapshot.shallow_copy(),
+                KernelStringSlice {
+                    ptr: invalid_domain.as_ptr().cast(),
+                    len: invalid_domain.len(),
+                },
+                engine.shallow_copy(),
+                allocate_str,
+            )
+        };
+        assert_extern_result_error_with_message(invalid, FFIKernelError::Utf8Error, None);
+
         unsafe { free_snapshot(snapshot) }
         unsafe { free_engine(engine) }
+
+        // The callback's copy remains valid after the borrowed native handles are released.
+        let expected = match follow_up {
+            Some((config, false)) => Some(config),
+            Some((_, true)) => None,
+            None => config,
+        };
+        assert_eq!(configuration.map(recover_string).as_deref(), expected);
 
         Ok(())
     }
