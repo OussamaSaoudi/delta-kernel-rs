@@ -260,9 +260,11 @@ pub enum KernelError {
     #[error("Commit range error: {0}")]
     CommitRange(String),
 
-    /// A generic error wrapping another error
-    #[error("Generic error: {source}")]
+    /// A diagnostic message retaining the underlying error.
+    #[error("{message}: {source}")]
     GenericError {
+        /// Context supplied by the caller.
+        message: String,
         /// Source error
         source: BoxedError,
     },
@@ -543,8 +545,18 @@ impl KernelError {
         Self::CheckpointWrite(msg.to_string())
     }
 
+    /// Wraps an error with the default generic diagnostic message.
     pub fn generic_err(source: impl Into<BoxedError>) -> Self {
+        Self::generic_with_source("Generic error", source)
+    }
+
+    /// Adds a diagnostic message while retaining the source for error-chain inspection.
+    ///
+    /// The resulting error is generic; callers that need to recover from a specific failure
+    /// should classify it before wrapping or inspect its source.
+    pub fn generic_with_source(message: impl Into<String>, source: impl Into<BoxedError>) -> Self {
         Self::GenericError {
+            message: message.into(),
             source: source.into(),
         }
     }

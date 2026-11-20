@@ -108,7 +108,10 @@ impl From<&KernelError> for FFIKernelError {
             KernelError::EngineDataType(_) => FFIKernelError::EngineDataTypeError,
             KernelError::Extract(..) => FFIKernelError::ExtractError,
             KernelError::Generic(_) => FFIKernelError::GenericError,
-            KernelError::GenericError { .. } => FFIKernelError::GenericError,
+            // Caller-supplied diagnostics must preserve a Kernel source's error code.
+            KernelError::GenericError { source, .. } => source
+                .downcast_ref::<KernelError>()
+                .map_or(FFIKernelError::GenericError, Self::from),
             KernelError::CommitRange(_) => FFIKernelError::CommitRangeError,
             KernelError::MaxCatalogVersion(_) => FFIKernelError::MaxCatalogVersionError,
             KernelError::LogTailVersionsNotContiguous { .. } => FFIKernelError::InvalidLogSegment,
@@ -419,7 +422,49 @@ impl From<EngineExecError> for KernelError {
 
 #[cfg(test)]
 mod error_code_tests {
+    use std::backtrace::Backtrace;
+    use std::io;
+
+    use rstest::rstest;
+
     use super::*;
+
+    #[rstest]
+    #[case::missing_file(
+        KernelError::file_not_found("part.parquet"),
+        FFIKernelError::FileNotFoundError
+    )]
+    #[case::unsupported(
+        KernelError::unsupported("no executor"),
+        FFIKernelError::UnsupportedError
+    )]
+    #[case::cancelled(KernelError::Cancelled, FFIKernelError::CancelledError)]
+    #[case::parse(KernelError::ParseError("bad".into(), delta_kernel::schema::DataType::INTEGER), FFIKernelError::ParseError)]
+    #[case::foreign(io::Error::other("read failed").into(), FFIKernelError::IOErrorError)]
+    fn generic_context_preserves_source_error_code(
+        #[case] source: KernelError,
+        #[case] expected: FFIKernelError,
+        #[values(false, true)] backtraced: bool,
+    ) {
+        let error = KernelError::generic_with_source("Reading checkpoint", source);
+        let error = if backtraced {
+            KernelError::Backtraced {
+                source: Box::new(error),
+                backtrace: Box::new(Backtrace::disabled()),
+            }
+        } else {
+            error
+        };
+        let error = KernelError::generic_with_source("Planning metadata scan", error);
+        assert_eq!(FFIKernelError::from(&error), expected);
+    }
+
+    #[test]
+    fn generic_context_with_foreign_source_keeps_generic_error_code() {
+        let error =
+            KernelError::generic_with_source("Reading checkpoint", io::Error::other("failed"));
+        assert_eq!(FFIKernelError::from(&error), FFIKernelError::GenericError);
+    }
 
     fn exec_error(etype: FFIKernelError, message: &str) -> EngineExecError {
         let message: Handle<ExclusiveRustString> = Box::new(message.to_string()).into();

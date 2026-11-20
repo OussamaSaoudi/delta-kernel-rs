@@ -11,6 +11,10 @@ use rstest::rstest;
 #[rstest]
 #[case::without_source(KernelError::file_not_found("missing.parquet"))]
 #[case::with_source(KernelError::generic_err(io::Error::other("read failed")))]
+#[case::with_context(KernelError::generic_with_source(
+    "Reading checkpoint",
+    io::Error::other("read failed"),
+))]
 #[case::with_backtrace(KernelError::Backtraced {
     source: Box::new(KernelError::file_not_found("missing.parquet")),
     backtrace: Box::new(Backtrace::disabled()),
@@ -65,6 +69,31 @@ fn test_kernel_result_iterator_explicitly_maps_into_error() {
         Err(Error::Kernel(KernelError::FileNotFound(path))) if path == "missing.parquet"
     ));
     assert!(result.next().is_none());
+}
+
+#[test]
+fn test_generic_with_source_preserves_nested_diagnostics_and_original_cause() {
+    let source = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+    let read = KernelError::generic_with_source("Reading checkpoint 'part-7.parquet'", source);
+    let error = KernelError::generic_with_source("Planning table 'orders' at snapshot 42", read);
+
+    assert_eq!(
+        error.to_string(),
+        "Planning table 'orders' at snapshot 42: Reading checkpoint 'part-7.parquet': access denied",
+    );
+    let read = error
+        .source()
+        .unwrap()
+        .downcast_ref::<KernelError>()
+        .unwrap();
+    let source = read.source().unwrap().downcast_ref::<io::Error>().unwrap();
+    assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+}
+
+#[test]
+fn test_generic_err_preserves_default_message() {
+    let error = KernelError::generic_err(io::Error::other("read failed"));
+    assert_eq!(error.to_string(), "Generic error: read failed");
 }
 
 #[rstest]

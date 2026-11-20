@@ -231,6 +231,42 @@ mod tests {
         EngineResult,
     }
 
+    #[test]
+    fn contextual_kernel_error_reaches_callback_with_source_code_and_message() {
+        let mut output = Capture::default();
+        let context = std::ptr::from_mut(&mut output).cast();
+        let allocators = ErrorAllocators {
+            context,
+            allocate_kernel_error: kernel,
+            allocate_delta_error: delta,
+        };
+        let error = KernelError::generic_with_source(
+            "Planning table 'orders' at snapshot 42",
+            KernelError::generic_with_source(
+                "Reading checkpoint footer",
+                KernelError::file_not_found("part-7.parquet"),
+            ),
+        );
+        let result: delta_kernel::KernelResult<()> = Err(error);
+
+        let result = unsafe { result.into_extern_result(&allocators) };
+
+        assert!(matches!(result, ExternResult::Err(pointer) if pointer == context));
+        assert_eq!(output.calls, 1);
+        assert_eq!(
+            output.fields,
+            vec![
+                ("code".into(), "FileNotFoundError".into()),
+                (
+                    "message".into(),
+                    "Planning table 'orders' at snapshot 42: Reading checkpoint footer: \
+                     File not found: part-7.parquet"
+                        .into(),
+                ),
+            ],
+        );
+    }
+
     #[rstest]
     #[case::kernel(None, EntryPoint::Direct)]
     #[case::kernel_helper(None, EntryPoint::Kernel)]
