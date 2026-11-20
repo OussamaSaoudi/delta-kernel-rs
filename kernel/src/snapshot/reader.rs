@@ -7,6 +7,8 @@ use std::sync::Arc;
 use delta_kernel_derive::internal_api;
 
 use super::Snapshot;
+#[cfg(feature = "declarative-plans")]
+use crate::KernelError;
 use crate::actions::DomainMetadata;
 #[cfg(feature = "declarative-plans")]
 use crate::checkpoint::CheckpointShape;
@@ -91,6 +93,26 @@ impl<'a> SnapshotReader<'a> {
                 ));
             }
             snapshot.checkpoint_info(engine)
+        })
+        .map_err(|source| {
+            if matches!(source.without_backtrace(), KernelError::Cancelled) {
+                return source;
+            }
+            let error = KernelError::generic_with_source(
+                format!(
+                    "Reading checkpoint information for table '{}' at snapshot {}",
+                    self.snapshot.table_root(),
+                    self.snapshot.version(),
+                ),
+                source,
+            );
+            tracing::error!(
+                %error,
+                table = %self.snapshot.table_root(),
+                snapshot_version = self.snapshot.version(),
+                "Checkpoint information read failed"
+            );
+            error
         })
     }
 

@@ -29,8 +29,15 @@ impl CheckpointShape {
     #[tracing::instrument(
         name = "checkpoint_shape.resolve",
         skip_all,
-        fields(enable_call_frame),
-        err
+        fields(
+            enable_call_frame,
+            checkpoint,
+            checkpoint_version,
+            schema_from_hint,
+            sidecars_from_hint,
+            sidecar_files,
+            size_in_bytes,
+        )
     )]
     pub(crate) fn resolve(
         exec: &dyn PlanExecutor,
@@ -39,6 +46,31 @@ impl CheckpointShape {
         let Some(root) = segment.listed.checkpoint_parts.first() else {
             return Ok(None);
         };
+        let span = tracing::Span::current();
+        span.record(
+            "checkpoint",
+            tracing::field::display(&root.location.location),
+        );
+        span.record("checkpoint_version", root.version);
+        Self::resolve_inner(exec, segment, root)
+            .map(Some)
+            .map_err(|source| {
+                if matches!(source.without_backtrace(), KernelError::Cancelled) {
+                    return source;
+                }
+                // Returned errors must retain checkpoint identity even without tracing enabled.
+                KernelError::generic_with_source(
+                    format!("Failed to resolve checkpoint '{}'", root.location.location),
+                    source,
+                )
+            })
+    }
+
+    fn resolve_inner(
+        exec: &dyn PlanExecutor,
+        segment: &LogSegment,
+        root: &ParsedLogPath,
+    ) -> KernelResult<Self> {
         let file_type = if root.is_json() {
             FileType::Json
         } else {
@@ -55,6 +87,12 @@ impl CheckpointShape {
                 })
             });
         let mut root_schema = segment.checkpoint_hint_schema();
+        let span = tracing::Span::current();
+        span.record("schema_from_hint", root_schema.is_some());
+        span.record(
+            "sidecars_from_hint",
+            segment.checkpoint_hint_sidecars().is_some(),
+        );
         let (sidecars, metadata) = match segment.checkpoint_hint_sidecars() {
             Some(sidecars) => (Cow::Borrowed(sidecars.as_slice()), hint_metadata),
             None => {
@@ -76,25 +114,54 @@ impl CheckpointShape {
         if let Some(metadata) = &metadata
             && metadata.version != root.version_as_i64()?
         {
-            return Err(KernelError::invalid_checkpoint(
-                "Checkpoint metadata version mismatch",
-            ));
+            return Err(KernelError::invalid_checkpoint(format!(
+                "Checkpoint metadata version mismatch: expected {}, found {}",
+                root.version, metadata.version,
+            )));
         }
         let files = sidecars
             .iter()
-            .map(|sidecar| sidecar.to_filemeta(&segment.log_root))
+            .map(|sidecar| {
+                sidecar.to_filemeta(&segment.log_root).map_err(|source| {
+                    KernelError::generic_with_source(
+                        format!(
+                            "Failed to resolve sidecar '{}' beneath '{}'",
+                            sidecar.path, segment.log_root,
+                        ),
+                        source,
+                    )
+                })
+            })
             .collect::<KernelResult<Arc<[FileMeta]>>>()?;
+        span.record("sidecar_files", files.len());
         let leaf_checkpoint_schema = if let Some(first) = files.first() {
             let tagged = segment.checkpoint_hint_sidecar_file_schema().or_else(|| {
                 metadata
                     .as_ref()
                     .and_then(|m| m.tags.as_ref())
                     .and_then(|tags| tags.get(SIDECAR_FILE_SCHEMA_TAG))
-                    .and_then(|json| serde_json::from_str::<StructType>(json).ok())
+                    .and_then(|json| {
+                        serde_json::from_str::<StructType>(json)
+                            .inspect_err(|error| {
+                                tracing::info!(
+                                    %error,
+                                    "Invalid sidecar schema tag; reading the sidecar footer"
+                                );
+                            })
+                            .ok()
+                    })
             });
             match tagged {
                 Some(schema) => Arc::new(schema),
-                None => read_parquet_footer_schema(exec, first.clone())?,
+                None => read_parquet_footer_schema(exec, first.clone()).map_err(|source| {
+                    if matches!(source.without_backtrace(), KernelError::Cancelled) {
+                        return source;
+                    }
+                    KernelError::generic_with_source(
+                        format!("Failed to read sidecar '{}'", first.location),
+                        source,
+                    )
+                })?,
             }
         } else if file_type == FileType::Json {
             CHECKPOINT_ACTIONS_SCHEMA_V2.clone()
@@ -113,9 +180,13 @@ impl CheckpointShape {
             .map(|part| part.location.size)
             .chain(files.iter().map(|file| file.size))
             .try_fold(0u64, |sum, size| {
-                sum.checked_add(size)
-                    .ok_or_else(|| KernelError::invalid_checkpoint("Checkpoint size overflow"))
+                sum.checked_add(size).ok_or_else(|| {
+                    KernelError::invalid_checkpoint(format!(
+                        "Checkpoint size overflow: {sum} + {size} bytes"
+                    ))
+                })
             })?;
+        span.record("size_in_bytes", size_in_bytes);
         let last_checkpoint = Box::new(derived_last_checkpoint(
             root,
             segment.checkpoint_hint(),
@@ -124,12 +195,13 @@ impl CheckpointShape {
             root_schema.as_ref(),
             size_in_bytes,
         )?);
-        Ok(Some(Self {
+        tracing::info!("Resolved checkpoint layout and schema");
+        Ok(Self {
             leaf_checkpoint_schema,
             sidecars: files,
             size_in_bytes,
             last_checkpoint,
-        }))
+        })
     }
 }
 
@@ -158,10 +230,12 @@ fn derived_last_checkpoint(
     let v2_checkpoint = if matches!(root.file_type, LogPathFileType::UuidCheckpoint) {
         Some(LastCheckpointV2 {
             path: root.filename.clone(),
-            size_in_bytes: Some(
-                i64::try_from(root.location.size)
-                    .map_err(|_| KernelError::invalid_checkpoint("Checkpoint size exceeds i64"))?,
-            ),
+            size_in_bytes: Some(i64::try_from(root.location.size).map_err(|_| {
+                KernelError::invalid_checkpoint(format!(
+                    "Checkpoint size exceeds i64: {} bytes",
+                    root.location.size,
+                ))
+            })?),
             modification_time: Some(root.location.last_modified),
             sidecar_files: Some(sidecars.into_owned()),
             // Discovery projects only checkpointMetadata and sidecars, so it cannot
@@ -181,10 +255,11 @@ fn derived_last_checkpoint(
         root.version,
         hint.map_or(-1, |h| h.size),
         parts,
-        Some(
-            i64::try_from(size_in_bytes)
-                .map_err(|_| KernelError::invalid_checkpoint("Checkpoint size exceeds i64"))?,
-        ),
+        Some(i64::try_from(size_in_bytes).map_err(|_| {
+            KernelError::invalid_checkpoint(format!(
+                "Checkpoint size exceeds i64: {size_in_bytes} bytes"
+            ))
+        })?),
         num_of_add_files,
         None,
         // This is derived metadata, so the original hint's checksum no longer applies.
@@ -200,24 +275,35 @@ fn derived_last_checkpoint(
 #[tracing::instrument(
     name = "checkpoint_shape.read_parquet_footer_schema",
     skip_all,
-    fields(enable_call_frame),
-    err
+    fields(enable_call_frame)
 )]
 fn read_parquet_footer_schema(exec: &dyn PlanExecutor, file: FileMeta) -> KernelResult<SchemaRef> {
-    Ok(exec.read_parquet_footer(file)?.schema)
+    exec.read_parquet_footer(file)
+        .map(|footer| footer.schema)
+        .map_err(|source| {
+            if matches!(source.without_backtrace(), KernelError::Cancelled) {
+                return source;
+            }
+            KernelError::generic_with_source("Failed to read Parquet footer", source)
+        })
 }
 
 #[tracing::instrument(
     name = "checkpoint_shape.collect_checkpoint_metadata",
     skip_all,
-    fields(enable_call_frame),
-    err
+    fields(enable_call_frame)
 )]
 fn collect_checkpoint_metadata(
     exec: &dyn PlanExecutor,
     file: &FileMeta,
     file_type: FileType,
 ) -> KernelResult<(Vec<Sidecar>, Option<CheckpointMetadata>)> {
+    let annotate_err = |source: KernelError| {
+        if matches!(source.without_backtrace(), KernelError::Cancelled) {
+            return source;
+        }
+        KernelError::generic_with_source("Failed to read checkpoint manifest", source)
+    };
     let schema = schema_ref! { (&SIDECAR_FIELD), (&CHECKPOINT_METADATA_FIELD) };
     let predicate = Predicate::or(
         col!(SIDECAR_NAME, "path").is_not_null(),
@@ -226,16 +312,24 @@ fn collect_checkpoint_metadata(
     let plan = match file_type {
         FileType::Parquet => PlanBuilder::scan_parquet([file.clone()], &[], schema),
         FileType::Json => PlanBuilder::scan_json([file.clone()], &[], schema),
-    }?
-    .filter(predicate)?
-    .build()?;
-    let data = exec.execute_op(Operation::QueryPlan(plan))?.into_data()?;
+    }
+    .and_then(|plan| plan.filter(predicate))
+    .and_then(|plan| plan.build())
+    .map_err(annotate_err)?;
+    let data = exec
+        .execute_op(Operation::QueryPlan(plan))
+        .and_then(crate::plans::PlanResult::into_data)
+        .map_err(annotate_err)?;
     let mut sidecars = SidecarVisitor::default();
     let mut metadata = CheckpointMetadataVisitor::default();
     for batch in data {
-        let batch = batch?;
-        sidecars.visit_rows_of(batch.as_ref())?;
-        metadata.visit_rows_of(batch.as_ref())?;
+        let batch = batch.map_err(annotate_err)?;
+        sidecars
+            .visit_rows_of(batch.as_ref())
+            .map_err(annotate_err)?;
+        metadata
+            .visit_rows_of(batch.as_ref())
+            .map_err(annotate_err)?;
     }
     Ok((sidecars.sidecars, metadata.0))
 }
@@ -1168,6 +1262,117 @@ mod tests {
         );
     }
 
+    #[rstest]
+    fn cancelled_discovery_preserves_cancellation(#[values(false, true)] scan_first: bool) {
+        struct CancelledExecutor;
+
+        impl PlanExecutor for CancelledExecutor {
+            fn execute_op(&self, _operation: Operation) -> KernelResult<PlanResult> {
+                Err(KernelError::Cancelled)
+            }
+        }
+
+        let (engine, original, _tempdir) =
+            load_test_table("v2-checkpoints-json-with-sidecars").unwrap();
+        let mut segment = original.log_segment().clone();
+        segment.last_checkpoint_metadata = None;
+        let snapshot =
+            Arc::new(Snapshot::new(segment, original.table_configuration().clone()).unwrap());
+        let engine = DelegatingEngine::new(engine).with_plan_executor(Arc::new(CancelledExecutor));
+
+        let error = if scan_first {
+            snapshot
+                .clone()
+                .scan_builder()
+                .build()
+                .unwrap()
+                .declarative_metadata_scan_plan(&engine)
+                .unwrap_err()
+        } else {
+            snapshot.reader().get_checkpoint_info(&engine).unwrap_err()
+        };
+
+        assert!(matches!(error, KernelError::Cancelled));
+        assert!(snapshot.cached_checkpoint_info().is_none());
+    }
+
+    #[rstest]
+    #[case::footer("with_checkpoint_no_last_checkpoint", "Failed to read Parquet footer")]
+    #[case::manifest(
+        "v2-checkpoints-json-with-sidecars",
+        "Failed to read checkpoint manifest"
+    )]
+    fn discovery_executor_errors_include_file_and_operation(
+        #[case] table: &str,
+        #[case] operation: &str,
+        #[values(false, true)] wrong_result: bool,
+        #[values(false, true)] scan_first: bool,
+    ) {
+        struct FailingExecutor {
+            wrong_result: bool,
+        }
+
+        impl PlanExecutor for FailingExecutor {
+            fn execute_op(&self, _operation: Operation) -> KernelResult<PlanResult> {
+                if self.wrong_result {
+                    Ok(PlanResult::Unit)
+                } else {
+                    Err(KernelError::file_not_found("injected read failure"))
+                }
+            }
+        }
+
+        let (engine, original, _tempdir) = load_test_table(table).unwrap();
+        let mut segment = original.log_segment().clone();
+        segment.last_checkpoint_metadata = None;
+        let location = segment.listed.checkpoint_parts[0].location.location.clone();
+        let snapshot =
+            Arc::new(Snapshot::new(segment, original.table_configuration().clone()).unwrap());
+        let engine = DelegatingEngine::new(engine)
+            .with_plan_executor(Arc::new(FailingExecutor { wrong_result }));
+
+        let error = if scan_first {
+            snapshot
+                .clone()
+                .scan_builder()
+                .build()
+                .unwrap()
+                .declarative_metadata_scan_plan(&engine)
+                .unwrap_err()
+        } else {
+            snapshot.reader().get_checkpoint_info(&engine).unwrap_err()
+        };
+
+        let message = error.to_string();
+        assert!(message.contains(operation), "{message}");
+        assert_eq!(message.matches(location.as_str()).count(), 1, "{message}");
+        assert!(
+            message.contains(snapshot.table_root().as_str()),
+            "{message}"
+        );
+        if !scan_first {
+            assert!(
+                message.contains(&format!("snapshot {}", snapshot.version())),
+                "{message}"
+            );
+        }
+        if wrong_result {
+            assert!(
+                matches!(
+                    kernel_cause(&error),
+                    KernelError::PlanResultTypeMismatch { .. }
+                ),
+                "{error}"
+            );
+        } else {
+            assert!(
+                matches!(kernel_cause(&error), KernelError::FileNotFound(message) if message == "injected read failure"),
+                "{error}"
+            );
+        }
+        assert!(snapshot.cached_checkpoint_info().is_none());
+    }
+
     #[test]
     fn checkpoint_info_tracks_checkpoint_selected_by_builder_from() -> Result<()> {
         // Given: resolved checkpoint metadata for an older table version.
@@ -1279,6 +1484,20 @@ mod tests {
 
         // Then: resolution reports the specific metadata error.
         assert!(error.to_string().contains(expected_error), "{error}");
+        assert!(
+            error.to_string().contains(root.location.location.as_str()),
+            "{error}"
+        );
+        if !duplicate {
+            assert!(
+                error.to_string().contains(&format!(
+                    "expected {}, found {}",
+                    root.version,
+                    root.version + 1
+                )),
+                "{error}"
+            );
+        }
         assert_eq!(exec.query_scans.get(), 1);
     }
 
@@ -1324,11 +1543,12 @@ mod tests {
             };
 
             // Then: the specific error is returned before I/O and no result is cached.
+            let cause = kernel_cause(&error);
             if sidecar_bytes < 0 {
-                assert!(matches!(error, KernelError::Generic(_)), "{error}");
+                assert!(matches!(cause, KernelError::Generic(_)), "{error}");
             } else {
                 assert!(
-                    matches!(error, KernelError::InvalidCheckpoint(_)),
+                    matches!(cause, KernelError::InvalidCheckpoint(_)),
                     "{error}"
                 );
             }
@@ -1577,7 +1797,42 @@ mod tests {
         };
 
         // Then: the partial result is discarded, so the getter can retry the complete read.
-        assert!(error.to_string().contains("injected batch failure"));
+        let message = error.to_string();
+        assert!(message.contains("injected batch failure"), "{message}");
+        assert!(
+            message.contains(snapshot.table_root().as_str()),
+            "{message}"
+        );
+        if !scan_first {
+            assert!(
+                message.contains(&format!("snapshot {}", snapshot.version())),
+                "{message}"
+            );
+        }
+        assert!(
+            message.contains("Failed to read checkpoint manifest"),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                snapshot.log_segment().listed.checkpoint_parts[0]
+                    .location
+                    .location
+                    .as_str()
+            ),
+            "{message}"
+        );
+        if !scan_first {
+            assert!(
+                message.contains("Reading checkpoint information"),
+                "{message}"
+            );
+        }
+        let cause = kernel_cause(&error);
+        assert!(
+            matches!(cause, KernelError::Generic(message) if message == "injected batch failure"),
+            "{cause}"
+        );
         assert_eq!(exec.batches_read.get(), 3);
         assert!(snapshot.cached_checkpoint_info().is_none());
         // When: a second getter retries discovery.
@@ -1596,6 +1851,16 @@ mod tests {
         let cached = resolve_checkpoint_info(&snapshot, &engine);
         assert!(Arc::ptr_eq(&info, &cached));
         assert_eq!(exec.query_scans.get(), 2);
+    }
+
+    fn kernel_cause(error: &KernelError) -> &KernelError {
+        let error = error.without_backtrace();
+        match error {
+            KernelError::GenericError { source, .. } => source
+                .downcast_ref::<KernelError>()
+                .map_or(error, kernel_cause),
+            _ => error,
+        }
     }
 
     fn resolve_checkpoint_info(snapshot: &Snapshot, engine: &dyn Engine) -> Arc<CheckpointShape> {
