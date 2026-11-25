@@ -4,14 +4,14 @@
 //! commits `(X, Y]`. Per the incremental equation `Crc[X] + CrcDelta = Crc[Y]`, that
 //! delta is applied to a stale base via [`CrcWithProvenance::apply`].
 //!
-//! The base `Crc[X]` itself can also be built here: [`LogSegment::build_crc_from_checkpoint`]
-//! reads a checkpoint into a Complete CRC, and [`LogSegment::build_crc_from_version_zero`] builds
-//! one from a full reverse replay when there is neither a CRC nor a checkpoint to root at.
+//! The base `Crc[X]` itself can also be built here: [`LogSegment::build_crc_delta_from_checkpoint`]
+//! reads checkpoint state for CRC construction, and [`LogSegment::build_crc_from_version_zero`]
+//! builds one from a full reverse replay when there is neither a CRC nor a checkpoint to root at.
 //
 // TODO(#2615): support log compaction files.
 
 use std::collections::hash_map::Entry;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use tracing::{instrument, warn};
 
@@ -162,23 +162,23 @@ impl LogSegment {
         Ok(base_crc.apply(delta, self.end_version))
     }
 
-    /// Build a Complete base [`CrcWithProvenance`] at `checkpoint_version` from this segment's
-    /// checkpoint files. The tail commits are folded in separately by the caller as a
-    /// [`CrcDelta`], so this reads only the checkpoint. Returns `None` when the segment has no
-    /// checkpoint, or if protocol or metadata could not be recovered from it.
+    /// Reconstruct the full checkpoint state as a delta ready for CRC construction.
+    /// The tail commits are folded in separately by the caller, so this reads only the checkpoint.
+    /// Returns `None` when the segment has no checkpoint, or if protocol or metadata could not
+    /// be recovered from it.
     ///
     /// File stats sum the checkpoint's AddFile actions (a reconciled checkpoint holds only live
     /// files). Domain metadata and set transactions are
     /// [`Complete`](DomainMetadataState::Complete) since a checkpoint is authoritative.
-    /// `in_commit_timestamp_opt` is left `None`: a checkpoint carries no `commitInfo`, so the
-    /// caller sets the ICT on the returned CRC afterward.
-    pub(crate) fn build_crc_from_checkpoint(
+    /// Commit-only fields are absent. When this checkpoint is the snapshot's version, the caller
+    /// supplies those fields on the delta before constructing the CRC.
+    pub(crate) fn build_crc_delta_from_checkpoint(
         &self,
         engine: &dyn Engine,
-    ) -> KernelResult<Option<CrcWithProvenance>> {
-        let Some(version) = self.checkpoint_version else {
+    ) -> KernelResult<Option<CrcDelta>> {
+        if self.checkpoint_version.is_none() {
             return Ok(None);
-        };
+        }
         // The checkpoint covers the full table, so `into_complete_crc` produces a Complete CRC.
         // Invalid Add sizes mark replay unsafe and degrade its file stats to `Indeterminate`.
         let mut acc = CrcReplayAccumulator::new(Some(FileSizeHistogram::create_default()));
@@ -192,10 +192,8 @@ impl LogSegment {
             visitor.visit_rows_of(batch.actions())?;
         }
         acc.process_commit_file_end();
-        Ok(acc
-            .into_crc_delta()
-            .into_complete_crc(version)
-            .map(|crc| CrcWithProvenance::from_full_replay(Arc::new(crc))))
+        let delta = acc.into_crc_delta();
+        Ok((delta.protocol.is_some() && delta.metadata.is_some()).then_some(delta))
     }
 
     /// Build a Complete [`CrcWithProvenance`] at `end_version` by reverse-replaying every commit in
@@ -225,9 +223,7 @@ impl LogSegment {
             self.listed.ascending_commit_files.iter(),
             Some(FileSizeHistogram::create_default()),
         )?;
-        Ok(delta
-            .into_complete_crc(self.end_version)
-            .map(|crc| CrcWithProvenance::from_full_replay(Arc::new(crc))))
+        Ok(CrcWithProvenance::from_full_replay(delta, self.end_version))
     }
 
     /// Build a `CrcDelta` covering commits `(base_version, self.end_version]` via reverse

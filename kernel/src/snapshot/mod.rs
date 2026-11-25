@@ -1818,25 +1818,22 @@ impl Snapshot {
                 // A checkpoint carries no ICT or lastManifestCommit (it has no commitInfo). Since
                 // there's no tail delta to carry them either, read them from the commit at the
                 // checkpoint version. adaptiveMetadata requires ICT, so one read yields both.
-                let crc = log_segment
-                    .build_crc_from_checkpoint(engine)?
+                let mut delta = log_segment
+                    .build_crc_delta_from_checkpoint(engine)?
                     .ok_or_else(|| unresolved_crc("checkpoint is missing protocol or metadata"))?;
                 #[cfg(feature = "adaptive-metadata-in-dev")]
-                if self
-                    .table_configuration()
-                    .is_feature_enabled(&TableFeature::AdaptiveMetadataPreview)
-                {
+                if self.has_adaptive_metadata() {
                     let (in_commit_timestamp, last_manifest_commit) =
                         self.read_ict_and_last_manifest_commit(engine)?;
-                    return Ok(
-                        crc.with_commit_info(Some(in_commit_timestamp), last_manifest_commit)
-                    );
+                    delta.in_commit_timestamp = Some(in_commit_timestamp);
+                    delta.last_manifest_commit = last_manifest_commit;
+                    return CrcWithProvenance::from_full_replay(delta, end).ok_or_else(|| {
+                        unresolved_crc("checkpoint is missing protocol or metadata")
+                    });
                 }
-                return Ok(crc.with_commit_info(
-                    self.get_in_commit_timestamp(engine)?,
-                    #[cfg(feature = "adaptive-metadata-in-dev")]
-                    None,
-                ));
+                delta.in_commit_timestamp = self.get_in_commit_timestamp(engine)?;
+                return CrcWithProvenance::from_full_replay(delta, end)
+                    .ok_or_else(|| unresolved_crc("checkpoint is missing protocol or metadata"));
             }
             // Replay the tail commits first: a non-incremental tail dooms file stats no matter
             // what the checkpoint holds, so skip the larger checkpoint read in that case.
@@ -1853,7 +1850,8 @@ impl Snapshot {
                 })
             );
             let base = log_segment
-                .build_crc_from_checkpoint(engine)?
+                .build_crc_delta_from_checkpoint(engine)?
+                .and_then(|delta| CrcWithProvenance::from_full_replay(delta, checkpoint_version))
                 .ok_or_else(|| unresolved_crc("checkpoint is missing protocol or metadata"))?;
             // The tail delta carries v_end's ICT, which `apply` sets on the result.
             return Ok(base.apply(delta, end));

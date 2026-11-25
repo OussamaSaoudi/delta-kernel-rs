@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use super::{Crc, CrcDelta, FileStats};
 use crate::Version;
-#[cfg(feature = "adaptive-metadata-in-dev")]
-use crate::actions::LastManifestCommit;
 
 /// How an individual CRC was obtained. Replay retains only its original source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +24,17 @@ pub(crate) enum CrcProvenance {
 }
 
 impl CrcProvenance {
+    fn on_disk_version(&self) -> Option<Version> {
+        match self {
+            Self::File { version } => Some(*version),
+            Self::SnapshotHint {
+                on_disk_version, ..
+            } => *on_disk_version,
+            Self::Replayed { base } => base.on_disk_version(),
+            Self::FullReplay { .. } | Self::CreateTable => None,
+        }
+    }
+
     fn replayed(self) -> Self {
         match self {
             already_replayed @ Self::Replayed { .. } => already_replayed,
@@ -63,13 +72,11 @@ impl CrcWithProvenance {
     }
 
     /// Records a CRC reconstructed from checkpoint actions or the full commit history.
-    pub(crate) fn from_full_replay(crc: Arc<Crc>) -> Self {
-        Self {
-            provenance: CrcProvenance::FullReplay {
-                version: crc.version,
-            },
-            crc,
-        }
+    pub(crate) fn from_full_replay(delta: CrcDelta, version: Version) -> Option<Self> {
+        Some(Self {
+            crc: Arc::new(delta.into_complete_crc(version)?),
+            provenance: CrcProvenance::FullReplay { version },
+        })
     }
 
     /// Records the hint's CRC version and its validated checksum-file ancestry, when supplied.
@@ -103,17 +110,7 @@ impl CrcWithProvenance {
 
     /// The original checksum-file version, when the CRC has known file ancestry.
     pub(crate) fn on_disk_version(&self) -> Option<Version> {
-        let origin = match self.provenance() {
-            CrcProvenance::Replayed { base } => base.as_ref(),
-            origin => origin,
-        };
-        match origin {
-            CrcProvenance::File { version } => Some(*version),
-            CrcProvenance::SnapshotHint {
-                on_disk_version, ..
-            } => *on_disk_version,
-            _ => None,
-        }
+        self.provenance().on_disk_version()
     }
 
     /// Replaces the payload with replay's result without adding another provenance level.
@@ -122,23 +119,6 @@ impl CrcWithProvenance {
             crc,
             provenance: self.provenance.clone().replayed(),
         }
-    }
-
-    /// Fills commit-only fields that checkpoint reconstruction cannot provide.
-    pub(crate) fn with_commit_info(
-        mut self,
-        in_commit_timestamp: Option<i64>,
-        #[cfg(feature = "adaptive-metadata-in-dev")] last_manifest_commit: Option<
-            LastManifestCommit,
-        >,
-    ) -> Self {
-        let crc = Arc::make_mut(&mut self.crc);
-        crc.in_commit_timestamp_opt = in_commit_timestamp;
-        #[cfg(feature = "adaptive-metadata-in-dev")]
-        {
-            crc.last_manifest_commit_opt = last_manifest_commit;
-        }
-        self
     }
 
     /// Applies a committed delta and retains the original source.
@@ -158,11 +138,23 @@ mod tests {
         })
     }
 
+    fn full_replay_at(version: Version) -> CrcWithProvenance {
+        CrcWithProvenance::from_full_replay(
+            CrcDelta {
+                protocol: Some(Default::default()),
+                metadata: Some(Default::default()),
+                ..Default::default()
+            },
+            version,
+        )
+        .unwrap()
+    }
+
     #[rstest::rstest]
     #[case::file(CrcWithProvenance::from_file(crc_at(10)), CrcProvenance::File { version: 10 }, Some(10))]
     #[case::hint(CrcWithProvenance::from_snapshot_hint(crc_at(10), None), CrcProvenance::SnapshotHint { version: 10, on_disk_version: None }, None)]
     #[case::hint_with_file_ancestry(CrcWithProvenance::from_snapshot_hint(crc_at(10), Some(7)), CrcProvenance::SnapshotHint { version: 10, on_disk_version: Some(7) }, Some(7))]
-    #[case::full_replay(CrcWithProvenance::from_full_replay(crc_at(10)), CrcProvenance::FullReplay { version: 10 }, None)]
+    #[case::full_replay(full_replay_at(10), CrcProvenance::FullReplay { version: 10 }, None)]
     #[case::create_table(
         CrcWithProvenance::from_create_table(crc_at(0)),
         CrcProvenance::CreateTable,
