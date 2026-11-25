@@ -2,14 +2,14 @@
 
 use url::Url;
 
-use super::{Crc, FileStatsState};
+use super::{CrcWithProvenance, FileStatsState};
 use crate::table_properties::ENABLE_IN_COMMIT_TIMESTAMPS;
 use crate::utils::require;
 use crate::{Engine, KernelError, KernelResult};
 
 /// Serialize and write a CRC file to storage.
 ///
-/// Serializes the [`Crc`] to JSON via serde and writes the raw bytes using the storage
+/// Serializes the [`Crc`](super::Crc) to JSON via serde and writes the raw bytes using the storage
 /// handler. Returns the serialized byte count on success. Returns
 /// [`KernelError::ChecksumWriteUnsupported`] if:
 /// - `file_stats_state` is not `Complete` (only `Complete` CRCs have a well-defined on-disk
@@ -19,7 +19,12 @@ use crate::{Engine, KernelError, KernelResult};
 /// Per the Delta protocol, writers MUST NOT overwrite existing CRC files, so this always
 /// writes with `overwrite = false`. If the file already exists, returns
 /// `Err(KernelError::FileAlreadyExists)`.
-pub(crate) fn try_write_crc_file(engine: &dyn Engine, path: &Url, crc: &Crc) -> KernelResult<u64> {
+pub(crate) fn try_write_crc_file(
+    engine: &dyn Engine,
+    path: &Url,
+    crc: &CrcWithProvenance,
+) -> KernelResult<u64> {
+    let crc = crc.crc().as_ref();
     require!(
         crc.file_stats_state.is_complete(),
         KernelError::ChecksumWriteUnsupported(match &crc.file_stats_state {
@@ -55,6 +60,7 @@ pub(crate) fn try_write_crc_file(engine: &dyn Engine, path: &Url, crc: &Crc) -> 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use rstest::rstest;
 
@@ -62,7 +68,7 @@ mod tests {
     use crate::actions::{DomainMetadata, Metadata, Protocol, SetTransaction};
     use crate::crc::reader::try_read_crc_file;
     use crate::crc::{
-        DomainMetadataState, FileSizeHistogram, FileStats, FileStatsState, SetTransactionState,
+        Crc, DomainMetadataState, FileSizeHistogram, FileStats, FileStatsState, SetTransactionState,
     };
     use crate::engine::sync::SyncEngine;
     use crate::path::{AsUrl, ParsedLogPath};
@@ -145,11 +151,16 @@ mod tests {
         let mut crc = test_crc(/* ict_supported */ true, /* ict_enabled */ true);
         crc.version = version;
 
-        try_write_crc_file(&engine, crc_path.location.as_url(), &crc).unwrap();
+        try_write_crc_file(
+            &engine,
+            crc_path.location.as_url(),
+            &CrcWithProvenance::from_snapshot_hint(Arc::new(crc.clone()), None),
+        )
+        .unwrap();
 
         let read_back = try_read_crc_file(&engine, &crc_path).unwrap();
-        assert_eq!(read_back, crc);
-        assert_eq!(read_back.version, version);
+        assert_eq!(read_back.crc().as_ref(), &crc);
+        assert_eq!(read_back.version(), version);
     }
 
     /// Verify JSON content produced by CRC serialization via serde_json::Value comparison.
@@ -233,10 +244,19 @@ mod tests {
         let (engine, crc_path) = writer_test_env(0);
         let crc = test_crc(/* ict_supported */ true, /* ict_enabled */ true);
 
-        try_write_crc_file(&engine, crc_path.location.as_url(), &crc).unwrap();
+        try_write_crc_file(
+            &engine,
+            crc_path.location.as_url(),
+            &CrcWithProvenance::from_snapshot_hint(Arc::new(crc.clone()), None),
+        )
+        .unwrap();
 
         // Second write should fail (never overwrites)
-        let result = try_write_crc_file(&engine, crc_path.location.as_url(), &crc);
+        let result = try_write_crc_file(
+            &engine,
+            crc_path.location.as_url(),
+            &CrcWithProvenance::from_snapshot_hint(Arc::new(crc.clone()), None),
+        );
         assert!(matches!(result, Err(KernelError::FileAlreadyExists(_))));
     }
 
@@ -249,7 +269,11 @@ mod tests {
         crc.file_stats_state = FileStatsState::Indeterminate {
             unsupported_operation: unsupported_operation.map(str::to_owned),
         };
-        let result = try_write_crc_file(&engine, crc_path.location.as_url(), &crc);
+        let result = try_write_crc_file(
+            &engine,
+            crc_path.location.as_url(),
+            &CrcWithProvenance::from_snapshot_hint(Arc::new(crc.clone()), None),
+        );
         let expected = match unsupported_operation {
             Some(operation) => {
                 format!("Cannot write CRC file incrementally: unsupported operation {operation:?}")
@@ -280,7 +304,11 @@ mod tests {
 
         // If ICT is enabled, then the ICT value must be present.
         let should_succeed = !ict_enabled || ict_value_present;
-        let result = try_write_crc_file(&engine, crc_path.location.as_url(), &crc);
+        let result = try_write_crc_file(
+            &engine,
+            crc_path.location.as_url(),
+            &CrcWithProvenance::from_snapshot_hint(Arc::new(crc.clone()), None),
+        );
         if should_succeed {
             result.unwrap();
         } else {
@@ -301,6 +329,11 @@ mod tests {
             .with_configuration_entry(ENABLE_IN_COMMIT_TIMESTAMPS, "True");
         crc.in_commit_timestamp_opt = None;
 
-        try_write_crc_file(&engine, crc_path.location.as_url(), &crc).unwrap();
+        try_write_crc_file(
+            &engine,
+            crc_path.location.as_url(),
+            &CrcWithProvenance::from_snapshot_hint(Arc::new(crc.clone()), None),
+        )
+        .unwrap();
     }
 }

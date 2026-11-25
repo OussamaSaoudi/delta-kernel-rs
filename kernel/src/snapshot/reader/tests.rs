@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rstest::rstest;
 
 use super::super::snapshot_crc::SnapshotCrc;
-use crate::crc::{DomainMetadataState, SetTransactionState};
+use crate::crc::{CrcWithProvenance, DomainMetadataState, SetTransactionState};
 use crate::engine::CancellableEngine;
 use crate::engine::sync::SyncEngine;
 use crate::metrics::MetricEvent;
@@ -97,8 +97,12 @@ fn reader_crc_cache_respects_completeness(
         };
         crc.domain_metadata_state = DomainMetadataState::Partial(domains);
         crc.set_transaction_state = SetTransactionState::Partial(transactions);
-        Arc::get_mut(&mut snapshot).unwrap().crc =
-            SnapshotCrc::try_new(Some(Arc::new(crc)).into(), 0, None).unwrap();
+        Arc::get_mut(&mut snapshot).unwrap().crc = SnapshotCrc::try_new(
+            CrcWithProvenance::from_snapshot_hint(Arc::new(crc), None),
+            0,
+            None,
+        )
+        .unwrap();
     }
     let reader = snapshot.reader().with_cancellation_token(Arc::new(
         TestCancellationToken::cancelled(),

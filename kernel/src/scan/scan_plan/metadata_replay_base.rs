@@ -58,7 +58,7 @@ mod tests {
 
     use super::*;
     use crate::Result;
-    use crate::crc::Crc;
+    use crate::crc::{Crc, CrcWithProvenance};
     use crate::engine::DelegatingEngine;
     use crate::engine::arrow_data::EngineDataArrowExt as _;
     use crate::plans::Operation as PlanOperation;
@@ -94,7 +94,13 @@ mod tests {
         let segment = snapshot.log_segment().clone();
         let config = snapshot.table_configuration().clone();
         let crc = Some(crc);
-        let snapshot = Arc::new(Snapshot::new_with_crc(segment, config, crc, false, false)?);
+        let snapshot = Arc::new(Snapshot::new_with_crc(
+            segment,
+            config,
+            crc.map(|crc| CrcWithProvenance::from_snapshot_hint(crc, None)),
+            false,
+            false,
+        )?);
         let scan = snapshot.scan_builder().build()?;
         let base = MetadataReplayBase::try_new(&scan.snapshot, &engine)?;
         assert_eq!(base.version(), Some(version));
@@ -140,7 +146,13 @@ mod tests {
         let paths: Vec<_> = commits.iter().map(String::as_str).collect();
         let segment = log_segment(log_root, &paths, None);
         let config = target.table_configuration().clone();
-        let snapshot = Arc::new(Snapshot::new_with_crc(segment, config, crc, false, false)?);
+        let snapshot = Arc::new(Snapshot::new_with_crc(
+            segment,
+            config,
+            crc.map(|crc| CrcWithProvenance::from_snapshot_hint(crc, None)),
+            false,
+            false,
+        )?);
         let scan = snapshot.scan_builder().build()?;
         let plan = scan.declarative_metadata_scan_plan(
             &DelegatingEngine::new(engine.clone()).without_plan_executor(),

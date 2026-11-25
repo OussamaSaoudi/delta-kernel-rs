@@ -212,7 +212,7 @@ mod tests {
     use crate::arrow::array::{AsArray as _, StringArray, StructArray};
     use crate::checkpoint::CheckpointKind;
     use crate::checkpoint::collation_stats::source_collation_stats;
-    use crate::crc::Crc;
+    use crate::crc::{Crc, CrcWithProvenance};
     use crate::engine::arrow_data::EngineDataArrowExt as _;
     use crate::engine::arrow_utils::parse_json_impl;
     use crate::engine::sync::SyncEngine;
@@ -761,9 +761,15 @@ mod tests {
                 ..Default::default()
             })
         });
-        let scan = Arc::new(Snapshot::new_with_crc(segment, config, crc, false, false)?)
-            .scan_builder()
-            .build()?;
+        let scan = Arc::new(Snapshot::new_with_crc(
+            segment,
+            config,
+            crc.map(|crc| CrcWithProvenance::from_snapshot_hint(crc, None)),
+            false,
+            false,
+        )?)
+        .scan_builder()
+        .build()?;
         let plan = scan
             .declarative_metadata_scan_plan(&engine)?
             .expect("non-empty");

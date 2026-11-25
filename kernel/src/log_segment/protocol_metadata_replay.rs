@@ -26,7 +26,7 @@ use crate::actions::{CHECKPOINT_ACTION_NAME, COMMIT_INFO_NAME};
 use crate::actions::{METADATA_FIELD, Metadata, PROTOCOL_FIELD, Protocol};
 #[cfg(feature = "declarative-plans")]
 use crate::actions::{METADATA_NAME, PROTOCOL_NAME};
-use crate::crc::Crc;
+use crate::crc::{Crc, CrcWithProvenance};
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
 use crate::expressions::{Expression, lit};
@@ -66,8 +66,9 @@ impl LogSegment {
     pub(crate) fn read_protocol_metadata_opt(
         &self,
         engine: &dyn Engine,
-        crc: Option<&Arc<Crc>>,
+        crc: Option<&CrcWithProvenance>,
     ) -> KernelResult<PmResolution> {
+        let crc = crc.map(|crc| crc.crc());
         // Case 1: If CRC at target version, use it directly and exit early.
         if let Some(crc) = crc.filter(|c| c.version == self.end_version) {
             info!("P&M from CRC at target version {}", self.end_version);

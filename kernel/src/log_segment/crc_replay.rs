@@ -2,7 +2,7 @@
 //!
 //! Reverse-replays a log segment's commit files to produce a [`CrcDelta`] covering
 //! commits `(X, Y]`. Per the incremental equation `Crc[X] + CrcDelta = Crc[Y]`, that
-//! delta is applied to a stale base via [`Crc::apply`].
+//! delta is applied to a stale base via [`CrcWithProvenance::apply`].
 //!
 //! The base `Crc[X]` itself can also be built here: [`LogSegment::build_crc_from_checkpoint`]
 //! reads a checkpoint into a Complete CRC, and [`LogSegment::build_crc_from_version_zero`] builds
@@ -28,7 +28,7 @@ use crate::actions::{
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::actions::{LAST_MANIFEST_COMMIT_FIELD, LastManifestCommit};
 use crate::crc::{
-    Crc, CrcDelta, CrcWrapper, FileSizeHistogram, FileStatsDelta, FileStatsPolicy,
+    CrcDelta, CrcWithProvenance, FileSizeHistogram, FileStatsDelta, FileStatsPolicy,
     read_crc_file_or_none, size_to_u64,
 };
 use crate::engine_data::{GetData, TypedGetData as _};
@@ -78,23 +78,19 @@ impl LogSegment {
     /// Try to build the CRC at this segment's `end_version` from the caller's resolved CRC state.
     /// Returns the resulting in-memory CRC and its protocol/metadata source without changing the
     /// base. Handles three cases:
-    /// - Case 1: no base CRC available -> return None
-    /// - Case 2: base CRC at `end_version` -> return it as-is
-    /// - Case 3: stale base CRC older than `end_version` -> advance it to `end_version` when
+    /// - Case 1: base CRC at `end_version` -> return it as-is
+    /// - Case 2: stale base CRC older than `end_version` -> advance it to `end_version` when
     ///   `incremental_replay` permits, else fall back to normal log replay (return None)
     pub(crate) fn try_build_crc_within_budget(
         &self,
         engine: &dyn Engine,
-        base: Option<&Arc<Crc>>,
+        base: &CrcWithProvenance,
         incremental_replay: IncrementalReplay,
-    ) -> KernelResult<Option<(Arc<Crc>, ProtocolMetadataSource)>> {
-        let Some(base) = base else {
-            return Ok(None);
-        };
-        if base.version == self.end_version {
+    ) -> KernelResult<Option<(CrcWithProvenance, ProtocolMetadataSource)>> {
+        if base.version() == self.end_version {
             return Ok(Some((base.clone(), ProtocolMetadataSource::CrcAtTarget)));
         }
-        if !incremental_replay.should_advance(base.version, self.end_version)? {
+        if !incremental_replay.should_advance(base.version(), self.end_version)? {
             return Ok(None);
         }
         // TODO(#3421): Classify required-commit gaps and replay-file failures during CRC
@@ -102,7 +98,7 @@ impl LogSegment {
         // original error sources.
         let advanced = self.build_crc_from_base(engine, base)?;
         Ok(Some((
-            Arc::new(advanced),
+            advanced,
             ProtocolMetadataSource::CrcAdvancedByReplay,
         )))
     }
@@ -113,44 +109,37 @@ impl LogSegment {
     pub(crate) fn pick_latest_base_crc(
         &self,
         engine: &dyn Engine,
-        in_memory_base: &CrcWrapper,
-    ) -> KernelResult<CrcWrapper> {
+        in_memory_base: Option<&CrcWithProvenance>,
+    ) -> KernelResult<Option<CrcWithProvenance>> {
         let latest_file = self.listed.latest_crc_file.as_ref();
         let selected = match latest_file {
-            Some(file)
-                if in_memory_base
-                    .as_ref()
-                    .is_none_or(|crc| file.version > crc.version) =>
-            {
-                read_crc_file_or_none(engine, file)?.map(CrcWrapper::from_file)
+            Some(file) if in_memory_base.is_none_or(|crc| file.version > crc.version()) => {
+                read_crc_file_or_none(engine, file)?
             }
             _ => None,
         }
-        .unwrap_or_else(|| in_memory_base.clone());
-
-        if selected.as_ref().is_some_and(|crc| {
+        .or_else(|| in_memory_base.cloned())
+        .filter(|crc| {
             self.checkpoint_version
-                .is_none_or(|checkpoint| crc.version >= checkpoint)
-        }) {
-            return Ok(selected);
-        }
-        Ok(if latest_file.is_some() {
-            CrcWrapper::Unusable
-        } else {
-            CrcWrapper::Missing
-        })
+                .is_none_or(|checkpoint| crc.version() >= checkpoint)
+        });
+
+        Ok(selected)
     }
 
     /// Read this segment's latest on-disk CRC (`latest_crc_file`), at whatever version it sits.
-    /// Records `Missing` or `Unusable` when no CRC is resolved. The CRC may be older than
-    /// `end_version`; snapshot construction classifies it for the target version.
-    pub(crate) fn read_latest_crc(&self, engine: &dyn Engine) -> KernelResult<CrcWrapper> {
-        self.pick_latest_base_crc(engine, &CrcWrapper::Unknown)
+    /// Returns no CRC when the candidate is missing or unusable. The CRC may be older than
+    /// `end_version`; snapshot construction classifies the result for the target version.
+    pub(crate) fn read_latest_crc(
+        &self,
+        engine: &dyn Engine,
+    ) -> KernelResult<Option<CrcWithProvenance>> {
+        self.pick_latest_base_crc(engine, None)
     }
 
     /// Produce a fresh `Crc` at `self.end_version` by reverse-replaying the commits in
     /// `(base_crc.version, self.end_version]` and applying the resulting delta to
-    /// `base_crc` via [`Crc::apply`].
+    /// `base_crc` via [`CrcWithProvenance::apply`].
     #[instrument(
         name = "log_seg.build_crc_from_base",
         skip_all,
@@ -160,8 +149,8 @@ impl LogSegment {
     pub(crate) fn build_crc_from_base(
         &self,
         engine: &dyn Engine,
-        base_crc: &Crc,
-    ) -> KernelResult<Crc> {
+        base_crc: &CrcWithProvenance,
+    ) -> KernelResult<CrcWithProvenance> {
         let seed_histogram = base_crc
             .file_stats()
             .and_then(|s| s.file_size_histogram())
@@ -169,14 +158,14 @@ impl LogSegment {
                 FileSizeHistogram::create_empty_with_boundaries(h.sorted_bin_boundaries().to_vec())
             })
             .transpose()?;
-        let delta = self.build_crc_delta_from_base(engine, base_crc.version, seed_histogram)?;
-        Ok(base_crc.clone().apply(delta, self.end_version))
+        let delta = self.build_crc_delta_from_base(engine, base_crc.version(), seed_histogram)?;
+        Ok(base_crc.apply(delta, self.end_version))
     }
 
-    /// Build a Complete base [`Crc`] at `checkpoint_version` from this segment's checkpoint files.
-    /// The tail commits are folded in separately by the caller as a [`CrcDelta`], so this reads
-    /// only the checkpoint. Returns `None` when the segment has no checkpoint, or if protocol or
-    /// metadata could not be recovered from it.
+    /// Build a Complete base [`CrcWithProvenance`] at `checkpoint_version` from this segment's
+    /// checkpoint files. The tail commits are folded in separately by the caller as a
+    /// [`CrcDelta`], so this reads only the checkpoint. Returns `None` when the segment has no
+    /// checkpoint, or if protocol or metadata could not be recovered from it.
     ///
     /// File stats sum the checkpoint's AddFile actions (a reconciled checkpoint holds only live
     /// files). Domain metadata and set transactions are
@@ -186,7 +175,7 @@ impl LogSegment {
     pub(crate) fn build_crc_from_checkpoint(
         &self,
         engine: &dyn Engine,
-    ) -> KernelResult<Option<Crc>> {
+    ) -> KernelResult<Option<CrcWithProvenance>> {
         let Some(version) = self.checkpoint_version else {
             return Ok(None);
         };
@@ -203,19 +192,22 @@ impl LogSegment {
             visitor.visit_rows_of(batch.actions())?;
         }
         acc.process_commit_file_end();
-        Ok(acc.into_crc_delta().into_complete_crc(version))
+        Ok(acc
+            .into_crc_delta()
+            .into_complete_crc(version)
+            .map(|crc| CrcWithProvenance::from_full_replay(Arc::new(crc))))
     }
 
-    /// Build a Complete [`Crc`] at `end_version` by reverse-replaying every commit in the segment,
-    /// for a segment with no CRC and no checkpoint to root at. The commits must run contiguously
-    /// from version 0.
+    /// Build a Complete [`CrcWithProvenance`] at `end_version` by reverse-replaying every commit in
+    /// the segment, for a segment with no CRC and no checkpoint to root at. The commits must
+    /// run contiguously from version 0.
     ///
     /// Returns `None` if protocol or metadata could not be recovered. File stats degrade to
     /// [`Indeterminate`](FileStatsState::Indeterminate) if the replay is not incremental-safe.
     pub(crate) fn build_crc_from_version_zero(
         &self,
         engine: &dyn Engine,
-    ) -> KernelResult<Option<Crc>> {
+    ) -> KernelResult<Option<CrcWithProvenance>> {
         require!(
             self.checkpoint_version.is_none(),
             KernelError::internal_error(
@@ -233,7 +225,9 @@ impl LogSegment {
             self.listed.ascending_commit_files.iter(),
             Some(FileSizeHistogram::create_default()),
         )?;
-        Ok(delta.into_complete_crc(self.end_version))
+        Ok(delta
+            .into_complete_crc(self.end_version)
+            .map(|crc| CrcWithProvenance::from_full_replay(Arc::new(crc))))
     }
 
     /// Build a `CrcDelta` covering commits `(base_version, self.end_version]` via reverse
@@ -487,9 +481,9 @@ impl CrcReplayAccumulator {
 
     fn on_add(&mut self, size: i64) -> KernelResult<()> {
         self.current_commit_saw_file_action = true;
-        // Once the delta is no longer incremental-safe, [`Crc::apply`] will transition the
-        // file-stats state to `Indeterminate` and discard the accumulated file stats and
-        // histogram. Stop accumulating; further math is wasted work.
+        // Once the delta is no longer incremental-safe, [`CrcWithProvenance::apply`] will
+        // transition the file-stats state to `Indeterminate` and discard the accumulated
+        // file stats and histogram. Stop accumulating; further math is wasted work.
         if !self.delta.is_incremental_safe {
             return Ok(());
         }
@@ -512,9 +506,9 @@ impl CrcReplayAccumulator {
     /// A missing size makes counted removes unsafe; excluded DV tombstones need no size.
     fn on_remove(&mut self, path: &str, size: Option<i64>) -> KernelResult<()> {
         self.current_commit_saw_file_action = true;
-        // Once the delta is no longer incremental-safe, [`Crc::apply`] will transition the
-        // file-stats state to `Indeterminate` and discard the accumulated file stats and
-        // histogram. Stop accumulating; further math is wasted work.
+        // Once the delta is no longer incremental-safe, [`CrcWithProvenance::apply`] will
+        // transition the file-stats state to `Indeterminate` and discard the accumulated
+        // file stats and histogram. Stop accumulating; further math is wasted work.
         if !self.delta.is_incremental_safe {
             return Ok(());
         }
@@ -541,8 +535,8 @@ impl CrcReplayAccumulator {
         Ok(())
     }
 
-    /// Tombstones (`removed=true`) are kept in the delta; [`Crc::apply`] consumes them as
-    /// removals from the base map.
+    /// Tombstones (`removed=true`) are kept in the delta; [`CrcWithProvenance::apply`] consumes
+    /// them as removals from the base map.
     fn on_domain_metadata(&mut self, domain: String, configuration: String, removed: bool) {
         if let Entry::Vacant(e) = self.delta.domain_metadata.entry(domain.clone()) {
             let dm = if removed {
@@ -771,10 +765,10 @@ impl RowVisitor for CommitCrcVisitor<'_> {
 // Checkpoint base construction
 // ============================================================================
 
-/// Action schema for reading a checkpoint into a base [`Crc`], projecting only the leaves the
-/// accumulator needs. `add.size` is the only Add leaf read, and it is required, so its presence
-/// marks an Add row (a checkpoint Add missing `size` errors at read time). A checkpoint has no
-/// `remove` or `commitInfo` to project.
+/// Action schema for reading a checkpoint into a base [`CrcWithProvenance`], projecting only the
+/// leaves the accumulator needs. `add.size` is the only Add leaf read, and it is required, so its
+/// presence marks an Add row (a checkpoint Add missing `size` errors at read time). A checkpoint
+/// has no `remove` or `commitInfo` to project.
 static CHECKPOINT_CRC_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
     nullable ADD_NAME: { not_null "size": LONG },
     (&PROTOCOL_FIELD),
@@ -818,7 +812,7 @@ mod tests {
     use test_utils::{LoggingTest, add_commit, assert_result_error_with_message};
 
     use super::*;
-    use crate::crc::{DomainMetadataState, FileStats, FileStatsState, SetTransactionState};
+    use crate::crc::{Crc, DomainMetadataState, FileStats, FileStatsState, SetTransactionState};
     use crate::engine::sync::SyncEngine;
     use crate::object_store::memory::InMemory;
     use crate::table_features::TableFeature;
@@ -1384,7 +1378,9 @@ mod tests {
             set_transaction_state: SetTransactionState::Complete(HashMap::new()),
             ..Default::default()
         };
+        let base = CrcWithProvenance::from_snapshot_hint(Arc::new(base), None);
         let crc = segment.build_crc_from_base(&engine, &base).unwrap();
+        let crc = crc.crc();
 
         // Newest-wins: v2's upgraded protocol (now carries `rowTracking` on top of v0's
         // features), v2's metadata, v2's ICT.

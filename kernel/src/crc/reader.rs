@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tracing::instrument;
 
-use super::Crc;
+use super::{Crc, CrcWithProvenance};
 use crate::metrics::events::CRC_READ_COMPLETED_SPAN;
 use crate::path::{AsUrl as _, ParsedLogPath};
 use crate::{Engine, KernelError, KernelResult};
@@ -13,16 +13,16 @@ use crate::{Engine, KernelError, KernelResult};
 ///
 /// Reads raw bytes via the storage handler and deserializes with serde_json.
 ///
-/// Returns `Ok(Crc)` on success, `Err` on any failure (file not readable, corrupt JSON,
-/// missing required fields). Cancellation must propagate; other failures may fall back to log
-/// replay.
+/// Returns the CRC with file provenance on success. Read failures, corrupt JSON, or missing
+/// required fields return an error. Cancellation must propagate; other failures may fall back
+/// to log replay.
 ///
 /// Reports metrics: `CrcReadSuccess` or `CrcReadFailure`.
 #[instrument(name = CRC_READ_COMPLETED_SPAN, err(level = "warn"), skip_all, fields(report, enable_call_frame, bytes_read, path = ?crc_path.location.location))]
 pub(crate) fn try_read_crc_file(
     engine: &dyn Engine,
     crc_path: &ParsedLogPath,
-) -> KernelResult<Crc> {
+) -> KernelResult<CrcWithProvenance> {
     let storage = engine.storage_handler();
     let url = crc_path.location.as_url().clone();
     let data = storage
@@ -30,7 +30,8 @@ pub(crate) fn try_read_crc_file(
         .next()
         .ok_or_else(|| KernelError::generic("CRC file read returned no data"))??;
     tracing::Span::current().record("bytes_read", data.len() as u64);
-    Crc::try_from_json_bytes(&data, crc_path.version)
+    let crc = Crc::try_from_json_bytes(&data, crc_path.version)?;
+    Ok(CrcWithProvenance::from_file(Arc::new(crc)))
 }
 
 /// Read an optional CRC, propagating cancellation and ignoring other read failures.
@@ -40,9 +41,9 @@ pub(crate) fn try_read_crc_file(
 pub(crate) fn read_crc_file_or_none(
     engine: &dyn Engine,
     crc_file: &ParsedLogPath,
-) -> KernelResult<Option<Arc<Crc>>> {
+) -> KernelResult<Option<CrcWithProvenance>> {
     match try_read_crc_file(engine, crc_file) {
-        Ok(crc) => Ok(Some(Arc::new(crc))),
+        Ok(crc) => Ok(Some(crc)),
         Err(KernelError::Cancelled) => Err(KernelError::Cancelled),
         Err(_) => Ok(None),
     }
@@ -93,7 +94,7 @@ mod tests {
         if cancelled {
             assert!(matches!(result, Err(KernelError::Cancelled)), "{result:?}");
         } else {
-            assert_eq!(result.unwrap().map(|crc| crc.version), expected);
+            assert_eq!(result.unwrap().map(|crc| crc.version()), expected);
         }
     }
 
@@ -108,6 +109,8 @@ mod tests {
 
         // Read and parse the CRC file
         let crc = try_read_crc_file(&engine, &crc_path).unwrap();
+        assert_eq!(crc.on_disk_version(), Some(crc_path.version));
+        let crc = crc.crc();
 
         // Verify basic fields
         let stats = crc.file_stats().unwrap();

@@ -19,7 +19,7 @@ use crate::actions::{
 };
 use crate::arrow::array::StringArray;
 use crate::committer::FileSystemCommitter;
-use crate::crc::{Crc, FileStats, FileStatsState};
+use crate::crc::{Crc, CrcWithProvenance, FileStats, FileStatsState};
 #[cfg(feature = "declarative-plans")]
 use crate::engine::DelegatingEngine;
 use crate::engine::sync::SyncEngine;
@@ -271,7 +271,8 @@ async fn replay<E: Engine>(
         }
         None => latest_log_segment(&table_root, &engine),
     };
-    log_segment.read_protocol_metadata_opt(&engine, crc)
+    let crc = crc.map(|crc| CrcWithProvenance::from_snapshot_hint(crc.clone(), None));
+    log_segment.read_protocol_metadata_opt(&engine, crc.as_ref())
 }
 
 async fn assert_replay<E: Engine>(
@@ -1664,7 +1665,7 @@ async fn snapshot_with_crc_at_version_serves_last_manifest_commit_from_crc(
     let snapshot = Snapshot::new_with_crc(
         loaded.log_segment().clone(),
         loaded.table_configuration().clone(),
-        Some(Arc::new(crc)),
+        CrcWithProvenance::from_snapshot_hint(Arc::new(crc), None),
         false, /* built_as_latest */
         false, /* skipped_new_checkpoints */
     )

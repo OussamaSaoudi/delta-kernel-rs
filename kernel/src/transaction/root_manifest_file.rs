@@ -102,7 +102,7 @@ mod tests {
         LOG_DOMAIN_METADATA_SCHEMA, LOG_TXN_SCHEMA, METADATA_NAME, PROTOCOL_NAME, get_commit_schema,
     };
     use crate::committer::FileSystemCommitter;
-    use crate::crc::{Crc, DomainMetadataState, SetTransactionState};
+    use crate::crc::{Crc, CrcWithProvenance, DomainMetadataState, SetTransactionState};
     use crate::engine::sync::SyncEngine;
     use crate::schema::schema_ref;
     use crate::snapshot::Snapshot;
@@ -755,7 +755,7 @@ mod tests {
         let snapshot = Snapshot::new_with_crc(
             built.log_segment().clone(),
             built.table_configuration().clone(),
-            Some(crc),
+            CrcWithProvenance::from_snapshot_hint(crc, None),
             true,
             false,
         )?;

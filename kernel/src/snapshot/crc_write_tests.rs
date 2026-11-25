@@ -8,7 +8,7 @@ use url::Url;
 use super::snapshot_crc::SnapshotCrc;
 use super::{ChecksumWriteResult, CrcSource, IncrementalReplay, SnapshotRef};
 use crate::committer::FileSystemCommitter;
-use crate::crc::FileStatsState;
+use crate::crc::{CrcWithProvenance, FileStatsState};
 use crate::engine::DelegatingEngine;
 use crate::engine::sync::SyncEngine;
 use crate::metrics::{ChecksumWriteOutcome, ChecksumWriteResolutionMode, MetricEvent};
@@ -216,7 +216,10 @@ fn crc_write_resolution_or_validation_error_retains_mode_and_duration(
             unsupported_operation: None,
         };
         let version = snapshot.version();
-        let retained = snapshot.crc.retained().clone().map_crc(|_| Arc::new(crc));
+        let retained = CrcWithProvenance::from_snapshot_hint(
+            Arc::new(crc),
+            snapshot.crc.base().unwrap().on_disk_version(),
+        );
         Arc::get_mut(&mut snapshot).unwrap().crc = SnapshotCrc::try_new(retained, version, None)?;
     } else {
         // Corrupt the required commit after loading the snapshot so resolution itself fails.
